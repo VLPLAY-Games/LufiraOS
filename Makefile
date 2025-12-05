@@ -18,7 +18,7 @@ OS_IMAGE = build/lufiraos.img
 
 # Цели сборки
 BOOT_OBJ = boot/boot.asm
-KERNEL_OBJS = build/kernel_entry.o build/kernel.o build/keyboard.o build/shell.o build/string.o build/fs.o build/disk.o
+KERNEL_OBJS = build/kernel_entry.o build/kernel.o build/keyboard.o build/shell.o build/string.o build/fs.o build/disk.o build/speaker.o
 
 # Создание директории build
 $(shell mkdir -p build)
@@ -35,13 +35,13 @@ build/kernel_entry.o: kernel/kernel_entry.asm
 	$(ASM) $(ASM_FLAGS) $< -o $@
 
 # Компиляция ядра на C
-build/kernel.o: kernel/kernel.c kernel/keyboard.h kernel/shell.h lib/string.h
+build/kernel.o: kernel/kernel.c drivers/keyboard.h kernel/shell.h lib/string.h
 	$(CC) $(CC_FLAGS) -c kernel/kernel.c -o $@
 
-build/keyboard.o: kernel/keyboard.c kernel/keyboard.h
-	$(CC) $(CC_FLAGS) -c kernel/keyboard.c -o $@
+build/keyboard.o: drivers/keyboard.c drivers/keyboard.h
+	$(CC) $(CC_FLAGS) -c drivers/keyboard.c -o $@
 
-build/shell.o: kernel/shell.c kernel/shell.h kernel/keyboard.h lib/string.h
+build/shell.o: kernel/shell.c kernel/shell.h drivers/keyboard.h lib/string.h
 	$(CC) $(CC_FLAGS) -c kernel/shell.c -o $@
 
 build/fs.o: fs/fs.c fs/fs.h lib/string.h
@@ -49,6 +49,9 @@ build/fs.o: fs/fs.c fs/fs.h lib/string.h
 
 build/disk.o: fs/disk.c fs/disk.h
 	$(CC) $(CC_FLAGS) -c fs/disk.c -o $@
+
+build/speaker.o: drivers/speaker.c drivers/speaker.h
+	$(CC) $(CC_FLAGS) -c drivers/speaker.c -o $@
 
 # Компиляция библиотек
 build/string.o: lib/string.c lib/string.h

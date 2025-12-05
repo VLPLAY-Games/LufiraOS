@@ -1,7 +1,8 @@
 /* kernel.c - основное ядро LufiraOS */
 
 #include <stdint.h>
-#include "keyboard.h"
+#include "../drivers/keyboard.h"
+#include "../drivers/speaker.h"
 #include "shell.h"
 #include "../fs/fs.h"
 #include "../fs/disk.h"
@@ -58,6 +59,17 @@ void kernel_main(void) {
     terminal_writestring("[KBD] Initializing keyboard driver... ");
     keyboard_init();
     terminal_writestring("OK\n");
+
+    terminal_writestring("[SPK] Initializing PC Speaker... ");
+    speaker_init();
+    
+    if (speaker_is_enabled()) {
+        terminal_writestring("OK\n");
+        speaker_play_startup_melody();
+    } else {
+        terminal_writestring("DISABLED\n");
+    }
+
 
     /* Инициализация диска */
     terminal_writestring("[DSK] Initializing disk controller... ");
