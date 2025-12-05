@@ -15,6 +15,9 @@
 /* Текущий цвет терминала */
 static uint8_t terminal_color = 0x0F; /* Белый на черном */
 
+/* VGA буфер */
+static uint16_t* vga_buffer = (uint16_t*)VGA_MEMORY;
+
 /* Функция для отправки команды в порт */
 static inline void outb(uint16_t port, uint8_t value) {
     asm volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
@@ -43,7 +46,6 @@ static command_t commands[] = {
 
 /* Очистка экрана */
 void terminal_clear(void) {
-    uint16_t* vga_buffer = (uint16_t*)VGA_MEMORY;
     uint16_t blank = make_vgaentry(' ', terminal_color);
 
     for (uint32_t i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
@@ -57,15 +59,18 @@ void terminal_clear(void) {
 
 /* Поместить символ в определенную позицию */
 static void terminal_putentryat(char c, uint8_t color, uint32_t x, uint32_t y) {
-    uint16_t* vga_buffer = (uint16_t*)VGA_MEMORY;
     uint32_t index = y * VGA_WIDTH + x;
     vga_buffer[index] = make_vgaentry(c, color);
 }
 
+/* Получить символ из определенной позиции */
+static uint16_t terminal_getentryat(uint32_t x, uint32_t y) {
+    uint32_t index = y * VGA_WIDTH + x;
+    return vga_buffer[index];
+}
+
 /* Прокрутка экрана */
 static void terminal_scroll(void) {
-    uint16_t* vga_buffer = (uint16_t*)VGA_MEMORY;
-
     /* Копируем строки на одну вверх */
     for (uint32_t y = 1; y < VGA_HEIGHT; y++) {
         for (uint32_t x = 0; x < VGA_WIDTH; x++) {
@@ -77,12 +82,10 @@ static void terminal_scroll(void) {
 
     /* Очищаем последнюю строку */
     uint16_t blank = make_vgaentry(' ', terminal_color);
+    uint32_t last_line_start = (VGA_HEIGHT - 1) * VGA_WIDTH;
     for (uint32_t x = 0; x < VGA_WIDTH; x++) {
-        uint32_t index = (VGA_HEIGHT - 1) * VGA_WIDTH + x;
-        vga_buffer[index] = blank;
+        vga_buffer[last_line_start + x] = blank;
     }
-
-    if (cursor_y > 0) cursor_y--;
 }
 
 /* Обновить аппаратный курсор */
@@ -103,13 +106,32 @@ void disable_cursor(void) {
 
 /* Вывести символ */
 void terminal_putchar(char c) {
+    /* Обработка backspace */
+    if (c == '\b') {
+        if (cursor_x > 0) {
+            cursor_x--;
+        } else if (cursor_y > 0) {
+            cursor_y--;
+            cursor_x = VGA_WIDTH - 1;
+        } else {
+            /* В начале экрана, ничего не делаем */
+            return;
+        }
+        
+        /* Стираем символ на экране */
+        terminal_putentryat(' ', terminal_color, cursor_x, cursor_y);
+        update_hardware_cursor();
+        return;
+    }
+
     /* Обработка перевода строки */
     if (c == '\n') {
         cursor_x = 0;
         cursor_y++;
-
+        
         if (cursor_y >= VGA_HEIGHT) {
             terminal_scroll();
+            cursor_y = VGA_HEIGHT - 1;
         }
         update_hardware_cursor();
         return;
@@ -129,6 +151,12 @@ void terminal_putchar(char c) {
             cursor_x = 0;
             cursor_y++;
         }
+        
+        if (cursor_y >= VGA_HEIGHT) {
+            terminal_scroll();
+            cursor_y = VGA_HEIGHT - 1;
+        }
+        
         update_hardware_cursor();
         return;
     }
@@ -140,9 +168,10 @@ void terminal_putchar(char c) {
     if (cursor_x >= VGA_WIDTH) {
         cursor_x = 0;
         cursor_y++;
-
+        
         if (cursor_y >= VGA_HEIGHT) {
             terminal_scroll();
+            cursor_y = VGA_HEIGHT - 1;
         }
     }
 

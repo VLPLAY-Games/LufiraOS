@@ -1,6 +1,7 @@
 /* keyboard.c - драйвер клавиатуры для LufiraOS */
 
 #include "keyboard.h"
+#include "shell.h"
 
 /* Внешние переменные из kernel.c */
 extern uint32_t cursor_x;
@@ -128,9 +129,6 @@ void keyboard_getline(char* buffer, uint32_t max_length) {
     uint32_t index = 0;
     char c;
     
-    // Запоминаем начальную позицию Y для отображения подсказки
-    uint32_t start_y = terminal_get_y();
-    
     while (1) {
         c = keyboard_getchar();
         
@@ -141,23 +139,7 @@ void keyboard_getline(char* buffer, uint32_t max_length) {
         } else if (c == '\b') {
             if (index > 0) {
                 index--;
-                
-                // Удаляем символ из буфера
-                buffer[index] = '\0';
-                
-                // Отодвигаем курсор назад
-                if (cursor_x > 0) {
-                    cursor_x--;
-                } else if (cursor_y > start_y) {
-                    // Если в начале строки, переходим на конец предыдущей
-                    cursor_y--;
-                    cursor_x = 79;  // 80-1, так как индексы с 0
-                }
-                
-                // Стираем символ на экране
-                terminal_set_cursor(cursor_x, cursor_y);
-                terminal_putchar(' ');
-                terminal_set_cursor(cursor_x, cursor_y);
+                terminal_putchar('\b');
             }
         } else if (c != 0 && index < max_length - 1) {
             buffer[index++] = c;

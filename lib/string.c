@@ -91,7 +91,7 @@ char* itoa(int value, char* str, int base) {
 }
 
 /* Копировать строку с ограничением длины */
-char strncpy(char* dest, const char* src, size_t n) {
+char* strncpy(char* dest, const char* src, size_t n) {
     char* original_dest = dest;
     size_t i;
     for (i = 0; i < n && src[i] != '\0'; i++) {
