@@ -232,7 +232,13 @@ static void print_prompt(void) {
     if (cursor_x != 0) {
         terminal_putchar('\n');
     }
+
+    /* Устанавливаем зеленый цвет для приглашения */
+    terminal_setcolor(make_color(COLOR_GREEN, COLOR_BLACK));
     terminal_writestring("lufira> ");
+
+    /* Возвращаем белый цвет для ввода пользователя */
+    terminal_setcolor(make_color(COLOR_WHITE, COLOR_BLACK));
 }
 
 /* Команда help */
@@ -389,9 +395,15 @@ void shell_execute(const char* command) {
 }
 
 /* Запуск shell */
+/* Запуск shell */
 void shell_start(void) {
-    terminal_writestring("LufiraOS Shell v0.1\n");
-    terminal_writestring("Type 'help' for available commands.\n\n");
+    terminal_setcolor(make_color(COLOR_LIGHT_GREY, COLOR_BLACK));
+    terminal_writestring("LufiraOS Shell v0.1.0\n");
+    terminal_writestring("=====================\n");
+    terminal_writestring("Type 'help' for available commands.\n");
+    terminal_writestring("Type 'info' for system information.\n");
+    terminal_writestring("\n");
+    terminal_setcolor(make_color(COLOR_WHITE, COLOR_BLACK));
 
     while (1) {
         print_prompt();
