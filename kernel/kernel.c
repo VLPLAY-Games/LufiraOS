@@ -1,4 +1,8 @@
-/* kernel.c - основное ядро операционной системы */
+/* kernel.c - основное ядро LufiraOS */
+
+#include "keyboard.h"
+#include "shell.h"
+#include "string.h"
 
 /* Типы данных */
 typedef unsigned char uint8_t;
@@ -150,6 +154,17 @@ void terminal_writestring(const char* str) {
     }
 }
 
+/* Получить текущую позицию Y */
+uint32_t terminal_get_y() {
+    return cursor_y;
+}
+
+/* Установить позицию курсора */
+void terminal_set_cursor(uint32_t x, uint32_t y) {
+    cursor_x = x;
+    cursor_y = y;
+}
+
 /* Главная функция ядра */
 void kernel_main() {
     // Инициализация терминала
@@ -157,7 +172,7 @@ void kernel_main() {
     
     // Приветственное сообщение
     terminal_setcolor(make_color(COLOR_GREEN, COLOR_BLACK));
-    terminal_writestring("Welcome to SimpleOS!\n");
+    terminal_writestring("Welcome to LufiraOS!\n");
     
     terminal_setcolor(make_color(COLOR_WHITE, COLOR_BLACK));
     terminal_writestring("Kernel successfully loaded in 32-bit protected mode\n\n");
@@ -173,27 +188,19 @@ void kernel_main() {
     terminal_writestring("* CPU: 32-bit protected mode\n");
     terminal_writestring("* Bootloader: Custom MBR\n\n");
     
-    // Демонстрация цветов
-    terminal_setcolor(make_color(COLOR_LIGHT_RED, COLOR_BLACK));
-    terminal_writestring("Color test: ");
+    // Инициализация клавиатуры
+    keyboard_init();
+    terminal_writestring("Keyboard driver initialized\n");
     
-    terminal_setcolor(make_color(COLOR_BLUE, COLOR_BLACK));
-    terminal_writestring("Blue ");
+    // Запуск shell
+    terminal_writestring("\nStarting shell...\n\n");
+    shell_start();
     
-    terminal_setcolor(make_color(COLOR_MAGENTA, COLOR_BLACK));
-    terminal_writestring("Magenta ");
-    
-    terminal_setcolor(make_color(COLOR_LIGHT_GREEN, COLOR_BLACK));
-    terminal_writestring("Green\n\n");
-    
-    // Состояние системы
-    terminal_setcolor(make_color(COLOR_WHITE, COLOR_BLACK));
-    terminal_writestring("System ready\n");
-    terminal_writestring("Press Ctrl+Alt+Del to restart...\n");
+    // Если shell завершится (чего не должно быть)
+    terminal_writestring("\n\nShell exited. System halted.\n");
     
     // Бесконечный цикл
     while (1) {
-        // Можно добавить мигающий курсор или другую анимацию
         __asm__ volatile ("pause");
     }
 }

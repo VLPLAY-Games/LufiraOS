@@ -1,8 +1,8 @@
 #!/bin/bash
-# run.sh - скрипт для быстрого запуска
+# run.sh - скрипт для быстрого запуска LufiraOS
 
 echo "====================================="
-echo "   SimpleOS Build and Run Script"
+echo "       LufiraOS Build and Run"
 echo "====================================="
 echo ""
 
@@ -24,7 +24,7 @@ if ! command -v qemu-system-i386 &> /dev/null; then
 fi
 
 # Сборка
-echo "[2/3] Building SimpleOS..."
+echo "[2/3] Building LufiraOS..."
 make clean
 make || exit 1
 
@@ -38,4 +38,4 @@ echo "   Press Ctrl+Alt to exit QEMU"
 echo "====================================="
 echo ""
 
-qemu-system-i386 -fda simpleos.img -no-reboot -no-shutdown
+qemu-system-i386 -fda build/lufiraos.img -no-reboot -no-shutdown

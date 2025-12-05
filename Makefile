@@ -1,4 +1,4 @@
-# Makefile для сборки SimpleOS
+# Makefile для сборки LufiraOS
 
 # Компиляторы и утилиты
 ASM = nasm
@@ -8,63 +8,82 @@ OBJCOPY = objcopy
 
 # Флаги компиляции
 ASM_FLAGS = -f elf32
-CC_FLAGS = -m32 -std=gnu99 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -O2 -Wall -Wextra
+CC_FLAGS = -m32 -std=gnu99 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -O0 -Wall -Wextra -I./kernel -I./lib
 LD_FLAGS = -m elf_i386 -T linker.ld -nostdlib
 
 # Имена файлов
-BOOTLOADER = boot.bin
-KERNEL = kernel.bin
-OS_IMAGE = simpleos.img
+BOOTLOADER = build/boot.bin
+KERNEL = build/kernel.bin
+OS_IMAGE = build/lufiraos.img
+
+# Цели сборки
+BOOT_OBJ = boot/boot.asm
+KERNEL_OBJS = build/kernel_entry.o build/kernel.o build/keyboard.o build/shell.o build/string.o
+
+# Создание директории build
+$(shell mkdir -p build)
 
 # Цель по умолчанию
 all: $(OS_IMAGE)
 
 # Сборка загрузчика
-$(BOOTLOADER): boot.asm
-	$(ASM) -f bin boot.asm -o $(BOOTLOADER)
+$(BOOTLOADER): $(BOOT_OBJ)
+	$(ASM) -f bin $< -o $@
 
 # Компиляция точки входа ядра
-kernel_entry.o: kernel_entry.asm
-	$(ASM) $(ASM_FLAGS) kernel_entry.asm -o kernel_entry.o
+build/kernel_entry.o: kernel/kernel_entry.asm
+	$(ASM) $(ASM_FLAGS) $< -o $@
 
 # Компиляция ядра на C
-kernel.o: kernel.c
-	$(CC) $(CC_FLAGS) -c kernel.c -o kernel.o
+build/kernel.o: kernel/kernel.c kernel/keyboard.h kernel/shell.h lib/string.h
+	$(CC) $(CC_FLAGS) -c kernel/kernel.c -o $@
+
+build/keyboard.o: kernel/keyboard.c kernel/keyboard.h
+	$(CC) $(CC_FLAGS) -c kernel/keyboard.c -o $@
+
+build/shell.o: kernel/shell.c kernel/shell.h kernel/keyboard.h lib/string.h
+	$(CC) $(CC_FLAGS) -c kernel/shell.c -o $@
+
+# Компиляция библиотек
+build/string.o: lib/string.c lib/string.h
+	$(CC) $(CC_FLAGS) -c lib/string.c -o $@
 
 # Линковка ядра
-kernel.elf: kernel_entry.o kernel.o
-	$(LD) $(LD_FLAGS) -o kernel.elf kernel_entry.o kernel.o
+build/kernel.elf: $(KERNEL_OBJS)
+	$(LD) $(LD_FLAGS) -o build/kernel.elf $(KERNEL_OBJS)
+	@echo "Kernel size: $$(stat -c%s build/kernel.elf) bytes"
 
 # Конвертация в бинарный формат
-kernel.bin: kernel.elf
-	$(OBJCOPY) -O binary kernel.elf $(KERNEL)
+$(KERNEL): build/kernel.elf
+	$(OBJCOPY) -O binary build/kernel.elf $(KERNEL)
+	@echo "Kernel binary size: $$(stat -c%s $(KERNEL)) bytes"
 
 # Создание образа диска
 $(OS_IMAGE): $(BOOTLOADER) $(KERNEL)
+	@echo "Creating disk image..."
 	# Создаем пустой образ 1.44MB (2880 секторов по 512 байт)
-	dd if=/dev/zero of=$(OS_IMAGE) bs=512 count=2880
-	
+	dd if=/dev/zero of=$(OS_IMAGE) bs=512 count=2880 2>/dev/null
 	# Копируем загрузчик в начало
-	dd if=$(BOOTLOADER) of=$(OS_IMAGE) conv=notrunc
-	
+	dd if=$(BOOTLOADER) of=$(OS_IMAGE) conv=notrunc 2>/dev/null
 	# Копируем ядро, начиная со второго сектора
-	dd if=$(KERNEL) of=$(OS_IMAGE) conv=notrunc bs=512 seek=1
+	dd if=$(KERNEL) of=$(OS_IMAGE) conv=notrunc bs=512 seek=1 2>/dev/null
+	@echo "Disk image created: $(OS_IMAGE)"
 
 # Запуск в QEMU
 run: $(OS_IMAGE)
-	qemu-system-i386 -fda $(OS_IMAGE)
+	@echo "Starting QEMU..."
+	qemu-system-i386 -fda $(OS_IMAGE) -no-reboot
 
 # Запуск с отладкой
 debug: $(OS_IMAGE)
-	qemu-system-i386 -S -s -fda $(OS_IMAGE) &
-	gdb -ex "target remote localhost:1234" -ex "symbol-file kernel.elf"
-
-# Запуск с монитором
-monitor: $(OS_IMAGE)
-	qemu-system-i386 -fda $(OS_IMAGE) -monitor stdio
+	@echo "Starting QEMU in debug mode..."
+	qemu-system-i386 -S -s -fda $(OS_IMAGE) -no-reboot &
+	@echo "Waiting for GDB connection..."
+	@sleep 1
+	gdb -ex "target remote localhost:1234" -ex "symbol-file build/kernel.elf" -ex "break _start" -ex "continue"
 
 # Очистка
 clean:
-	rm -f *.o *.bin *.elf *.img
+	rm -rf build/*
 
-.PHONY: all run debug monitor clean
+.PHONY: all run debug clean
