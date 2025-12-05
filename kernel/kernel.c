@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include "keyboard.h"
 #include "shell.h"
+#include "../fs/fs.h"
+#include "../fs/disk.h"
 
 /* Глобальные переменные курсора (объявлены в shell.h) */
 uint32_t cursor_x = 0;
@@ -34,6 +36,14 @@ void kernel_main(void) {
     /* Инициализация клавиатуры */
     keyboard_init();
     terminal_writestring("Keyboard driver initialized\n");
+
+    terminal_writestring("Initializing disk...\n");
+    disk_init();
+
+    terminal_writestring("Initializing filesystem...\n");
+    
+    fs_init();
+    fs_format();
 
     /* Запуск shell */
     terminal_writestring("\nStarting shell...\n\n");

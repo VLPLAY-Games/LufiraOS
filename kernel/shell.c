@@ -3,6 +3,7 @@
 #include "shell.h"
 #include "keyboard.h"
 #include "string.h"
+#include "../fs/fs.h"
 #include <stddef.h>
 
 /* Константы VGA */
@@ -17,6 +18,13 @@ static uint8_t terminal_color = 0x0F; /* Белый на черном */
 
 /* VGA буфер */
 static uint16_t* vga_buffer = (uint16_t*)VGA_MEMORY;
+
+/* Команды для файловой системы */
+void cmd_fs_format(void);
+void cmd_fs_list(void);
+void cmd_fs_create(void);
+void cmd_fs_delete(void);
+void cmd_fs_info(void);
 
 /* Функция для отправки команды в порт */
 static inline void outb(uint16_t port, uint8_t value) {
@@ -41,6 +49,11 @@ static command_t commands[] = {
     {"reboot", "Reboot the system", cmd_reboot},
     {"echo", "Echo arguments", cmd_echo},
     {"info", "Display system information", cmd_info},
+    {"format", "Format filesystem", cmd_fs_format},
+    {"ls", "List files", cmd_fs_list},
+    {"touch", "Create file", cmd_fs_create},
+    {"rm", "Delete file", cmd_fs_delete},
+    {"fsinfo", "Filesystem info", cmd_fs_info},
     {NULL, NULL, NULL}
 };
 
@@ -391,4 +404,65 @@ void shell_start(void) {
             shell_execute(input_buffer);
         }
     }
+}
+
+/* Команда format */
+void cmd_fs_format(void) {
+    terminal_writestring("Are you sure? This will erase all data! (y/n): ");
+    
+    char confirm = keyboard_getchar();
+    terminal_putchar(confirm);
+    
+    if (confirm == 'y' || confirm == 'Y') {
+        if (fs_format() == 0) {
+            terminal_writestring("Filesystem formatted successfully\n");
+        }
+    } else {
+        terminal_writestring("Format cancelled\n");
+    }
+}
+
+/* Команда ls */
+void cmd_fs_list(void) {
+    fs_list();
+}
+
+/* Команда touch */
+void cmd_fs_create(void) {
+    char filename[MAX_FILENAME];
+    
+    terminal_writestring("Enter filename: ");
+    keyboard_getline(filename, MAX_FILENAME);
+    
+    if (fs_create(filename, 0) != 0) {
+        terminal_writestring("Failed to create file\n");
+    }
+}
+
+/* Команда rm */
+void cmd_fs_delete(void) {
+    char filename[MAX_FILENAME];
+    
+    terminal_writestring("Enter filename to delete: ");
+    keyboard_getline(filename, MAX_FILENAME);
+    
+    if (fs_delete(filename) != 0) {
+        terminal_writestring("Failed to delete file\n");
+    }
+}
+
+/* Команда fsinfo */
+void cmd_fs_info(void) {
+    char free_space[32];
+    itoa(fs_free_space(), free_space, 10);
+    
+    terminal_writestring("Filesystem Information:\n");
+    terminal_writestring("======================\n");
+    terminal_writestring("Type: LufiraFS\n");
+    terminal_writestring("Free space: ");
+    terminal_writestring(free_space);
+    terminal_writestring(" bytes\n");
+    terminal_writestring("Block size: 512 bytes\n");
+    terminal_writestring("Max files per dir: 16\n");
+    terminal_writestring("Max file size: 4KB\n\n");
 }

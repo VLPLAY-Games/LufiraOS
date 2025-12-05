@@ -18,7 +18,7 @@ OS_IMAGE = build/lufiraos.img
 
 # Цели сборки
 BOOT_OBJ = boot/boot.asm
-KERNEL_OBJS = build/kernel_entry.o build/kernel.o build/keyboard.o build/shell.o build/string.o
+KERNEL_OBJS = build/kernel_entry.o build/kernel.o build/keyboard.o build/shell.o build/string.o build/fs.o build/disk.o
 
 # Создание директории build
 $(shell mkdir -p build)
@@ -43,6 +43,12 @@ build/keyboard.o: kernel/keyboard.c kernel/keyboard.h
 
 build/shell.o: kernel/shell.c kernel/shell.h kernel/keyboard.h lib/string.h
 	$(CC) $(CC_FLAGS) -c kernel/shell.c -o $@
+
+build/fs.o: fs/fs.c fs/fs.h lib/string.h
+	$(CC) $(CC_FLAGS) -c fs/fs.c -o $@
+
+build/disk.o: fs/disk.c fs/disk.h
+	$(CC) $(CC_FLAGS) -c fs/disk.c -o $@
 
 # Компиляция библиотек
 build/string.o: lib/string.c lib/string.h
