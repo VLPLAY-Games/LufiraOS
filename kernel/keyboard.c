@@ -2,6 +2,10 @@
 
 #include "keyboard.h"
 
+/* Внешние переменные из kernel.c */
+extern uint32_t cursor_x;
+extern uint32_t cursor_y;
+
 /* Таблица скан-кодов для обычных клавиш (без Shift) */
 static const char scan_code_table[] = {
     0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 0,
@@ -124,25 +128,40 @@ void keyboard_getline(char* buffer, uint32_t max_length) {
     uint32_t index = 0;
     char c;
     
+    // Запоминаем начальную позицию Y для отображения подсказки
+    uint32_t start_y = terminal_get_y();
+    
     while (1) {
         c = keyboard_getchar();
         
         if (c == '\n') {
             buffer[index] = '\0';
+            terminal_putchar('\n');
             break;
         } else if (c == '\b') {
             if (index > 0) {
                 index--;
-                // Выводим backspace в терминал
-                terminal_putchar('\b');
+                
+                // Удаляем символ из буфера
+                buffer[index] = '\0';
+                
+                // Отодвигаем курсор назад
+                if (cursor_x > 0) {
+                    cursor_x--;
+                } else if (cursor_y > start_y) {
+                    // Если в начале строки, переходим на конец предыдущей
+                    cursor_y--;
+                    cursor_x = 79;  // 80-1, так как индексы с 0
+                }
+                
+                // Стираем символ на экране
+                terminal_set_cursor(cursor_x, cursor_y);
                 terminal_putchar(' ');
-                terminal_putchar('\b');
+                terminal_set_cursor(cursor_x, cursor_y);
             }
         } else if (c != 0 && index < max_length - 1) {
             buffer[index++] = c;
             terminal_putchar(c);
         }
     }
-    
-    terminal_putchar('\n');
 }
