@@ -13,6 +13,7 @@ LD_FLAGS = -m elf_i386 -T linker.ld -nostdlib
 
 # Имена файлов
 BOOTLOADER = build/boot.bin
+STAGE2 = build/stage2.bin
 KERNEL = build/kernel.bin
 OS_IMAGE = build/lufiraos.img
 
@@ -28,6 +29,9 @@ all: $(OS_IMAGE)
 
 # Сборка загрузчика
 $(BOOTLOADER): $(BOOT_OBJ)
+	$(ASM) -f bin $< -o $@
+
+$(STAGE2): boot/stage2.asm
 	$(ASM) -f bin $< -o $@
 
 # Компиляция точки входа ядра
@@ -68,14 +72,16 @@ $(KERNEL): build/kernel.elf
 	@echo "Kernel binary size: $$(stat -c%s $(KERNEL)) bytes"
 
 # Создание образа диска
-$(OS_IMAGE): $(BOOTLOADER) $(KERNEL)
-	@echo "Creating disk image..."
-	# Создаем пустой образ 1.44MB (2880 секторов по 512 байт)
+$(OS_IMAGE): $(BOOTLOADER) $(STAGE2) $(KERNEL)
+	@echo "Creating disk image with two-stage bootloader..."
+	# Создаем пустой образ 1.44MB
 	dd if=/dev/zero of=$(OS_IMAGE) bs=512 count=2880 2>/dev/null
-	# Копируем загрузчик в начало
+	# Копируем Stage 1 (MBR)
 	dd if=$(BOOTLOADER) of=$(OS_IMAGE) conv=notrunc 2>/dev/null
-	# Копируем ядро, начиная со второго сектора
-	dd if=$(KERNEL) of=$(OS_IMAGE) conv=notrunc bs=512 seek=1 2>/dev/null
+	# Копируем Stage 2 (начиная с сектора 1)
+	dd if=$(STAGE2) of=$(OS_IMAGE) conv=notrunc bs=512 seek=1 2>/dev/null
+	# Копируем ядро (начиная с сектора 5)
+	dd if=$(KERNEL) of=$(OS_IMAGE) conv=notrunc bs=512 seek=5 2>/dev/null
 	@echo "Disk image created: $(OS_IMAGE)"
 
 # Запуск в QEMU
