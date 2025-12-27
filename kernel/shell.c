@@ -2,7 +2,6 @@
 
 #include "shell.h"
 #include "../drivers/keyboard.h"
-#include "../drivers/speaker.h"
 #include "string.h"
 #include "../fs/fs.h"
 #include <stddef.h>
@@ -26,40 +25,6 @@ void cmd_fs_list(void);
 void cmd_fs_create(void);
 void cmd_fs_delete(void);
 void cmd_fs_info(void);
-
-void cmd_beep(void) {
-    terminal_writestring("Playing beep sound...\n");
-    speaker_play_beep(BEEP_MEDIUM);
-}
-
-/* Команда speaker_test */
-void cmd_speaker_test(void) {
-    speaker_test();
-}
-
-/* Команда speaker_scale */
-void cmd_speaker_scale(void) {
-    speaker_play_scale();
-}
-
-/* Команда speaker_info */
-void cmd_speaker_info(void) {
-    terminal_writestring("PC Speaker Information:\n");
-    terminal_writestring("=======================\n");
-    terminal_writestring("Status: ");
-    terminal_writestring(speaker_is_enabled() ? "ENABLED\n" : "DISABLED\n");
-    
-    char vol_str[16];
-    terminal_writestring("Volume: ");
-    itoa(speaker_get_volume(), vol_str, 10);
-    terminal_writestring(vol_str);
-    terminal_writestring("%\n");
-    
-    terminal_writestring("Control port: 0x61\n");
-    terminal_writestring("Timer port: 0x42\n");
-    terminal_writestring("Frequency range: 20-20,000 Hz\n");
-    terminal_writestring("Notes: C4=262Hz, A4=440Hz\n\n");
-}
 
 /* Функция для отправки команды в порт */
 static inline void outb(uint16_t port, uint8_t value) {
@@ -89,10 +54,6 @@ static command_t commands[] = {
     {"touch", "Create file", cmd_fs_create},
     {"rm", "Delete file", cmd_fs_delete},
     {"fsinfo", "Filesystem info", cmd_fs_info},
-    {"beep", "Play a beep sound", cmd_beep},
-    {"speaker", "PC Speaker information", cmd_speaker_info},
-    {"speaker-test", "Test PC Speaker functionality", cmd_speaker_test},
-    {"scale", "Play musical scale", cmd_speaker_scale},
     {NULL, NULL, NULL}
 };
 
