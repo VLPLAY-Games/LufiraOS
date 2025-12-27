@@ -87,12 +87,12 @@ $(OS_IMAGE): $(BOOTLOADER) $(STAGE2) $(KERNEL)
 # Запуск в QEMU
 run: $(OS_IMAGE)
 	@echo "Starting QEMU..."
-	qemu-system-i386 -fda $(OS_IMAGE) -no-reboot
+	qemu-system-x86_64 -fda $(OS_IMAGE) -no-reboot
 
 # Запуск с отладкой
 debug: $(OS_IMAGE)
 	@echo "Starting QEMU in debug mode..."
-	qemu-system-i386 -S -s -fda $(OS_IMAGE) -no-reboot &
+	qemu-system-x86_64 -S -s -fda $(OS_IMAGE) -no-reboot &
 	@echo "Waiting for GDB connection..."
 	@sleep 1
 	gdb -ex "target remote localhost:1234" -ex "symbol-file build/kernel.elf" -ex "break _start" -ex "continue"

@@ -18,8 +18,8 @@ if ! command -v gcc &> /dev/null; then
     exit 1
 fi
 
-if ! command -v qemu-system-i386 &> /dev/null; then
-    echo "ERROR: QEMU not found! Install with: sudo apt install qemu-system-x86"
+if ! command -v qemu-system-x86_64 &> /dev/null; then
+    echo "ERROR: QEMU not found! Install with: sudo apt install qemu-system-x86_64"
     exit 1
 fi
 
@@ -38,4 +38,4 @@ echo "   Press Ctrl+Alt to exit QEMU"
 echo "====================================="
 echo ""
 
-qemu-system-i386 -fda build/lufiraos.img -no-reboot -no-shutdown
+qemu-system-x86_64 -fda build/lufiraos.img -no-reboot -no-shutdown
