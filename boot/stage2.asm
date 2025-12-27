@@ -2,14 +2,20 @@
 bits 16
 org 0x7e00
 
-KERNEL_OFFSET equ 0x1000          ; Адрес загрузки ядра
+KERNEL_OFFSET equ 0x1000          ; Адрес загрузки ядра (64K)
 KERNEL_START_SECTOR equ 6         ; Ядро начинается после Stage2 (2+4=6)
 KERNEL_SECTORS equ 50             ; Размер ядра в секторах (25KB)
 
 start:
+    ; Сохраняем номер загрузочного диска
+    mov [BOOT_DRIVE], dl
+    
     ; Сообщение о запуске Stage2
     mov si, stage2_msg
     call print_string
+    
+    ; Проверяем расширения INT 13h
+    call check_int13_extensions
     
     ; Загрузка ядра с диска
     call load_kernel
@@ -21,11 +27,41 @@ start:
     jmp $
 
 ; ====================================
+; Проверка расширений INT 13h (LBA)
+; ====================================
+check_int13_extensions:
+    pusha
+    mov ah, 0x41
+    mov bx, 0x55AA
+    mov dl, [BOOT_DRIVE]
+    int 0x13
+    jc .no_extensions
+    cmp bx, 0xAA55
+    jne .no_extensions
+    test cl, 1
+    jz .no_extensions
+    
+    ; Расширения поддерживаются
+    mov byte [LBA_SUPPORT], 1
+    popa
+    ret
+    
+.no_extensions:
+    ; Расширения не поддерживаются, используем CHS
+    mov byte [LBA_SUPPORT], 0
+    popa
+    ret
+
+; ====================================
 ; Функция загрузки ядра
 ; ====================================
 load_kernel:
     pusha
     
+    cmp byte [LBA_SUPPORT], 1
+    je .use_lba
+    
+    ; Используем CHS (старый метод)
     ; Сброс дискового контроллера
     mov ah, 0x00
     mov dl, [BOOT_DRIVE]
@@ -41,7 +77,7 @@ load_kernel:
     mov ah, 0x02            ; Функция чтения секторов
     mov al, KERNEL_SECTORS  ; Количество секторов
     mov ch, 0               ; Цилиндр 0
-    mov cl, KERNEL_START_SECTOR ; Стартовый сектор
+    mov cl, KERNEL_START_SECTOR ; Стартовый сектор (с 1)
     mov dh, 0               ; Головка 0
     mov dl, [BOOT_DRIVE]    ; Номер диска
     
@@ -52,6 +88,21 @@ load_kernel:
     cmp al, KERNEL_SECTORS
     jne disk_error
     
+    jmp .success
+    
+.use_lba:
+    ; Используем LBA (расширенный метод)
+    push es
+    mov ax, 0
+    mov es, ax
+    mov si, DAPACK          ; Адрес структуры DAP
+    mov ah, 0x42            ; Расширенное чтение
+    mov dl, [BOOT_DRIVE]    ; Номер диска
+    int 0x13
+    pop es
+    jc disk_error
+    
+.success:
     ; Сообщение об успешной загрузке
     mov si, kernel_loaded_msg
     call print_string
@@ -72,7 +123,13 @@ disk_error:
     
     mov si, error_prompt
     call print_string
-    jmp $
+    
+    ; Пытаемся прочитать клавишу
+    mov ah, 0x00
+    int 0x16
+    
+    ; Перезагрузка
+    int 0x19
 
 ; ====================================
 ; Вывод hex-числа
@@ -118,7 +175,7 @@ switch_to_pm:
     or eax, 0x1
     mov cr0, eax
     
-    ; Дальний прыжок для очистки конвейера
+    ; Дальний прыжок для очистки конвейера и переключения в 32-битный код
     jmp CODE_SEG:init_pm
 
 bits 32
@@ -135,7 +192,7 @@ init_pm:
     mov ebp, 0x90000
     mov esp, ebp
     
-    ; Переход в ядро
+    ; Вызываем ядро
     call KERNEL_OFFSET
     
     ; Если ядро вернет управление
@@ -199,10 +256,19 @@ stage2_msg db 'LufiraOS Stage2: Loading kernel...', 0x0D, 0x0A, 0
 kernel_loaded_msg db 'Kernel loaded successfully', 0x0D, 0x0A, 0
 pm_msg db 'Switching to protected mode...', 0x0D, 0x0A, 0
 disk_err_msg db 'Stage2 Disk error: 0x', 0
-error_prompt db 0x0D, 0x0A, 'System halted', 0
+error_prompt db 0x0D, 0x0A, 'Press any key to reboot', 0x0D, 0x0A, 0
 hex_chars db '0123456789ABCDEF'
 BOOT_DRIVE db 0
+LBA_SUPPORT db 0
+
+; Структура DAP (Disk Address Packet) для LBA
+DAPACK:
+    db 0x10                 ; Размер структуры (16 байт)
+    db 0                    ; Всегда 0
+    dw KERNEL_SECTORS       ; Количество секторов для чтения
+    dw KERNEL_OFFSET        ; Смещение буфера
+    dw 0x0000               ; Сегмент буфера
+    dq KERNEL_START_SECTOR  ; Начальный сектор LBA (64-битный)
 
 ; Заполнение Stage2 до 4 секторов (2048 байт)
-; Stage1 загрузит ровно 4 сектора
 times 2048-($-$$) db 0
