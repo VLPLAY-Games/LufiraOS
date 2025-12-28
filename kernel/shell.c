@@ -14,11 +14,20 @@
 #define VGA_CRTC_INDEX 0x3D4
 #define VGA_CRTC_DATA 0x3D5
 
+/* Размер истории команд */
+#define HISTORY_SIZE 16
+
 /* Текущий цвет терминала */
 static uint8_t terminal_color = 0x0F; /* Белый на черном */
 
 /* VGA буфер */
 static uint16_t* vga_buffer = (uint16_t*)VGA_MEMORY;
+
+/* История команд */
+static char command_history[HISTORY_SIZE][MAX_COMMAND_LENGTH];
+static int history_count = 0;
+static int history_current = -1; /* -1 означает нет активной истории */
+static int history_display_index = -1; /* Текущий отображаемый индекс в истории */
 
 /* Команды для файловой системы */
 void cmd_fs_format(void);
@@ -95,8 +104,6 @@ void cmd_memtest(void) {
     terminal_writestring("\nMemory test completed.\n");
 }
 
-
-
 /* Функция для отправки команды в порт */
 static inline void outb(uint16_t port, uint8_t value) {
     asm volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
@@ -111,6 +118,7 @@ static inline uint8_t inb(uint16_t port) {
 
 /* Буфер для ввода */
 static char input_buffer[MAX_COMMAND_LENGTH];
+static char current_input[MAX_COMMAND_LENGTH]; /* Для хранения текущего ввода при навигации по истории */
 
 /* Список команд */
 static command_t commands[] = {
@@ -132,6 +140,39 @@ static command_t commands[] = {
     {"clear", "Clear terminal", terminal_clear},
     {NULL, NULL, NULL}
 };
+
+/* Добавить команду в историю */
+static void add_to_history(const char* cmd) {
+    if (strlen(cmd) == 0) {
+        return;
+    }
+    
+    /* Проверяем, не дублируется ли последняя команда */
+    if (history_count > 0 && strcmp(command_history[history_count - 1], cmd) == 0) {
+        return;
+    }
+    
+    if (history_count < HISTORY_SIZE) {
+        strcpy(command_history[history_count], cmd);
+        history_count++;
+    } else {
+        /* Сдвигаем историю вверх */
+        for (int i = 0; i < HISTORY_SIZE - 1; i++) {
+            strcpy(command_history[i], command_history[i + 1]);
+        }
+        strcpy(command_history[HISTORY_SIZE - 1], cmd);
+    }
+    
+    history_current = history_count;
+}
+
+/* Получить команду из истории */
+static const char* get_history_command(int index) {
+    if (index < 0 || index >= history_count) {
+        return NULL;
+    }
+    return command_history[index];
+}
 
 /* Очистка экрана */
 void terminal_clear(void) {
@@ -480,31 +521,140 @@ void shell_execute(const char* command) {
     terminal_writestring("\nType 'help' for available commands.\n");
 }
 
-/* Запуск shell */
+static void clear_input_area(uint32_t prompt_x, uint32_t prompt_y, int prev_len) {
+    /* Ставим курсор в начало области ввода */
+    terminal_set_cursor(prompt_x, prompt_y);
+    /* Затираем ровно prev_len символов */
+    for (int i = 0; i < prev_len; i++) {
+        terminal_putchar(' ');
+    }
+    /* Возвращаем курсор в начало области ввода */
+    terminal_set_cursor(prompt_x, prompt_y);
+}
+
+/* Исправлённая shell_start */
 void shell_start(void) {
     terminal_setcolor(make_color(COLOR_LIGHT_GREY, COLOR_BLACK));
     terminal_writestring("LufiraOS Shell v0.1.0\n");
     terminal_writestring("=====================\n");
     terminal_writestring("Type 'help' for available commands.\n");
     terminal_writestring("Type 'info' for system information.\n");
+    terminal_writestring("Use UP/DOWN arrows for command history.\n");
     terminal_writestring("\n");
     terminal_setcolor(make_color(COLOR_WHITE, COLOR_BLACK));
 
-    /* Инициализируем файловую систему (уже должна быть инициализирована в kernel_main) */
     fs_init();
 
     while (1) {
         print_prompt();
 
-        /* Получаем ввод от пользователя */
-        keyboard_getline(input_buffer, MAX_COMMAND_LENGTH);
+        uint32_t prompt_x = cursor_x;
+        uint32_t prompt_y = cursor_y;
 
-        /* Выполняем команду */
-        if (strlen(input_buffer) > 0) {
-            shell_execute(input_buffer);
+        char cmd_buf[MAX_COMMAND_LENGTH];
+        cmd_buf[0] = '\0';
+        int cmd_len = 0;
+
+        int in_history_mode = 0;
+        char saved_input[MAX_COMMAND_LENGTH];
+        saved_input[0] = '\0';
+
+        /* Сбрасываем индекс отображаемой истории перед новым вводом */
+        history_display_index = -1;
+
+        while (1) {
+            int c = keyboard_getchar();
+            if (c == 0) continue; /* пропускаем промежуточные байты */
+
+            if (c == '\n') {
+                cmd_buf[cmd_len] = '\0';
+                terminal_putchar('\n');
+                break;
+            } else if (c == '\b') {
+                if (cmd_len > 0) {
+                    cmd_len--;
+                    cmd_buf[cmd_len] = '\0';
+                    /* Удаляем символ с экрана корректно */
+                    terminal_putchar('\b');
+                    terminal_putchar(' ');
+                    terminal_putchar('\b');
+                }
+            } else if (c == KBD_ARROW_UP) {
+                if (history_count > 0) {
+                    if (!in_history_mode) {
+                        /* Сохраняем текущий ввод, чтобы можно было восстановить */
+                        strncpy(saved_input, cmd_buf, MAX_COMMAND_LENGTH);
+                        saved_input[MAX_COMMAND_LENGTH - 1] = '\0';
+                        in_history_mode = 1;
+                    }
+
+                    if (history_display_index < 0)
+                        history_display_index = history_count - 1;
+                    else if (history_display_index > 0)
+                        history_display_index--;
+
+                    const char* hist_cmd = get_history_command(history_display_index);
+                    if (hist_cmd) {
+                        /* Очищаем ровно предыдущую введённую длину */
+                        clear_input_area(prompt_x, prompt_y, cmd_len);
+
+                        /* Вставляем команду из истории */
+                        strncpy(cmd_buf, hist_cmd, MAX_COMMAND_LENGTH);
+                        cmd_buf[MAX_COMMAND_LENGTH - 1] = '\0';
+                        cmd_len = (int)strlen(cmd_buf);
+                        terminal_writestring(cmd_buf);
+                    }
+                }
+                continue;
+            } else if (c == KBD_ARROW_DOWN) {
+                if (in_history_mode) {
+                    if (history_display_index < history_count - 1) {
+                        history_display_index++;
+                        const char* hist_cmd = get_history_command(history_display_index);
+                        if (hist_cmd) {
+                            clear_input_area(prompt_x, prompt_y, cmd_len);
+
+                            strncpy(cmd_buf, hist_cmd, MAX_COMMAND_LENGTH);
+                            cmd_buf[MAX_COMMAND_LENGTH - 1] = '\0';
+                            cmd_len = (int)strlen(cmd_buf);
+                            terminal_writestring(cmd_buf);
+                        }
+                    } else {
+                        /* Восстанавливаем сохранённый ввод */
+                        history_display_index = -1;
+                        in_history_mode = 0;
+
+                        clear_input_area(prompt_x, prompt_y, cmd_len);
+
+                        strncpy(cmd_buf, saved_input, MAX_COMMAND_LENGTH);
+                        cmd_buf[MAX_COMMAND_LENGTH - 1] = '\0';
+                        cmd_len = (int)strlen(cmd_buf);
+                        terminal_writestring(cmd_buf);
+                    }
+                }
+                continue;
+            } else if (c > 0 && c < 0x80 && cmd_len < MAX_COMMAND_LENGTH - 1) {
+                /* Обычный печатный символ */
+                if (in_history_mode) {
+                    in_history_mode = 0;
+                    history_display_index = -1;
+                }
+
+                cmd_buf[cmd_len++] = (char)c;
+                cmd_buf[cmd_len] = '\0';
+                terminal_putchar((char)c);
+            }
+        } /* конец цикла ввода одной команды */
+
+        if (cmd_len > 0) {
+            add_to_history(cmd_buf);
+            history_display_index = -1;
+            in_history_mode = 0;
+            shell_execute(cmd_buf);
         }
-    }
+    } /* главный цикл shell */
 }
+
 
 /* Команда format - исправленная версия */
 void cmd_fs_format(void) {

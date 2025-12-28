@@ -4,7 +4,7 @@ org 0x7e00
 
 KERNEL_OFFSET equ 0x1000          ; Адрес загрузки ядра (64K)
 KERNEL_START_SECTOR equ 6         ; Ядро начинается после Stage2 (2+4=6)
-KERNEL_SECTORS equ 50             ; Размер ядра в секторах (25KB)
+KERNEL_SECTORS equ 53            ; размер ядра в секторах (27 136 Bytes)
 
 MEMORY_MAP_OFFSET equ 0x5000      ; Адрес для хранения карты памяти
 
@@ -163,7 +163,7 @@ load_kernel:
     
     ; Параметры для чтения диска
     mov ah, 0x02            ; Функция чтения секторов
-    mov al, KERNEL_SECTORS  ; Количество секторов
+    mov al, KERNEL_SECTORS  ; Количество секторов (теперь 100)
     mov ch, 0               ; Цилиндр 0
     mov cl, KERNEL_START_SECTOR ; Стартовый сектор (с 1)
     mov dh, 0               ; Головка 0
@@ -359,7 +359,7 @@ LBA_SUPPORT db 0
 DAPACK:
     db 0x10                 ; Размер структуры (16 байт)
     db 0                    ; Всегда 0
-    dw KERNEL_SECTORS       ; Количество секторов для чтения
+    dw KERNEL_SECTORS       ; Количество секторов для чтения (теперь 100)
     dw KERNEL_OFFSET        ; Смещение буфера
     dw 0x0000               ; Сегмент буфера
     dq KERNEL_START_SECTOR  ; Начальный сектор LBA (64-битный)
