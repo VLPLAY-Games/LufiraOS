@@ -4,6 +4,7 @@
 #include "../drivers/keyboard.h"
 #include "string.h"
 #include "../fs/fs.h"
+#include "memory.h"
 #include <stddef.h>
 
 /* Константы VGA */
@@ -27,6 +28,74 @@ void cmd_fs_delete(void);
 void cmd_fs_info(void);
 void cmd_cd(void);
 void cmd_mkdir(void);
+
+void cmd_meminfo(void) {
+    terminal_writestring("\nMemory Information:\n");
+    terminal_writestring("===================\n");
+    
+    const memory_map_t* mem_map = memory_get_map();
+    
+    if (mem_map->entry_count == 0) {
+        terminal_writestring("No memory map available\n");
+        return;
+    }
+    
+    /* Выводим детальную карту памяти */
+    memory_print_map();
+}
+
+void cmd_memtest(void) {
+    terminal_writestring("\nSimple Memory Test\n");
+    terminal_writestring("==================\n");
+    
+    /* Тест 1: Запись/чтение в разные области памяти */
+    terminal_writestring("Test 1: Basic write/read test... ");
+    
+    volatile uint32_t* test_addr = (volatile uint32_t*)0x1000;
+    *test_addr = 0x12345678;
+    
+    if (*test_addr == 0x12345678) {
+        terminal_writestring("PASS\n");
+    } else {
+        terminal_writestring("FAIL\n");
+    }
+    
+    /* Тест 2: Тест области стека */
+    terminal_writestring("Test 2: Stack test... ");
+    
+    uint32_t stack_var = 0xDEADBEEF;
+    uint32_t* stack_ptr = &stack_var;
+    
+    if (*stack_ptr == 0xDEADBEEF) {
+        terminal_writestring("PASS\n");
+    } else {
+        terminal_writestring("FAIL\n");
+    }
+    
+    /* Тест 3: Простая аллокация */
+    terminal_writestring("Test 3: Simple allocation test... ");
+    
+    void* mem1 = memory_alloc(1024);  /* 1KB */
+    void* mem2 = memory_alloc(2048);  /* 2KB */
+    
+    if (mem1 != NULL && mem2 != NULL && mem2 > mem1) {
+        terminal_writestring("PASS\n");
+        terminal_writestring("  Allocated: 0x");
+        char buf[16];
+        itoa((uint32_t)mem1, buf, 16);
+        terminal_writestring(buf);
+        terminal_writestring(" and 0x");
+        itoa((uint32_t)mem2, buf, 16);
+        terminal_writestring(buf);
+        terminal_writestring("\n");
+    } else {
+        terminal_writestring("FAIL\n");
+    }
+    
+    terminal_writestring("\nMemory test completed.\n");
+}
+
+
 
 /* Функция для отправки команды в порт */
 static inline void outb(uint16_t port, uint8_t value) {
@@ -58,6 +127,9 @@ static command_t commands[] = {
     {"mkdir", "Create directory", cmd_mkdir},
     {"cd", "Change directory", cmd_cd},
     {"fsinfo", "Filesystem info", cmd_fs_info},
+    {"meminfo", "Display memory information", cmd_meminfo},
+    {"memtest", "Simple memory test", cmd_memtest},
+    {"clear", "Clear terminal", terminal_clear},
     {NULL, NULL, NULL}
 };
 
@@ -339,7 +411,7 @@ void cmd_info(void) {
     terminal_writestring("\nLufiraOS System Information\n");
     terminal_writestring("===========================\n");
     terminal_writestring(" Version: 0.1.0\n");
-    terminal_writestring("* Architecture: i386\n");
+    terminal_writestring("* Architecture: x86_64\n");
     terminal_writestring("* Kernel: 32-bit protected mode\n");
     terminal_writestring("* Memory: 1MB conventional\n");
     terminal_writestring("* Features: VGA text, Keyboard, Shell\n");

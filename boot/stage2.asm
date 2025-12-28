@@ -6,6 +6,8 @@ KERNEL_OFFSET equ 0x1000          ; Адрес загрузки ядра (64K)
 KERNEL_START_SECTOR equ 6         ; Ядро начинается после Stage2 (2+4=6)
 KERNEL_SECTORS equ 50             ; Размер ядра в секторах (25KB)
 
+MEMORY_MAP_OFFSET equ 0x5000      ; Адрес для хранения карты памяти
+
 start:
     ; Сохраняем номер загрузочного диска
     mov [BOOT_DRIVE], dl
@@ -17,6 +19,9 @@ start:
     ; Проверяем расширения INT 13h
     call check_int13_extensions
     
+    ; Получаем карту памяти
+    call get_memory_map
+    
     ; Загрузка ядра с диска
     call load_kernel
     
@@ -25,6 +30,89 @@ start:
     
     ; Сюда не должны дойти
     jmp $
+
+; ====================================
+; Получение карты памяти через INT 15h, AX=E820h
+; ====================================
+get_memory_map:
+    pusha
+    push es
+    
+    mov ax, 0
+    mov es, ax
+    mov di, MEMORY_MAP_OFFSET + 4  ; Пропускаем счетчик записей (первые 4 байта)
+    
+    xor ebx, ebx                   ; EBX должен быть 0 для первой итерации
+    mov edx, 0x534D4150            ; Сигнатура 'SMAP'
+    mov eax, 0xE820
+    mov ecx, 24                    ; Размер структуры (24 байта)
+    
+    int 0x15
+    jc .error                      ; Если CF=1 - ошибка
+    
+    cmp eax, 0x534D4150            ; Проверяем сигнатуру
+    jne .error
+    
+    mov dword [MEMORY_MAP_OFFSET], 1  ; Начальное количество записей
+    
+.loop:
+    test ebx, ebx                  ; Если EBX = 0, это последняя запись
+    je .done
+    
+    ; Увеличиваем счетчик записей
+    mov eax, [MEMORY_MAP_OFFSET]
+    inc eax
+    mov [MEMORY_MAP_OFFSET], eax
+    
+    ; Подготавливаем следующий вызов
+    add di, 24                     ; Переходим к следующей записи
+    
+    mov eax, 0xE820
+    mov ecx, 24
+    mov edx, 0x534D4150
+    
+    int 0x15
+    jc .done                       ; Если ошибка, завершаем
+    
+    jmp .loop
+
+.error:
+    mov si, memory_map_error_msg
+    call print_string
+    mov dword [MEMORY_MAP_OFFSET], 0  ; Ноль записей при ошибке
+    
+.done:
+    ; Выводим информацию о полученной карте памяти
+    mov si, memory_map_ok_msg
+    call print_string
+    
+    mov eax, [MEMORY_MAP_OFFSET]
+    call print_hex_word
+    
+    mov si, memory_map_entries_msg
+    call print_string
+    
+    pop es
+    popa
+    ret
+
+; ====================================
+; Вывод 32-битного слова в hex
+; ====================================
+print_hex_word:
+    pusha
+    
+    ; Выводим старшее слово
+    mov bx, ax
+    shr eax, 16
+    call print_hex
+    
+    ; Выводим младшее слово
+    mov ax, bx
+    call print_hex
+    
+    popa
+    ret
 
 ; ====================================
 ; Проверка расширений INT 13h (LBA)
@@ -192,6 +280,9 @@ init_pm:
     mov ebp, 0x90000
     mov esp, ebp
     
+    ; Передаем информацию о памяти ядру через регистр EBX
+    mov ebx, MEMORY_MAP_OFFSET
+    
     ; Вызываем ядро
     call KERNEL_OFFSET
     
@@ -255,8 +346,11 @@ DATA_SEG equ gdt_data - gdt_start
 stage2_msg db 'LufiraOS Stage2: Loading kernel...', 0x0D, 0x0A, 0
 kernel_loaded_msg db 'Kernel loaded successfully', 0x0D, 0x0A, 0
 pm_msg db 'Switching to protected mode...', 0x0D, 0x0A, 0
+memory_map_ok_msg db 'Memory map obtained: ', 0
+memory_map_entries_msg db ' entries', 0x0D, 0x0A, 0
+memory_map_error_msg db 'Error getting memory map', 0x0D, 0x0A, 0
 disk_err_msg db 'Stage2 Disk error: 0x', 0
-error_prompt db 0x0D, 0x0A, 'Press any key to reboot', 0x0D, 0x0A, 0
+error_prompt db 0x0D, 0x0A, 'Press any key to reboot', 0x0D, 0xA, 0
 hex_chars db '0123456789ABCDEF'
 BOOT_DRIVE db 0
 LBA_SUPPORT db 0

@@ -38,4 +38,4 @@ echo "   Press Ctrl+Alt to exit QEMU"
 echo "====================================="
 echo ""
 
-qemu-system-x86_64 -fda build/lufiraos.img -no-reboot -no-shutdown
+qemu-system-x86_64 -fda build/lufiraos.img

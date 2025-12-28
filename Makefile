@@ -19,7 +19,7 @@ OS_IMAGE = build/lufiraos.img
 
 # Цели сборки
 BOOT_OBJ = boot/boot.asm
-KERNEL_OBJS = build/kernel_entry.o build/kernel.o build/keyboard.o build/shell.o build/string.o build/fs.o build/disk.o
+KERNEL_OBJS = build/kernel_entry.o build/kernel.o build/keyboard.o build/shell.o build/string.o build/fs.o build/disk.o build/memory.o
 
 # Создание директории build
 $(shell mkdir -p build)
@@ -57,6 +57,9 @@ build/disk.o: fs/disk.c fs/disk.h
 # Компиляция библиотек
 build/string.o: lib/string.c lib/string.h
 	$(CC) $(CC_FLAGS) -c lib/string.c -o $@
+
+build/memory.o: kernel/memory.c kernel/memory.h 
+	$(CC) $(CC_FLAGS) -c kernel/memory.c -o $@
 
 # Линковка ядра
 build/kernel.elf: $(KERNEL_OBJS)
