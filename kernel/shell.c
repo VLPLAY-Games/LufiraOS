@@ -382,7 +382,7 @@ static int parse_arguments(char* str, char* argv[], int max_args) {
 
 /* Выполнить команду */
 void shell_execute(const char* command) {
-    /* Копируем команду в буфер для обработки */
+    /* Копируем команду в буфер для обработка */
     strncpy(input_buffer, command, MAX_COMMAND_LENGTH - 1);
     input_buffer[MAX_COMMAND_LENGTH - 1] = '\0';
 
@@ -418,7 +418,7 @@ void shell_start(void) {
     terminal_writestring("\n");
     terminal_setcolor(make_color(COLOR_WHITE, COLOR_BLACK));
 
-    /* Инициализируем файловую систему */
+    /* Инициализируем файловую систему (уже должна быть инициализирована в kernel_main) */
     fs_init();
 
     while (1) {
@@ -434,16 +434,19 @@ void shell_start(void) {
     }
 }
 
-/* Команда format */
+/* Команда format - исправленная версия */
 void cmd_fs_format(void) {
-    terminal_writestring("Are you sure? This will erase all data! (y/n): ");
+    char response[64];
     
-    char confirm = keyboard_getchar();
-    terminal_putchar(confirm);
+    terminal_writestring("Are you sure? This will erase all data! (y/N): ");
+    keyboard_getline(response, sizeof(response));
     
-    if (confirm == 'y' || confirm == 'Y') {
+    if (response[0] == 'y' || response[0] == 'Y') {
+        terminal_writestring("Formatting...\n");
         if (fs_format() == 0) {
             terminal_writestring("Filesystem formatted successfully\n");
+            /* Переинициализируем ФС после форматирования */
+            fs_init();
         }
     } else {
         terminal_writestring("Format cancelled\n");

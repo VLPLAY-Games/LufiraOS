@@ -101,5 +101,8 @@ int disk_write(uint32_t lba, const uint8_t* buffer, uint32_t sector_count) {
         }
     }
     
+    /* Ожидаем завершения записи */
+    disk_wait();
+    
     return 0;
 }
