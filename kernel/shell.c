@@ -25,6 +25,8 @@ void cmd_fs_list(void);
 void cmd_fs_create(void);
 void cmd_fs_delete(void);
 void cmd_fs_info(void);
+void cmd_cd(void);
+void cmd_mkdir(void);
 
 /* Функция для отправки команды в порт */
 static inline void outb(uint16_t port, uint8_t value) {
@@ -53,6 +55,8 @@ static command_t commands[] = {
     {"ls", "List files", cmd_fs_list},
     {"touch", "Create file", cmd_fs_create},
     {"rm", "Delete file", cmd_fs_delete},
+    {"mkdir", "Create directory", cmd_mkdir},
+    {"cd", "Change directory", cmd_cd},
     {"fsinfo", "Filesystem info", cmd_fs_info},
     {NULL, NULL, NULL}
 };
@@ -226,7 +230,7 @@ void terminal_setcolor(uint8_t color) {
     terminal_color = color;
 }
 
-/* Вывести приглашение */
+/* Вывести приглашение с текущим путем */
 static void print_prompt(void) {
     /* Проверяем, не в начале ли строки мы */
     if (cursor_x != 0) {
@@ -235,7 +239,17 @@ static void print_prompt(void) {
 
     /* Устанавливаем зеленый цвет для приглашения */
     terminal_setcolor(make_color(COLOR_GREEN, COLOR_BLACK));
-    terminal_writestring("lufira> ");
+    
+    /* Получаем текущий путь из файловой системы */
+    const char* path = fs_get_current_path();
+    terminal_writestring(path);
+    
+    /* Если путь не заканчивается на / и не корень, добавляем его */
+    if (strcmp(path, "/") != 0 && path[strlen(path)-1] != '/') {
+        terminal_writestring("/");
+    }
+    
+    terminal_writestring("> ");
 
     /* Возвращаем белый цвет для ввода пользователя */
     terminal_setcolor(make_color(COLOR_WHITE, COLOR_BLACK));
@@ -395,7 +409,6 @@ void shell_execute(const char* command) {
 }
 
 /* Запуск shell */
-/* Запуск shell */
 void shell_start(void) {
     terminal_setcolor(make_color(COLOR_LIGHT_GREY, COLOR_BLACK));
     terminal_writestring("LufiraOS Shell v0.1.0\n");
@@ -404,6 +417,9 @@ void shell_start(void) {
     terminal_writestring("Type 'info' for system information.\n");
     terminal_writestring("\n");
     terminal_setcolor(make_color(COLOR_WHITE, COLOR_BLACK));
+
+    /* Инициализируем файловую систему */
+    fs_init();
 
     while (1) {
         print_prompt();
@@ -463,6 +479,30 @@ void cmd_fs_delete(void) {
     }
 }
 
+/* Команда mkdir */
+void cmd_mkdir(void) {
+    char dirname[MAX_FILENAME];
+    
+    terminal_writestring("Enter directory name: ");
+    keyboard_getline(dirname, MAX_FILENAME);
+    
+    if (fs_mkdir(dirname) != 0) {
+        terminal_writestring("Failed to create directory\n");
+    }
+}
+
+/* Команда cd */
+void cmd_cd(void) {
+    char path[256];
+    
+    terminal_writestring("Enter directory (or .. for parent): ");
+    keyboard_getline(path, sizeof(path));
+    
+    if (fs_cd(path) != 0) {
+        terminal_writestring("Failed to change directory\n");
+    }
+}
+
 /* Команда fsinfo */
 void cmd_fs_info(void) {
     char free_space[32];
@@ -471,6 +511,9 @@ void cmd_fs_info(void) {
     terminal_writestring("Filesystem Information:\n");
     terminal_writestring("======================\n");
     terminal_writestring("Type: LufiraFS\n");
+    terminal_writestring("Current path: ");
+    terminal_writestring(fs_get_current_path());
+    terminal_writestring("\n");
     terminal_writestring("Free space: ");
     terminal_writestring(free_space);
     terminal_writestring(" bytes\n");
@@ -478,4 +521,3 @@ void cmd_fs_info(void) {
     terminal_writestring("Max files per dir: 16\n");
     terminal_writestring("Max file size: 4KB\n\n");
 }
-

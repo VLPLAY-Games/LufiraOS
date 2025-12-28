@@ -11,6 +11,7 @@ static dir_block_t current_dir;
 static file_entry_t* open_files[10];
 static uint32_t current_dir_block = 1; /* Блок 1 - корневая директория */
 static int fs_initialized = 0; /* Флаг инициализации ФС */
+static char current_path[256] = "/"; /* Текущий путь */
 
 /* Вспомогательные функции */
 
@@ -71,10 +72,46 @@ static file_entry_t* find_free_entry(void) {
     return NULL;
 }
 
+/* Загрузить директорию по номеру блока */
+static int load_dir(uint32_t block_num) {
+    if (read_block(block_num, &current_dir) != 0) {
+        return -1;
+    }
+    current_dir_block = block_num;
+    return 0;
+}
+
+/* Разбор пути на компоненты */
+static int parse_path(const char* path, char components[][MAX_FILENAME], int* count) {
+    char temp[256];
+    strcpy(temp, path);
+    
+    *count = 0;
+    char* token = strtok(temp, "/");
+    
+    while (token != NULL && *count < 10) {
+        strcpy(components[*count], token);
+        (*count)++;
+        token = strtok(NULL, "/");
+    }
+    
+    return 0;
+}
+
+/* Получить текущий путь */
+const char* fs_get_current_path(void) {
+    return current_path;
+}
+
 /* Основные функции ФС */
 
 /* Инициализация ФС */
 void fs_init(void) {
+    /* Если уже инициализирована, просто возвращаемся */
+    if (fs_initialized) {
+        return;
+    }
+    
     /* Сначала пробуем прочитать суперблок */
     if (read_block(0, &superblock) != 0) {
         terminal_writestring("FS: Cannot read superblock - disk may be empty\n");
@@ -84,7 +121,14 @@ void fs_init(void) {
     
     /* Проверяем сигнатуру */
     if (strcmp(superblock.signature, "LUFIRAFS") != 0) {
-        terminal_writestring("FS: No valid filesystem found. Use 'format' command\n");
+        terminal_writestring("FS: No valid filesystem found\n");
+        fs_initialized = 0;
+        return;
+    }
+    
+    /* Проверяем версию */
+    if (superblock.version != 1) {
+        terminal_writestring("FS: Unsupported filesystem version\n");
         fs_initialized = 0;
         return;
     }
@@ -101,8 +145,10 @@ void fs_init(void) {
         open_files[i] = NULL;
     }
     
+    /* Сбрасываем путь на корень */
+    strcpy(current_path, "/");
+    
     fs_initialized = 1;
-    terminal_writestring("FS: Initialized successfully\n");
     
     /* Выводим информацию о ФС */
     char buf[32];
@@ -165,6 +211,9 @@ int fs_format(void) {
         return -1;
     }
     
+    /* Сбрасываем путь */
+    strcpy(current_path, "/");
+    
     /* Обновляем флаг инициализации */
     fs_initialized = 1;
     
@@ -183,7 +232,7 @@ int fs_format(void) {
     return 0;
 }
 
-/* Создать файл */
+/* Создать файл или директорию */
 int fs_create(const char* filename, uint8_t is_directory) {
     /* Проверяем, инициализирована ли ФС */
     if (!fs_initialized) {
@@ -214,17 +263,6 @@ int fs_create(const char* filename, uint8_t is_directory) {
     int first_block = find_free_block();
     if (first_block < 0) {
         terminal_writestring("FS: No free space\n");
-        
-        /* Выводим отладочную информацию */
-        char buf[32];
-        terminal_writestring("Debug: total_blocks=");
-        itoa(superblock.total_blocks, buf, 10);
-        terminal_writestring(buf);
-        terminal_writestring(", free_blocks=");
-        itoa(superblock.free_blocks, buf, 10);
-        terminal_writestring(buf);
-        terminal_writestring("\n");
-        
         return -1;
     }
     
@@ -237,7 +275,32 @@ int fs_create(const char* filename, uint8_t is_directory) {
     entry->is_directory = is_directory;
     entry->permissions = 0xFF; /* Все права */
     
-    /* Обновляем директорию на диске */
+    /* Если это директория, инициализируем её содержимое */
+    if (is_directory) {
+        dir_block_t new_dir;
+        memset(&new_dir, 0, sizeof(dir_block_t));
+        new_dir.next_block = 0;
+        
+        /* Запись для текущей директории */
+        strcpy(new_dir.entries[0].name, ".");
+        new_dir.entries[0].is_used = 1;
+        new_dir.entries[0].is_directory = 1;
+        new_dir.entries[0].first_block = first_block;
+        
+        /* Запись для родительской директории */
+        strcpy(new_dir.entries[1].name, "..");
+        new_dir.entries[1].is_used = 1;
+        new_dir.entries[1].is_directory = 1;
+        new_dir.entries[1].first_block = current_dir_block;
+        
+        /* Записываем новую директорию на диск */
+        if (write_block(first_block, &new_dir) != 0) {
+            terminal_writestring("FS: Cannot write directory contents\n");
+            return -1;
+        }
+    }
+    
+    /* Обновляем текущую директорию на диске */
     if (write_block(current_dir_block, &current_dir) != 0) {
         terminal_writestring("FS: Cannot update directory\n");
         return -1;
@@ -249,23 +312,110 @@ int fs_create(const char* filename, uint8_t is_directory) {
         return -1;
     }
     
-    terminal_writestring("FS: File '");
+    terminal_writestring("FS: '");
     terminal_writestring(filename);
     terminal_writestring("' created successfully\n");
-    
-    /* Выводим информацию о созданном файле */
-    char buf[32];
-    terminal_writestring("File allocated block: ");
-    itoa(first_block, buf, 10);
-    terminal_writestring(buf);
-    terminal_writestring("\n");
     
     return 0;
 }
 
-/* Остальные функции оставить как есть, но добавить проверку fs_initialized в начале каждой */
+/* Создать директорию */
+int fs_mkdir(const char* dirname) {
+    return fs_create(dirname, 1);
+}
 
-/* Удалить файл */
+/* Сменить директорию */
+int fs_cd(const char* path) {
+    if (!fs_initialized) {
+        terminal_writestring("FS: Filesystem not initialized\n");
+        return -1;
+    }
+    
+    char local_path[256];
+    strcpy(local_path, path);
+    
+    /* Обработка специальных случаев */
+    if (strcmp(local_path, ".") == 0) {
+        return 0; /* Остаёмся в текущей директории */
+    }
+    
+    if (strcmp(local_path, "..") == 0) {
+        /* Переходим в родительскую директорию */
+        file_entry_t* parent = find_file("..");
+        if (parent == NULL || !parent->is_directory) {
+            terminal_writestring("FS: Cannot go to parent directory\n");
+            return -1;
+        }
+        
+        /* Загружаем родительскую директорию */
+        if (load_dir(parent->first_block) != 0) {
+            terminal_writestring("FS: Cannot load parent directory\n");
+            return -1;
+        }
+        
+        /* Обновляем путь */
+        if (strcmp(current_path, "/") != 0) {
+            /* Удаляем последний компонент пути */
+            char* last_slash = strrchr(current_path, '/');
+            if (last_slash != NULL) {
+                if (last_slash == current_path) {
+                    /* Мы в корне? */
+                    current_path[1] = '\0';
+                } else {
+                    *last_slash = '\0';
+                }
+            }
+        }
+        return 0;
+    }
+    
+    if (strcmp(local_path, "/") == 0) {
+        /* Переходим в корень */
+        if (load_dir(superblock.root_dir) != 0) {
+            terminal_writestring("FS: Cannot load root directory\n");
+            return -1;
+        }
+        strcpy(current_path, "/");
+        return 0;
+    }
+    
+    /* Ищем директорию в текущей директории */
+    file_entry_t* dir = find_file(local_path);
+    if (dir == NULL) {
+        terminal_writestring("FS: Directory not found: ");
+        terminal_writestring(local_path);
+        terminal_writestring("\n");
+        return -1;
+    }
+    
+    if (!dir->is_directory) {
+        terminal_writestring("FS: Not a directory: ");
+        terminal_writestring(local_path);
+        terminal_writestring("\n");
+        return -1;
+    }
+    
+    /* Загружаем новую директорию */
+    if (load_dir(dir->first_block) != 0) {
+        terminal_writestring("FS: Cannot load directory\n");
+        return -1;
+    }
+    
+    /* Обновляем путь */
+    if (strcmp(current_path, "/") != 0) {
+        strcat(current_path, "/");
+    }
+    if (strcmp(current_path, "/") == 0 && local_path[0] != '/') {
+        /* Добавляем к корню */
+        strcat(current_path, local_path);
+    } else if (strcmp(current_path, "/") != 0) {
+        strcat(current_path, local_path);
+    }
+    
+    return 0;
+}
+
+/* Удалить файл или директорию */
 int fs_delete(const char* filename) {
     if (!fs_initialized) {
         terminal_writestring("FS: Filesystem not initialized. Use 'format' first.\n");
@@ -277,6 +427,26 @@ int fs_delete(const char* filename) {
     if (file == NULL) {
         terminal_writestring("FS: File not found\n");
         return -1;
+    }
+    
+    /* Если это директория, проверяем, не пуста ли она */
+    if (file->is_directory) {
+        /* Загружаем директорию для проверки */
+        dir_block_t dir_check;
+        if (read_block(file->first_block, &dir_check) == 0) {
+            int file_count = 0;
+            for (int i = 2; i < 16; i++) { /* Пропускаем . и .. */
+                if (dir_check.entries[i].is_used) {
+                    file_count++;
+                    break;
+                }
+            }
+            
+            if (file_count > 0) {
+                terminal_writestring("FS: Directory not empty\n");
+                return -1;
+            }
+        }
     }
     
     /* Освобождаем блоки файла */
@@ -299,7 +469,7 @@ int fs_delete(const char* filename) {
         return -1;
     }
     
-    terminal_writestring("FS: File '");
+    terminal_writestring("FS: '");
     terminal_writestring(filename);
     terminal_writestring("' deleted\n");
     
@@ -317,6 +487,11 @@ file_entry_t* fs_open(const char* filename) {
     
     if (file == NULL) {
         terminal_writestring("FS: File not found\n");
+        return NULL;
+    }
+    
+    if (file->is_directory) {
+        terminal_writestring("FS: Cannot open directory as file\n");
         return NULL;
     }
     
@@ -468,7 +643,9 @@ void fs_list(void) {
         return;
     }
     
-    terminal_writestring("Directory listing:\n");
+    terminal_writestring("Directory: ");
+    terminal_writestring(current_path);
+    terminal_writestring("\n");
     terminal_writestring("------------------\n");
     
     int file_count = 0;

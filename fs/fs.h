@@ -58,8 +58,17 @@ int fs_is_initialized(void);
 /* Форматирование диска */
 int fs_format(void);
 
-/* Создать файл */
+/* Создать файл или директорию */
 int fs_create(const char* filename, uint8_t is_directory);
+
+/* Создать директорию */
+int fs_mkdir(const char* dirname);
+
+/* Сменить директорию */
+int fs_cd(const char* path);
+
+/* Получить текущий путь */
+const char* fs_get_current_path(void);
 
 /* Удалить файл */
 int fs_delete(const char* filename);

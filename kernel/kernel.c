@@ -74,6 +74,15 @@ void kernel_main(void) {
         terminal_writestring("[FS]  Filesystem not found, formatting... ");
         fs_format();
         terminal_writestring("OK\n");
+        
+        /* После форматирования нужно переинициализировать ФС */
+        terminal_writestring("[FS]  Reinitializing filesystem... ");
+        fs_init();
+        if (fs_is_initialized()) {
+            terminal_writestring("OK\n");
+        } else {
+            terminal_writestring("FAILED\n");
+        }
     } else {
         terminal_writestring("OK\n");
         terminal_writestring("[FS]  Mounted successfully\n");
