@@ -3,7 +3,7 @@ bits 16
 org 0x7c00
 
 STAGE2_OFFSET equ 0x7e00      ; Загружаем Stage2 сюда (сразу после MBR)
-STAGE2_START_SECTOR equ 2     ; Stage2 начинается со 2-го сектора
+STAGE2_START_SECTOR equ 1     ; Stage2 начинается с 1-го сектора (после MBR)
 STAGE2_SECTORS equ 4          ; Размер Stage2 в секторах (2KB)
 
 start:
@@ -14,10 +14,20 @@ start:
     mov es, ax
     mov ss, ax
     mov sp, 0x7c00
+    sti
     
-    ; Сохраняем номер загрузочного диска (жесткий диск обычно 0x80)
+    ; Сохраняем номер загрузочного диска
     mov [BOOT_DRIVE], dl
     
+    ; Проверяем, загружаемся ли мы с жесткого диска (0x80+)
+    cmp dl, 0x80
+    jb .is_floppy
+    mov byte [IS_HDD], 1
+    jmp .continue
+.is_floppy:
+    mov byte [IS_HDD], 0
+    
+.continue:
     ; Печать приветственного сообщения
     mov si, boot_msg
     call print_string
@@ -29,6 +39,7 @@ start:
     call load_stage2
     
     ; Переход к Stage2
+    mov dl, [BOOT_DRIVE]    ; Передаем номер диска в DL
     jmp STAGE2_OFFSET
     
     ; Сюда не должны дойти
@@ -51,12 +62,16 @@ check_int13_extensions:
     
     ; Расширения поддерживаются
     mov byte [LBA_SUPPORT], 1
+    mov si, lba_support_msg
+    call print_string
     popa
     ret
     
 .no_extensions:
     ; Расширения не поддерживаются, используем CHS
     mov byte [LBA_SUPPORT], 0
+    mov si, chs_mode_msg
+    call print_string
     popa
     ret
 
@@ -70,6 +85,11 @@ load_stage2:
     je .use_lba
     
     ; Используем CHS (старый метод)
+    ; Для жесткого диска используем другой подход
+    cmp byte [IS_HDD], 1
+    je .chs_hdd
+    
+    ; Для флоппи-диска
     mov ah, 0x02            ; Функция чтения секторов
     mov al, STAGE2_SECTORS  ; Количество секторов для чтения
     mov ch, 0               ; Цилиндр 0
@@ -84,6 +104,25 @@ load_stage2:
     ; Проверяем, сколько секторов прочитано
     cmp al, STAGE2_SECTORS
     jne disk_error
+    
+    jmp .success
+    
+.chs_hdd:
+    ; Для жесткого диска через CHS
+    ; Сброс дискового контроллера
+    mov ah, 0x00
+    mov dl, [BOOT_DRIVE]
+    int 0x13
+    jc disk_error
+    
+    ; Чтение Stage2 для жесткого диска
+    mov ax, 0x0200 + STAGE2_SECTORS  ; AH=02 (читать), AL=секторы
+    mov cx, 0x0002                   ; CH=0 (цилиндр), CL=2 (сектор)
+    mov dh, 0                        ; Головка 0
+    mov dl, [BOOT_DRIVE]             ; Номер диска
+    mov bx, STAGE2_OFFSET            ; Буфер
+    int 0x13
+    jc disk_error
     
     jmp .success
     
@@ -173,13 +212,16 @@ print_string:
 ; ====================================
 ; Данные
 ; ====================================
-boot_msg db 'LufiraOS Stage1: Loading Stage2...', 0x0D, 0x0A, 0
-stage2_loaded_msg db 'Stage2 loaded successfully', 0x0D, 0x0A, 0
-disk_err_msg db 'Stage1 Disk error: 0x', 0
+boot_msg db 'LufiraOS S1: Loading S2...', 0x0D, 0x0A, 0
+stage2_loaded_msg db 'S2 loaded successfully', 0x0D, 0x0A, 0
+disk_err_msg db 'S1 Disk error: 0x', 0
 error_prompt db 0x0D, 0x0A, 'Press any key to reboot', 0x0D, 0x0A, 0
+lba_support_msg db 'LBA supported', 0x0D, 0x0A, 0
+chs_mode_msg db 'Using CHS mode', 0x0D, 0x0A, 0
 hex_chars db '0123456789ABCDEF'
 BOOT_DRIVE db 0
 LBA_SUPPORT db 0
+IS_HDD db 0
 
 ; Структура DAP (Disk Address Packet) для LBA
 DAPACK:
@@ -194,7 +236,19 @@ DAPACK:
 times 446-($-$$) db 0           ; Заполняем до конца MBR кода
 
 ; Таблица разделов (64 байта)
-times 64 db 0
+; Создаем один активный раздел, занимающий весь диск
+partition1:
+    db 0x80                    ; Флаг активности (0x80 = активный)
+    db 0x00, 0x00, 0x00       ; CHS начало (не используется для LBA)
+    db 0x0C                   ; Тип раздела (0x0C = FAT32 LBA)
+    db 0xFE, 0xFF, 0xFF       ; CHS конец (не используется для LBA)
+    dd 0x00000001             ; LBA начало раздела (сектор 1)
+    dd 2879                   ; Размер раздела в секторах (всего 2880 секторов - 1)
+
+; Остальные разделы пустые
+times 16 db 0
+times 16 db 0
+times 16 db 0
 
 ; Сигнатура MBR
 dw 0xAA55

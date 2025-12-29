@@ -3,8 +3,8 @@ bits 16
 org 0x7e00
 
 KERNEL_OFFSET equ 0x1000          ; Адрес загрузки ядра (64K)
-KERNEL_START_SECTOR equ 6         ; Ядро начинается после Stage2 (2+4=6)
-KERNEL_SECTORS equ 53            ; размер ядра в секторах (27 136 Bytes)
+KERNEL_START_SECTOR equ 34        ; Ядро начинается с сектора 34 (MBR+Stage2+выравнивание)
+KERNEL_SECTORS equ 54           ; размер ядра в секторах (~50KB)
 
 MEMORY_MAP_OFFSET equ 0x5000      ; Адрес для хранения карты памяти
 
@@ -165,7 +165,7 @@ load_kernel:
     mov ah, 0x02            ; Функция чтения секторов
     mov al, KERNEL_SECTORS  ; Количество секторов (теперь 100)
     mov ch, 0               ; Цилиндр 0
-    mov cl, KERNEL_START_SECTOR ; Стартовый сектор (с 1)
+    mov cl, KERNEL_START_SECTOR ; Стартовый сектор
     mov dh, 0               ; Головка 0
     mov dl, [BOOT_DRIVE]    ; Номер диска
     

@@ -71,28 +71,28 @@ $(KERNEL): build/kernel.elf
 	$(OBJCOPY) -O binary build/kernel.elf $(KERNEL)
 	@echo "Kernel binary size: $$(stat -c%s $(KERNEL)) bytes"
 
-# Создание образа диска
+# Создание образа жесткого диска
 $(OS_IMAGE): $(BOOTLOADER) $(STAGE2) $(KERNEL)
-	@echo "Creating disk image with two-stage bootloader..."
-	# Создаем пустой образ 1.44MB
-	dd if=/dev/zero of=$(OS_IMAGE) bs=512 count=2880 2>/dev/null
-	# Копируем Stage 1 (MBR)
+	@echo "Creating hard disk image..."
+	# Создаем образ жесткого диска 2MB
+	dd if=/dev/zero of=$(OS_IMAGE) bs=1M count=2 2>/dev/null
+	# Создаем таблицу разделов и копируем загрузчик
 	dd if=$(BOOTLOADER) of=$(OS_IMAGE) conv=notrunc 2>/dev/null
 	# Копируем Stage 2 (начиная с сектора 1)
 	dd if=$(STAGE2) of=$(OS_IMAGE) conv=notrunc bs=512 seek=1 2>/dev/null
-	# Копируем ядро (начиная с сектора 5)
-	dd if=$(KERNEL) of=$(OS_IMAGE) conv=notrunc bs=512 seek=5 2>/dev/null
-	@echo "Disk image created: $(OS_IMAGE)"
+	# Копируем ядро (начиная с сектора 34)
+	dd if=$(KERNEL) of=$(OS_IMAGE) conv=notrunc bs=512 seek=34 2>/dev/null
+	@echo "Hard disk image created: $(OS_IMAGE)"
 
-# Запуск в QEMU
+# Запуск в QEMU через жесткий диск
 run: $(OS_IMAGE)
-	@echo "Starting QEMU..."
-	qemu-system-x86_64 -fda $(OS_IMAGE) -no-reboot
+	@echo "Starting QEMU with hard disk..."
+	qemu-system-x86_64 -hda $(OS_IMAGE) -no-reboot
 
-# Запуск с отладкой
+# Запуск через жесткий диск с отладкой
 debug: $(OS_IMAGE)
-	@echo "Starting QEMU in debug mode..."
-	qemu-system-x86_64 -S -s -fda $(OS_IMAGE) -no-reboot &
+	@echo "Starting QEMU in debug mode (hard disk)..."
+	qemu-system-x86_64 -S -s -hda $(OS_IMAGE) -no-reboot &
 	@echo "Waiting for GDB connection..."
 	@sleep 1
 	gdb -ex "target remote localhost:1234" -ex "symbol-file build/kernel.elf" -ex "break _start" -ex "continue"
