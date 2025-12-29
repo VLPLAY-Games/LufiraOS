@@ -4,47 +4,56 @@ CC := gcc
 LD := ld
 OBJCOPY := objcopy
 
-# Флаги
-CFLAGS := -ffreestanding -fpic -fshort-wchar -mno-red-zone \
-          -I/usr/include/efi -I/usr/include/efi/$(ARCH) -I./src/include \
-          -Wall -Wextra -O2
-
-LDFLAGS := -nostdlib -znocombreloc -T /usr/lib/elf_$(ARCH)_efi.lds \
-           -shared -Bsymbolic -L/usr/lib
-
-LIBS := -lefi -lgnuefi
-
 # Пути
 BUILDDIR := build
+ISODIR := $(BUILDDIR)/iso
 EFI_APP := $(BUILDDIR)/BOOTX64.EFI
 ISO_IMAGE := $(BUILDDIR)/lufiraos.iso
-OVMF_CODE := /usr/share/ovmf/OVMF.fd
+
+# Флаги для загрузчика (EFI)
+BOOT_CFLAGS := -ffreestanding -fpic -fshort-wchar -mno-red-zone \
+               -I/usr/include/efi -I/usr/include/efi/$(ARCH) \
+               -I./src/include -Wall -Wextra -O2
+
+# Флаги для ядра
+KERNEL_CFLAGS := -ffreestanding -nostdlib -mno-red-zone \
+                 -I./src/include -I./src/kernel \
+                 -Wall -Wextra -O2 -mcmodel=large
+
+# Флаги линковки
+BOOT_LDFLAGS := -nostdlib -T /usr/lib/elf_$(ARCH)_efi.lds \
+                -shared -Bsymbolic -L/usr/lib
+
+KERNEL_LDFLAGS := -nostdlib -T src/kernel/linker.ld
+
+# Библиотеки
+BOOT_LIBS := -lefi -lgnuefi
 
 # Файлы
 BOOT_SRC := src/boot/main.c
-KERNEL_SRC := src/kernel/kernel.c
 BOOT_OBJ := $(BUILDDIR)/boot.o
+KERNEL_SRC := src/kernel/kernel.c
 KERNEL_OBJ := $(BUILDDIR)/kernel.o
 
-.PHONY: all clean run qemu debug
+.PHONY: all clean run qemu debug iso
 
 all: $(ISO_IMAGE)
 
 # Создаём директории
 $(BUILDDIR):
-	mkdir -p $(BUILDDIR)
+	mkdir -p $(BUILDDIR) $(ISODIR)/EFI/BOOT
 
 # Компиляция загрузчика
 $(BOOT_OBJ): $(BOOT_SRC) | $(BUILDDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(BOOT_CFLAGS) -c $< -o $@
 
 # Компиляция ядра
 $(KERNEL_OBJ): $(KERNEL_SRC) | $(BUILDDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
-# Линковка EFI приложения
-$(BUILDDIR)/main.elf: $(BOOT_OBJ) $(KERNEL_OBJ)
-	$(LD) $(LDFLAGS) /usr/lib/crt0-efi-$(ARCH).o $^ -o $@ $(LIBS)
+# Линковка EFI приложения (только загрузчик)
+$(BUILDDIR)/main.elf: $(BOOT_OBJ)
+	$(LD) $(BOOT_LDFLAGS) /usr/lib/crt0-efi-$(ARCH).o $^ -o $@ $(BOOT_LIBS)
 
 # Конвертация в EFI формат
 $(EFI_APP): $(BUILDDIR)/main.elf
@@ -52,72 +61,48 @@ $(EFI_APP): $(BUILDDIR)/main.elf
 	           -j .dynamic -j .dynsym -j .rel* \
 	           --target=efi-app-$(ARCH) $< $@
 
-# Создание загрузочной структуры для ISO - УПРОЩЕННЫЙ РАБОЧИЙ ВАРИАНТ
-$(BUILDDIR)/efi.img: $(EFI_APP)
-	# Создаём минимальный FAT12 образ (1.44 МБ) - это точно работает
+# Создание FAT образа
+$(BUILDDIR)/fat.img: $(EFI_APP)
 	dd if=/dev/zero of=$@ bs=1024 count=1440
-	mkfs.fat -F 12 $@
-	
-	# Создаём директории и копируем EFI приложение
-	mmd -i $@ ::/EFI
-	mmd -i $@ ::/EFI/BOOT
+	mformat -i $@ -f 1440 ::
+	mmd -i $@ ::/EFI ::/EFI/BOOT
 	mcopy -i $@ $< ::/EFI/BOOT/BOOTX64.EFI
 
-# Альтернатива: если нужен 2 МБ образ
-# $(BUILDDIR)/efi.img: $(EFI_APP)
-# 	# Создаём FAT16 образ 2 МБ
-# 	dd if=/dev/zero of=$@ bs=1024 count=2048
-# 	mkfs.fat -F 16 -s 4 $@
-# 	mmd -i $@ ::/EFI
-# 	mmd -i $@ ::/EFI/BOOT
-# 	mcopy -i $@ $< ::/EFI/BOOT/BOOTX64.EFI
+# Создание ISO
+$(ISO_IMAGE): $(BUILDDIR)/fat.img
+	xorriso -as mkisofs -R -f -e fat.img -no-emul-boot -o $@ $<
 
-# Создание ISO образа
-$(ISO_IMAGE): $(BUILDDIR)/efi.img
-	xorriso -as mkisofs -R -f -e /efi.img -no-emul-boot -o $@ $<
-
-# Запуск в QEMU (режим UEFI с выводом в терминал)
+# Запуск
 run: $(ISO_IMAGE)
 	qemu-system-x86_64 \
-		-bios $(OVMF_CODE) \
+		-bios /usr/share/ovmf/OVMF.fd \
 		-cdrom $(ISO_IMAGE) \
 		-net none \
 		-serial stdio \
-		-monitor none \
-		-nographic
+		-monitor none
 
-# Запуск в QEMU с графикой
+# Графический режим
 qemu: $(ISO_IMAGE)
 	qemu-system-x86_64 \
-		-bios $(OVMF_CODE) \
+		-bios /usr/share/ovmf/OVMF.fd \
 		-cdrom $(ISO_IMAGE) \
 		-net none \
-		-vga std \
-		-monitor stdio
+		-vga std
 
 # Отладка
 debug: $(ISO_IMAGE)
 	qemu-system-x86_64 \
-		-bios $(OVMF_CODE) \
+		-bios /usr/share/ovmf/OVMF.fd \
 		-cdrom $(ISO_IMAGE) \
 		-net none \
 		-serial stdio \
 		-s -S
 
-# Создание только ISO
-iso: $(ISO_IMAGE)
-
 # Очистка
 clean:
 	rm -rf $(BUILDDIR)
 
-# Информация о проекте
 info:
 	@echo "LufiraOS Build System"
-	@echo "Target: $(ARCH)-uefi"
-	@echo "Commands:"
-	@echo "  make        - Build everything"
-	@echo "  make run    - Run in QEMU (text mode)"
-	@echo "  make qemu   - Run in QEMU (graphics)"
-	@echo "  make debug  - Run with GDB debugger"
-	@echo "  make clean  - Clean build directory"
+	@echo "Architecture: $(ARCH)"
+	@echo "Build directory: $(BUILDDIR)"
