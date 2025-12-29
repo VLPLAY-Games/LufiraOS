@@ -1,104 +1,123 @@
-# Makefile для сборки LufiraOS
+# Настройки
+ARCH := x86_64
+CC := gcc
+LD := ld
+OBJCOPY := objcopy
 
-# Компиляторы и утилиты
-ASM = nasm
-CC = gcc
-LD = ld
-OBJCOPY = objcopy
+# Флаги
+CFLAGS := -ffreestanding -fpic -fshort-wchar -mno-red-zone \
+          -I/usr/include/efi -I/usr/include/efi/$(ARCH) -I./src/include \
+          -Wall -Wextra -O2
 
-# Флаги компиляции
-ASM_FLAGS = -f elf32
-CC_FLAGS = -m32 -std=gnu99 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -O0 -Wall -Wextra -I./kernel -I./lib
-LD_FLAGS = -m elf_i386 -T linker.ld -nostdlib
+LDFLAGS := -nostdlib -znocombreloc -T /usr/lib/elf_$(ARCH)_efi.lds \
+           -shared -Bsymbolic -L/usr/lib
 
-# Имена файлов
-BOOTLOADER = build/boot.bin
-STAGE2 = build/stage2.bin
-KERNEL = build/kernel.bin
-OS_IMAGE = build/lufiraos.img
+LIBS := -lefi -lgnuefi
 
-# Цели сборки
-BOOT_OBJ = boot/boot.asm
-KERNEL_OBJS = build/kernel_entry.o build/kernel.o build/keyboard.o build/shell.o build/string.o build/fs.o build/disk.o build/memory.o
+# Пути
+BUILDDIR := build
+EFI_APP := $(BUILDDIR)/BOOTX64.EFI
+ISO_IMAGE := $(BUILDDIR)/lufiraos.iso
+OVMF_CODE := /usr/share/ovmf/OVMF.fd
 
-# Создание директории build
-$(shell mkdir -p build)
+# Файлы
+BOOT_SRC := src/boot/main.c
+KERNEL_SRC := src/kernel/kernel.c
+BOOT_OBJ := $(BUILDDIR)/boot.o
+KERNEL_OBJ := $(BUILDDIR)/kernel.o
 
-# Цель по умолчанию
-all: $(OS_IMAGE)
+.PHONY: all clean run qemu debug
 
-# Сборка загрузчика
-$(BOOTLOADER): $(BOOT_OBJ)
-	$(ASM) -f bin $< -o $@
+all: $(ISO_IMAGE)
 
-$(STAGE2): boot/stage2.asm
-	$(ASM) -f bin $< -o $@
+# Создаём директории
+$(BUILDDIR):
+	mkdir -p $(BUILDDIR)
 
-# Компиляция точки входа ядра
-build/kernel_entry.o: kernel/kernel_entry.asm
-	$(ASM) $(ASM_FLAGS) $< -o $@
+# Компиляция загрузчика
+$(BOOT_OBJ): $(BOOT_SRC) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
 
-# Компиляция ядра на C
-build/kernel.o: kernel/kernel.c drivers/keyboard.h kernel/shell.h lib/string.h
-	$(CC) $(CC_FLAGS) -c kernel/kernel.c -o $@
+# Компиляция ядра
+$(KERNEL_OBJ): $(KERNEL_SRC) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
 
-build/keyboard.o: drivers/keyboard.c drivers/keyboard.h
-	$(CC) $(CC_FLAGS) -c drivers/keyboard.c -o $@
+# Линковка EFI приложения
+$(BUILDDIR)/main.elf: $(BOOT_OBJ) $(KERNEL_OBJ)
+	$(LD) $(LDFLAGS) /usr/lib/crt0-efi-$(ARCH).o $^ -o $@ $(LIBS)
 
-build/shell.o: kernel/shell.c kernel/shell.h drivers/keyboard.h lib/string.h
-	$(CC) $(CC_FLAGS) -c kernel/shell.c -o $@
+# Конвертация в EFI формат
+$(EFI_APP): $(BUILDDIR)/main.elf
+	$(OBJCOPY) -j .text -j .sdata -j .data -j .rodata \
+	           -j .dynamic -j .dynsym -j .rel* \
+	           --target=efi-app-$(ARCH) $< $@
 
-build/fs.o: fs/fs.c fs/fs.h lib/string.h
-	$(CC) $(CC_FLAGS) -c fs/fs.c -o $@
+# Создание загрузочной структуры для ISO - УПРОЩЕННЫЙ РАБОЧИЙ ВАРИАНТ
+$(BUILDDIR)/efi.img: $(EFI_APP)
+	# Создаём минимальный FAT12 образ (1.44 МБ) - это точно работает
+	dd if=/dev/zero of=$@ bs=1024 count=1440
+	mkfs.fat -F 12 $@
+	
+	# Создаём директории и копируем EFI приложение
+	mmd -i $@ ::/EFI
+	mmd -i $@ ::/EFI/BOOT
+	mcopy -i $@ $< ::/EFI/BOOT/BOOTX64.EFI
 
-build/disk.o: fs/disk.c fs/disk.h
-	$(CC) $(CC_FLAGS) -c fs/disk.c -o $@
+# Альтернатива: если нужен 2 МБ образ
+# $(BUILDDIR)/efi.img: $(EFI_APP)
+# 	# Создаём FAT16 образ 2 МБ
+# 	dd if=/dev/zero of=$@ bs=1024 count=2048
+# 	mkfs.fat -F 16 -s 4 $@
+# 	mmd -i $@ ::/EFI
+# 	mmd -i $@ ::/EFI/BOOT
+# 	mcopy -i $@ $< ::/EFI/BOOT/BOOTX64.EFI
 
-# Компиляция библиотек
-build/string.o: lib/string.c lib/string.h
-	$(CC) $(CC_FLAGS) -c lib/string.c -o $@
+# Создание ISO образа
+$(ISO_IMAGE): $(BUILDDIR)/efi.img
+	xorriso -as mkisofs -R -f -e /efi.img -no-emul-boot -o $@ $<
 
-build/memory.o: kernel/memory.c kernel/memory.h 
-	$(CC) $(CC_FLAGS) -c kernel/memory.c -o $@
+# Запуск в QEMU (режим UEFI с выводом в терминал)
+run: $(ISO_IMAGE)
+	qemu-system-x86_64 \
+		-bios $(OVMF_CODE) \
+		-cdrom $(ISO_IMAGE) \
+		-net none \
+		-serial stdio \
+		-monitor none \
+		-nographic
 
-# Линковка ядра
-build/kernel.elf: $(KERNEL_OBJS)
-	$(LD) $(LD_FLAGS) -o build/kernel.elf $(KERNEL_OBJS)
-	@echo "Kernel size: $$(stat -c%s build/kernel.elf) bytes"
+# Запуск в QEMU с графикой
+qemu: $(ISO_IMAGE)
+	qemu-system-x86_64 \
+		-bios $(OVMF_CODE) \
+		-cdrom $(ISO_IMAGE) \
+		-net none \
+		-vga std \
+		-monitor stdio
 
-# Конвертация в бинарный формат
-$(KERNEL): build/kernel.elf
-	$(OBJCOPY) -O binary build/kernel.elf $(KERNEL)
-	@echo "Kernel binary size: $$(stat -c%s $(KERNEL)) bytes"
+# Отладка
+debug: $(ISO_IMAGE)
+	qemu-system-x86_64 \
+		-bios $(OVMF_CODE) \
+		-cdrom $(ISO_IMAGE) \
+		-net none \
+		-serial stdio \
+		-s -S
 
-# Создание образа жесткого диска
-$(OS_IMAGE): $(BOOTLOADER) $(STAGE2) $(KERNEL)
-	@echo "Creating hard disk image..."
-	# Создаем образ жесткого диска 2MB
-	dd if=/dev/zero of=$(OS_IMAGE) bs=1M count=2 2>/dev/null
-	# Создаем таблицу разделов и копируем загрузчик
-	dd if=$(BOOTLOADER) of=$(OS_IMAGE) conv=notrunc 2>/dev/null
-	# Копируем Stage 2 (начиная с сектора 1)
-	dd if=$(STAGE2) of=$(OS_IMAGE) conv=notrunc bs=512 seek=1 2>/dev/null
-	# Копируем ядро (начиная с сектора 34)
-	dd if=$(KERNEL) of=$(OS_IMAGE) conv=notrunc bs=512 seek=34 2>/dev/null
-	@echo "Hard disk image created: $(OS_IMAGE)"
-
-# Запуск в QEMU через жесткий диск
-run: $(OS_IMAGE)
-	@echo "Starting QEMU with hard disk..."
-	qemu-system-x86_64 -hda $(OS_IMAGE) -no-reboot
-
-# Запуск через жесткий диск с отладкой
-debug: $(OS_IMAGE)
-	@echo "Starting QEMU in debug mode (hard disk)..."
-	qemu-system-x86_64 -S -s -hda $(OS_IMAGE) -no-reboot &
-	@echo "Waiting for GDB connection..."
-	@sleep 1
-	gdb -ex "target remote localhost:1234" -ex "symbol-file build/kernel.elf" -ex "break _start" -ex "continue"
+# Создание только ISO
+iso: $(ISO_IMAGE)
 
 # Очистка
 clean:
-	rm -rf build/*
+	rm -rf $(BUILDDIR)
 
-.PHONY: all run debug clean
+# Информация о проекте
+info:
+	@echo "LufiraOS Build System"
+	@echo "Target: $(ARCH)-uefi"
+	@echo "Commands:"
+	@echo "  make        - Build everything"
+	@echo "  make run    - Run in QEMU (text mode)"
+	@echo "  make qemu   - Run in QEMU (graphics)"
+	@echo "  make debug  - Run with GDB debugger"
+	@echo "  make clean  - Clean build directory"

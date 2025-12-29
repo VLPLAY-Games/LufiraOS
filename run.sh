@@ -1,41 +1,36 @@
 #!/bin/bash
-# run.sh - скрипт для быстрого запуска LufiraOS
+echo "Building LufiraOS..."
 
-echo "====================================="
-echo "       LufiraOS Build and Run"
-echo "====================================="
-echo ""
+# Создаем структуру каталогов
+mkdir -p build/iso/EFI/BOOT
 
-# Убедиться, что у нас есть необходимые инструменты
-echo "[1/3] Checking dependencies..."
-if ! command -v nasm &> /dev/null; then
-    echo "ERROR: NASM not found! Install with: sudo apt install nasm"
-    exit 1
-fi
+# Компилируем
+gcc -ffreestanding -fpic -fshort-wchar -mno-red-zone \
+    -I/usr/include/efi -I/usr/include/efi/x86_64 -I./src/include \
+    -c src/boot/main.c -o build/boot.o
 
-if ! command -v gcc &> /dev/null; then
-    echo "ERROR: GCC not found!"
-    exit 1
-fi
+gcc -ffreestanding -fpic -fshort-wchar -mno-red-zone \
+    -I/usr/include/efi -I/usr/include/efi/x86_64 -I./src/include \
+    -c src/kernel/kernel.c -o build/kernel.o
 
-if ! command -v qemu-system-x86_64 &> /dev/null; then
-    echo "ERROR: QEMU not found! Install with: sudo apt install qemu-system-x86_64"
-    exit 1
-fi
+# Линкуем
+ld -nostdlib -T /usr/lib/elf_x86_64_efi.lds -shared -Bsymbolic \
+    /usr/lib/crt0-efi-x86_64.o build/boot.o build/kernel.o \
+    -o build/main.elf -lefi -lgnuefi
 
-# Сборка
-echo "[2/3] Building LufiraOS..."
-make clean
-make || exit 1
+# Конвертируем в EFI
+objcopy -j .text -j .sdata -j .data -j .rodata \
+        -j .dynamic -j .dynsym -j .rel* \
+        --target=efi-app-x86_64 build/main.elf build/BOOTX64.EFI
 
-# Запуск
-echo "[3/3] Starting QEMU..."
-echo ""
-echo "====================================="
-echo "   Press Ctrl+Alt+G to release mouse"
-echo "   Press Ctrl+Alt+Del to restart"
-echo "   Press Ctrl+Alt to exit QEMU"
-echo "====================================="
-echo ""
+# Копируем в структуру ISO
+cp build/BOOTX64.EFI build/iso/EFI/BOOT/
 
-qemu-system-x86_64 -hda build/lufiraos.img
+# Создаем ISO
+dd if=/dev/zero of=build/fat.img bs=1k count=1440
+mformat -i build/fat.img -f 1440 ::
+mmd -i build/fat.img ::/EFI ::/EFI/BOOT
+mcopy -i build/fat.img build/iso/EFI/BOOT/BOOTX64.EFI ::/EFI/BOOT
+xorriso -as mkisofs -b fat.img -no-emul-boot -o build/lufiraos.iso build
+
+echo "Build complete! Run with: qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd -cdrom build/lufiraos.iso"
