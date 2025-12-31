@@ -4,15 +4,6 @@
 #include "drivers/console.h"
 #include "shell/shell.h"
 
-// --- Структуры данных ---
-typedef struct {
-    uint64_t FrameBufferBase;
-    uint64_t FrameBufferSize;
-    uint32_t HorizontalResolution;
-    uint32_t VerticalResolution;
-    uint32_t PixelsPerScanLine;
-} BootInfo;
-
 // --- Точка входа ядра ---
 __attribute__((section(".text.prologue")))
 void _start(BootInfo* bi) {

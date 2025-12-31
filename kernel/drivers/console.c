@@ -11,6 +11,9 @@ uint32_t* framebuffer;
 uint32_t current_color = 0xFFFFFF;
 uint32_t current_bg_color = 0x000000;
 uint32_t pixels_per_scan_line;
+uint32_t screen_width_pixels;
+uint32_t screen_height_pixels;
+uint32_t pixel_format = 0;  // По умолчанию RGB
 
 // --- Встроенный шрифт 8x8 пикселей ---
 static unsigned char full_font_data[][8] = {
@@ -111,26 +114,51 @@ static unsigned char full_font_data[][8] = {
     {0x00, 0x6C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, /* ~ */
 };
 
-typedef struct {
-    uint64_t FrameBufferBase;
-    uint64_t FrameBufferSize;
-    uint32_t HorizontalResolution;
-    uint32_t VerticalResolution;
-    uint32_t PixelsPerScanLine;
-} BootInfo;
-
-void initialize_console(void* bi_ptr) {
-    BootInfo* bi = (BootInfo*)bi_ptr;
-    framebuffer = (uint32_t*)bi->FrameBufferBase;
-    pixels_per_scan_line = bi->PixelsPerScanLine;
-    screen_width_chars = bi->HorizontalResolution / 9;
-    screen_height_chars = bi->VerticalResolution / 9;
-    current_x = 0;
-    current_y = 0;
+// Преобразование цвета из RGB в BGR если нужно
+uint32_t convert_color(uint32_t color) {
+    if (pixel_format == 0) {
+        // Уже RGB формат
+        return color;
+    } else {
+        // Конвертируем RGB в BGR
+        uint8_t r = (color >> 16) & 0xFF;
+        uint8_t g = (color >> 8) & 0xFF;
+        uint8_t b = color & 0xFF;
+        return (b << 16) | (g << 8) | r;
+    }
 }
 
+void initialize_console(BootInfo* bi) {
+    framebuffer = (uint32_t*)bi->FrameBufferBase;
+    pixels_per_scan_line = bi->PixelsPerScanLine;
+    screen_width_pixels = bi->HorizontalResolution;
+    screen_height_pixels = bi->VerticalResolution;
+    pixel_format = bi->PixelFormat;  // Получаем формат пикселей
+    
+    // Преобразуем стандартные цвета
+    current_color = convert_color(0xFFFFFF);
+    current_bg_color = convert_color(0x000000);
+    
+    // Вычисляем количество символов, которые поместятся на экране
+    // Каждый символ: 8 пикселей + 1 пиксель отступ = 9 пикселей
+    screen_width_chars = screen_width_pixels / 9;
+    screen_height_chars = screen_height_pixels / 9;
+    
+    // Гарантируем хотя бы минимальный размер
+    if (screen_width_chars < 10) screen_width_chars = 10;
+    if (screen_height_chars < 10) screen_height_chars = 10;
+    
+    current_x = 0;
+    current_y = 0;
+    
+    // Очищаем весь экран при инициализации
+    clear_entire_screen();
+}
+
+
 void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
-    if (x >= screen_width_chars * 8 || y >= screen_height_chars * 8) return;
+    // Проверяем границы всего экрана
+    if (x >= screen_width_pixels || y >= screen_height_pixels) return;
     framebuffer[y * pixels_per_scan_line + x] = color;
 }
 
@@ -143,23 +171,39 @@ void put_char_graphic(char c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_
     const uint32_t padding_x = 1;
     const uint32_t padding_y = 1;
     
+    // Преобразуем цвета если нужно
+    uint32_t converted_fg = fg_color;
+    uint32_t converted_bg = bg_color;
+    
+    // Переводим позиции символа в пиксели
+    uint32_t base_x = x * (char_width + padding_x);
+    uint32_t base_y = y * (char_height + padding_y);
+    
+    // Ограничиваем область отрисовки размерами экрана
+    if (base_x >= screen_width_pixels || base_y >= screen_height_pixels) return;
+    
     for (uint32_t cy = 0; cy < char_height + padding_y; cy++) {
+        uint32_t target_y = base_y + cy;
+        if (target_y >= screen_height_pixels) break;
+        
         for (uint32_t cx = 0; cx < char_width + padding_x; cx++) {
-            uint32_t target_x = x * (char_width + padding_x) + cx;
-            uint32_t target_y = y * (char_height + padding_y) + cy;
+            uint32_t target_x = base_x + cx;
+            if (target_x >= screen_width_pixels) break;
             
             if (cx < char_width && cy < char_height) {
                 if ((glyph[cy] >> (7 - cx)) & 1) {
-                    put_pixel(target_x, target_y, fg_color);
+                    put_pixel(target_x, target_y, converted_fg);
                 } else {
-                    put_pixel(target_x, target_y, bg_color);
+                    put_pixel(target_x, target_y, converted_bg);
                 }
             } else {
-                put_pixel(target_x, target_y, bg_color);
+                // Заливаем отступы цветом фона
+                put_pixel(target_x, target_y, converted_bg);
             }
         }
     }
 }
+
 
 void put_char(char c) {
     if (c == '\n') {
@@ -188,16 +232,52 @@ void put_char(char c) {
 }
 
 void scroll_screen(void) {
-    // Упрощенная прокрутка: очищаем экран
-    clear_screen();
+    // Сдвигаем содержимое экрана вверх на одну строку
+    uint32_t char_height_pixels = 9; // 8 + 1 отступ
+    
+    for (uint32_t y = char_height_pixels; y < screen_height_pixels; y++) {
+        for (uint32_t x = 0; x < screen_width_pixels; x++) {
+            uint32_t src_pixel = framebuffer[y * pixels_per_scan_line + x];
+            framebuffer[(y - char_height_pixels) * pixels_per_scan_line + x] = src_pixel;
+        }
+    }
+    
+    // Очищаем последнюю строку
+    uint32_t last_line_start = screen_height_pixels - char_height_pixels;
+    for (uint32_t y = last_line_start; y < screen_height_pixels; y++) {
+        for (uint32_t x = 0; x < screen_width_pixels; x++) {
+            put_pixel(x, y, current_bg_color);
+        }
+    }
+    
     current_x = 0;
-    current_y = screen_height_chars - 5; // Оставляем место для приглашения
+    current_y = screen_height_chars - 1;
 }
 
+
+// Очищает только область консоли (для символов)
 void clear_screen(void) {
-    for (uint32_t y = 0; y < screen_height_chars * 8; y++) {
-        for (uint32_t x = 0; x < screen_width_chars * 8; x++) {
+    uint32_t console_width = screen_width_chars * 9;
+    uint32_t console_height = screen_height_chars * 9;
+    
+    // Ограничиваем размер консоли размером экрана
+    if (console_width > screen_width_pixels) console_width = screen_width_pixels;
+    if (console_height > screen_height_pixels) console_height = screen_height_pixels;
+    
+    for (uint32_t y = 0; y < console_height; y++) {
+        for (uint32_t x = 0; x < console_width; x++) {
             put_pixel(x, y, current_bg_color);
+        }
+    }
+    current_x = 0;
+    current_y = 0;
+}
+
+// Очищает весь экран полностью
+void clear_entire_screen(void) {
+    for (uint32_t y = 0; y < screen_height_pixels; y++) {
+        for (uint32_t x = 0; x < screen_width_pixels; x++) {
+            framebuffer[y * pixels_per_scan_line + x] = current_bg_color;
         }
     }
     current_x = 0;

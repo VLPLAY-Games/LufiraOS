@@ -7,6 +7,7 @@ typedef struct {
     uint32_t HorizontalResolution;
     uint32_t VerticalResolution;
     uint32_t PixelsPerScanLine;
+    uint32_t PixelFormat;  // 0 = RGB, 1 = BGR
 } BootInfo;
 
 typedef void (*KernelEntry)(BootInfo*);
@@ -73,6 +74,20 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         bi.HorizontalResolution = gop->Mode->Info->HorizontalResolution;
         bi.VerticalResolution = gop->Mode->Info->VerticalResolution;
         bi.PixelsPerScanLine = gop->Mode->Info->PixelsPerScanLine;
+        
+        // Определяем формат пикселей
+        if (gop->Mode->Info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor) {
+            bi.PixelFormat = 1; // BGR
+            Print(L"Pixel Format:          BGR (Blue-Green-Red)\n");
+        } else if (gop->Mode->Info->PixelFormat == PixelRedGreenBlueReserved8BitPerColor) {
+            bi.PixelFormat = 0; // RGB
+            Print(L"Pixel Format:          RGB (Red-Green-Blue)\n");
+        } else {
+            // По умолчанию RGB
+            bi.PixelFormat = 0;
+            Print(L"Pixel Format:          RGB (default, unknown format)\n");
+        }
+        
         Print(L"Video Framebuffer:    0x%lx\n", bi.FrameBufferBase);
         Print(L"Current Resolution:   %dx%d\n", bi.HorizontalResolution, bi.VerticalResolution);
         Print(L"Pixels Per Line:      %d px\n", bi.PixelsPerScanLine);

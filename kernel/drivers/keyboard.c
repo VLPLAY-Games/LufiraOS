@@ -14,8 +14,11 @@ uint32_t input_buffer_index = 0;
 
 static int shift_pressed = 0;
 static int caps_lock = 0;
+static int ctrl_pressed = 0;
+static int alt_pressed = 0;
+static int extended_scancode = 0;  // Флаг для расширенных скан-кодов
 
-// Таблица скан-кодов (Set 1)
+// Таблица скан-кодов (Set 1) - с улучшенной обработкой
 static const char scancode_to_char[128] = {
     0,  27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
     '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
@@ -43,6 +46,16 @@ void keyboard_init(void) {
     // Ожидание сброса
     for (volatile int i = 0; i < 100000; i++);
     
+    // Включение прерываний клавиатуры
+    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xAE), "Nd"(KEYBOARD_COMMAND_PORT));
+    
+    // Сброс состояния модификаторов
+    shift_pressed = 0;
+    caps_lock = 0;
+    ctrl_pressed = 0;
+    alt_pressed = 0;
+    extended_scancode = 0;
+    
     // Очистка буфера клавиатуры
     uint8_t temp;
     uint8_t status;
@@ -52,6 +65,12 @@ void keyboard_init(void) {
         if (!(status & 1)) break;
         __asm__ volatile ("inb %1, %0" : "=a"(temp) : "Nd"(KEYBOARD_DATA_PORT));
     }
+    
+    // Отправка команды сброса клавиатуры
+    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xF6), "Nd"(KEYBOARD_DATA_PORT));
+    
+    // Небольшая задержка
+    for (volatile int i = 0; i < 50000; i++);
 }
 
 uint8_t keyboard_read_scancode(void) {
@@ -68,36 +87,91 @@ uint8_t keyboard_read_scancode(void) {
 }
 
 char keyboard_scancode_to_char(uint8_t scancode) {
+    // Обработка префикса расширенного скан-кода
+    if (scancode == 0xE0) {
+        extended_scancode = 1;
+        return 0;
+    }
+    
+    // Проверяем, является ли это кодом отпускания клавиши
     if (scancode & 0x80) {
-        // Код отпускания клавиши
         uint8_t keycode = scancode & 0x7F;
         
+        // Сбрасываем флаг расширенного кода
+        if (extended_scancode) {
+            extended_scancode = 0;
+            return 0;
+        }
+        
         // Обработка отпускания модификаторов
-        if (keycode == 0x2A || keycode == 0x36) { // Левый или правый Shift
-            shift_pressed = 0;
+        switch (keycode) {
+            case 0x2A: // Левый Shift
+            case 0x36: // Правый Shift
+                shift_pressed = 0;
+                break;
+            case 0x1D: // Левый Ctrl
+                ctrl_pressed = 0;
+                break;
+            case 0x38: // Левый Alt
+                alt_pressed = 0;
+                break;
         }
         return 0;
     }
     
-    // Обработка нажатия модификаторов
-    if (scancode == 0x2A || scancode == 0x36) { // Левый или правый Shift
-        shift_pressed = 1;
-        return 0;
-    } else if (scancode == 0x3A) { // Caps Lock
-        caps_lock = !caps_lock;
-        return 0;
+    // Обработка нажатия модификаторов (только если не был префикс расширения)
+    if (!extended_scancode) {
+        switch (scancode) {
+            case 0x2A: // Левый Shift
+            case 0x36: // Правый Shift
+                shift_pressed = 1;
+                return 0;
+            case 0x3A: // Caps Lock
+                caps_lock = !caps_lock;
+                return 0;
+            case 0x1D: // Левый Ctrl
+                ctrl_pressed = 1;
+                return 0;
+            case 0x38: // Левый Alt
+                alt_pressed = 1;
+                return 0;
+        }
+    } else {
+        // Обработка расширенных кодов (правые Ctrl/Alt и др.)
+        switch (scancode) {
+            case 0x1D: // Правый Ctrl (E0 1D)
+                ctrl_pressed = 1;
+                extended_scancode = 0;
+                return 0;
+            case 0x38: // Правый Alt (E0 38)
+                alt_pressed = 1;
+                extended_scancode = 0;
+                return 0;
+            default:
+                extended_scancode = 0;
+                return 0;
+        }
     }
     
     // Преобразование скан-кода в символ
-    char result;
-    int use_shift = shift_pressed ^ caps_lock;
+    char result = 0;
     
-    if (use_shift && scancode < 128) {
-        result = scancode_to_char_shift[scancode];
-    } else if (scancode < 128) {
-        result = scancode_to_char[scancode];
-    } else {
-        result = 0;
+    if (scancode < 128) {
+        // Определяем, использовать ли shift версию
+        int use_upper = shift_pressed;
+        
+        // Caps Lock влияет только на буквы
+        if ((scancode >= 0x10 && scancode <= 0x19) ||  // q..p
+            (scancode >= 0x1E && scancode <= 0x26) ||  // a..l
+            (scancode >= 0x2C && scancode <= 0x32)) {  // z..m
+            use_upper = use_upper ^ caps_lock; // XOR: инвертируем если caps_lock включен
+        }
+        
+        if (use_upper) {
+            result = scancode_to_char_shift[scancode];
+        } else {
+            result = scancode_to_char[scancode];
+        }
     }
     
     return result;
