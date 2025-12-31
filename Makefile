@@ -31,10 +31,12 @@ BOOTLOADER_LDFLAGS := -nostdlib -znocombreloc \
                       $(EFI_LIB)/crt0-efi-$(ARCH).o
 
 # Флаги для ядра
-KERNEL_CFLAGS := -m64 -ffreestanding -fno-stack-protector -fno-builtin \
-                 -Wall -Wextra -std=gnu11 -mgeneral-regs-only -mno-red-zone
+KERNEL_CFLAGS := -m64 -ffreestanding -fno-stack-protector -fno-stack-check \
+                 -fno-asynchronous-unwind-tables -fno-builtin \
+                 -mno-red-zone -mgeneral-regs-only \
+                 -Wall -Wextra -std=gnu11 -c
 
-KERNEL_LDFLAGS := -nostdlib -static -z max-page-size=0x1000
+KERNEL_LDFLAGS := -static -nostdlib -z max-page-size=0x1000 --gc-sections
 
 # Цели
 all: $(BUILD_DIR)/myos.iso
@@ -44,7 +46,7 @@ include bootloader/Makefile.inc
 
 # Правила для ядра
 $(BUILD_DIR)/kernel.o: $(KERNEL_DIR)/kernel.c
-	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
+	$(CC) $(KERNEL_CFLAGS) -o $@ $<
 
 $(BUILD_DIR)/kernel.elf: $(BUILD_DIR)/kernel.o $(KERNEL_DIR)/linker.ld
 	$(LD) $(KERNEL_LDFLAGS) -T $(KERNEL_DIR)/linker.ld -o $@ $<
