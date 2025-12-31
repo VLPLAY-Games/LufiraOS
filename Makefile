@@ -102,7 +102,6 @@ run-disk: $(BUILD_DIR)/disk.img
 		-net none \
 		-serial stdio \
 		-m 256M \
-		-no-reboot
 
 # Быстрый запуск
 run: run-disk

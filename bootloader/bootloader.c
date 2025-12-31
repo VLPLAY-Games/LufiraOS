@@ -16,18 +16,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     uefi_call_wrapper(ST->ConOut->ClearScreen, 1, ST->ConOut);
     
     Print(L"================================================\n");
-    Print(L"       LufiraOS UEFI Bootloader v1.2            \n");
+    Print(L"       LufiraOS UEFI Bootloader v0.1.2         \n");
     Print(L"================================================\n\n");
 
     // 1. Базовая информация о прошивке
     Print(L"Firmware Vendor:      %s\n", ST->FirmwareVendor);
     Print(L"UEFI Specification:   %d.%02d\n", ST->Hdr.Revision >> 16, ST->Hdr.Revision & 0xFFFF);
 
-    // 2. Системное время (Дата и время 2025)
+    // 2. Системное время (правильный год)
     EFI_TIME Time;
     if (!EFI_ERROR(uefi_call_wrapper(RT->GetTime, 2, &Time, NULL))) {
-        Print(L"System Date/Time:     %02d/%02d/2025  %02d:%02d:%02d\n", 
-              Time.Day, Time.Month, Time.Hour, Time.Minute, Time.Second);
+        Print(L"System Date/Time:     %02d/%02d/%04d  %02d:%02d:%02d\n", 
+              Time.Day, Time.Month, Time.Year, Time.Hour, Time.Minute, Time.Second);
     }
 
     // 3. Информация о памяти (Memory Map)
@@ -92,15 +92,68 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         while(1);
     }
 
+    // Получаем информацию о файле для определения размера
+    EFI_FILE_INFO *FileInfo;
+    UINTN FileInfoSize = sizeof(EFI_FILE_INFO) + 128; // Буфер с запасом
+    uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, FileInfoSize, (VOID**)&FileInfo);
+    status = uefi_call_wrapper(KernelFile->GetInfo, 4, KernelFile, &gEfiFileInfoGuid, &FileInfoSize, FileInfo);
+    
+    if (!EFI_ERROR(status)) {
+        UINTN KernelSize = FileInfo->FileSize;
+        Print(L"Kernel File Size:     %ld KB\n", KernelSize / 1024);
+    }
+    
+    // Освобождаем память для информации о файле
+    uefi_call_wrapper(BS->FreePool, 1, FileInfo);
+
     EFI_PHYSICAL_ADDRESS KernelBase = 0x100000;
     uefi_call_wrapper(BS->AllocatePages, 4, AllocateAddress, EfiLoaderData, 100, &KernelBase);
     UINTN KernelSize = 0x100000; 
     uefi_call_wrapper(KernelFile->Read, 3, KernelFile, &KernelSize, (VOID*)KernelBase);
     Print(L"Kernel Memory Range:  0x%lx - 0x%lx\n", KernelBase, KernelBase + KernelSize);
 
-    // 8. Финальная стадия
-    Print(L"\nAll systems ready. Handing over to LufiraOS...\n");
-    uefi_call_wrapper(BS->Stall, 1, 3000000); 
+    // 8. Обратный отсчет перед загрузкой
+    Print(L"\nAll systems ready. Handing over to LufiraOS in 5 seconds...\n");
+    Print(L"Press ENTER to skip countdown.\n\n");
+    
+    // Обратный отсчет 5 секунд с возможностью пропуска
+    EFI_INPUT_KEY Key;
+    UINTN Index;
+    EFI_EVENT TimerEvent;
+    UINT64 TimerPeriod = 10000000; // 1 секунда в 100-наносекундных единицах
+    
+    uefi_call_wrapper(BS->CreateEvent, 5, EVT_TIMER, 0, NULL, NULL, &TimerEvent);
+    
+    for (int i = 5; i > 0; i--) {
+        // Проверяем, не нажата ли клавиша Enter
+        status = uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 2, ST->ConIn, &Key);
+        if (!EFI_ERROR(status)) {
+            if (Key.UnicodeChar == L'\r' || Key.UnicodeChar == L'\n') {
+                Print(L"Countdown skipped. Starting kernel now...\n");
+                break;
+            }
+        }
+        
+        // Ждем 1 секунду
+        uefi_call_wrapper(BS->SetTimer, 3, TimerEvent, TimerRelative, TimerPeriod);
+        EFI_EVENT WaitList[] = {TimerEvent, ST->ConIn->WaitForKey};
+        status = uefi_call_wrapper(BS->WaitForEvent, 3, 2, WaitList, &Index);
+        
+        if (Index == 0) { // Таймер
+            Print(L"%d... ", i);
+        } else { // Клавиша
+            uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 2, ST->ConIn, &Key);
+            if (Key.UnicodeChar == L'\r' || Key.UnicodeChar == L'\n') {
+                Print(L"Countdown skipped. Starting kernel now...\n");
+                break;
+            }
+        }
+    }
+    
+    uefi_call_wrapper(BS->CloseEvent, 1, TimerEvent);
+    
+    Print(L"\nStarting LufiraOS Kernel...\n");
+    uefi_call_wrapper(BS->Stall, 1, 1000000); // 1 секунда задержки перед передачей управления
 
     // Обновляем карту памяти перед самым выходом
     uefi_call_wrapper(BS->GetMemoryMap, 5, &MemoryMapSize, MemoryMap, &MapKey, &DescriptorSize, &DescriptorVersion);

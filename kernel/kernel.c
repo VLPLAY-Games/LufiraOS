@@ -171,7 +171,9 @@ char keyboard_scancode_to_char(uint8_t scancode);
 void process_keypress(char c);
 void execute_command(void);
 void show_prompt(void);
-int strcmp(const char* s1, const char* s2);  // Добавлен прототип
+int strcmp(const char* s1, const char* s2);
+char to_lower(char c);  // Новая функция для приведения к нижнему регистру
+int strcmp_case_insensitive(const char* s1, const char* s2);  // Новая функция для сравнения без учета регистра
 
 // --- Точка входа ядра ---
 __attribute__((section(".text.prologue")))
@@ -453,29 +455,81 @@ int strcmp(const char* s1, const char* s2) {
     return *(const unsigned char*)s1 - *(const unsigned char*)s2;
 }
 
+// Функция приведения символа к нижнему регистру
+char to_lower(char c) {
+    if (c >= 'A' && c <= 'Z') {
+        return c + ('a' - 'A');
+    }
+    return c;
+}
+
+// Функция сравнения строк без учета регистра
+int strcmp_case_insensitive(const char* s1, const char* s2) {
+    while (*s1 && *s2) {
+        char c1 = to_lower(*s1);
+        char c2 = to_lower(*s2);
+        
+        if (c1 != c2) {
+            return c1 - c2;
+        }
+        
+        s1++;
+        s2++;
+    }
+    
+    // Если одна строка закончилась, а другая нет
+    return to_lower(*s1) - to_lower(*s2);
+}
+
 void execute_command(void) {
     input_buffer[input_buffer_index] = '\0';
     
     if (input_buffer_index == 0) return;
     
-    // Простые команды
-    if (strcmp(input_buffer, "help") == 0) {
+    // Используем сравнение без учета регистра
+    if (strcmp_case_insensitive(input_buffer, "help") == 0) {
         printf("\nAvailable commands:\n");
         printf("  help    - Show this help\n");
         printf("  clear   - Clear screen\n");
         printf("  reboot  - Reboot system\n");
         printf("  version - Show kernel version\n");
-    } else if (strcmp(input_buffer, "clear") == 0) {
+        printf("  echo    - Echo text back\n");
+    } else if (strcmp_case_insensitive(input_buffer, "clear") == 0) {
         clear_screen();
-    } else if (strcmp(input_buffer, "reboot") == 0) {
+        show_prompt();
+    } else if (strcmp_case_insensitive(input_buffer, "reboot") == 0) {
         printf("\nRebooting...\n");
         // Перезагрузка через 8042 контроллер
         __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64));
-    } else if (strcmp(input_buffer, "version") == 0) {
+    } else if (strcmp_case_insensitive(input_buffer, "version") == 0) {
         printf("\nLufiraOS Kernel v1.0\n");
         printf("Built: %s %s\n", __DATE__, __TIME__);
+    } else if (strcmp_case_insensitive(input_buffer, "echo") == 0) {
+        printf("\nUsage: echo <text>\n");
+    } else if (strcmp_case_insensitive(input_buffer, "echo test") == 0) {
+        printf("\nTest successful!\n");
     } else {
-        printf("\nUnknown command: %s\n", input_buffer);
+        // Проверим, не начинается ли команда с "echo "
+        int echo_prefix = 1;
+        for (int i = 0; i < 5; i++) {
+            if (to_lower(input_buffer[i]) != "echo "[i]) {
+                echo_prefix = 0;
+                break;
+            }
+        }
+        
+        if (echo_prefix && input_buffer[4] == ' ') {
+            // Это команда echo с аргументами
+            printf("\n");
+            // Пропускаем "echo " и выводим остальное
+            for (int i = 5; i < input_buffer_index; i++) {
+                put_char(input_buffer[i]);
+            }
+            put_char('\n');
+        } else {
+            printf("\nUnknown command: %s\n", input_buffer);
+            printf("Type 'help' for available commands.\n");
+        }
     }
     
     // Очищаем буфер
