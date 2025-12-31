@@ -11,6 +11,10 @@ typedef struct {
     uint32_t VerticalResolution;
     uint32_t PixelsPerScanLine;
     uint32_t PixelFormat;  // 0 = RGB, 1 = BGR
+    uint64_t TotalMemory;   // Общая память в байтах
+    uint64_t MemoryMapSize; // Размер карты памяти
+    void* MemoryMap;        // Указатель на карту памяти
+    uint32_t MemoryMapDescriptorSize; // Размер дескриптора
 } BootInfo;
 
 // Глобальные переменные состояния консоли
@@ -24,7 +28,7 @@ extern uint32_t current_bg_color;
 extern uint32_t pixels_per_scan_line;
 extern uint32_t screen_width_pixels;
 extern uint32_t screen_height_pixels;
-extern uint32_t pixel_format;  // RGB (0) или BGR (1)
+extern uint32_t pixel_format;
 
 // Прототипы функций
 void initialize_console(BootInfo* bi);
@@ -38,5 +42,9 @@ void clear_screen(void);
 void clear_entire_screen(void);
 void scroll_screen(void);
 void utoa(uint64_t value, char* buffer, int base);
+void itoa(int64_t value, char* buffer, int base);
+
+// Функция для отображения системной информации
+void display_system_info(BootInfo* bi);
 
 #endif

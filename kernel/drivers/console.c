@@ -13,7 +13,13 @@ uint32_t current_bg_color = 0x000000;
 uint32_t pixels_per_scan_line;
 uint32_t screen_width_pixels;
 uint32_t screen_height_pixels;
-uint32_t pixel_format = 0;  // По умолчанию RGB
+uint32_t pixel_format = 0;
+
+// Размеры символа 8x8
+#define CHAR_WIDTH 8
+#define CHAR_HEIGHT 8
+#define CHAR_PADDING_X 1
+#define CHAR_PADDING_Y 1
 
 // --- Встроенный шрифт 8x8 пикселей ---
 static unsigned char full_font_data[][8] = {
@@ -117,10 +123,8 @@ static unsigned char full_font_data[][8] = {
 // Преобразование цвета из RGB в BGR если нужно
 uint32_t convert_color(uint32_t color) {
     if (pixel_format == 0) {
-        // Уже RGB формат
         return color;
     } else {
-        // Конвертируем RGB в BGR
         uint8_t r = (color >> 16) & 0xFF;
         uint8_t g = (color >> 8) & 0xFF;
         uint8_t b = color & 0xFF;
@@ -133,7 +137,7 @@ void initialize_console(BootInfo* bi) {
     pixels_per_scan_line = bi->PixelsPerScanLine;
     screen_width_pixels = bi->HorizontalResolution;
     screen_height_pixels = bi->VerticalResolution;
-    pixel_format = bi->PixelFormat;  // Получаем формат пикселей
+    pixel_format = bi->PixelFormat;
     
     // Преобразуем стандартные цвета
     current_color = convert_color(0xFFFFFF);
@@ -141,8 +145,8 @@ void initialize_console(BootInfo* bi) {
     
     // Вычисляем количество символов, которые поместятся на экране
     // Каждый символ: 8 пикселей + 1 пиксель отступ = 9 пикселей
-    screen_width_chars = screen_width_pixels / 9;
-    screen_height_chars = screen_height_pixels / 9;
+    screen_width_chars = screen_width_pixels / (CHAR_WIDTH + CHAR_PADDING_X);
+    screen_height_chars = screen_height_pixels / (CHAR_HEIGHT + CHAR_PADDING_Y);
     
     // Гарантируем хотя бы минимальный размер
     if (screen_width_chars < 10) screen_width_chars = 10;
@@ -155,55 +159,50 @@ void initialize_console(BootInfo* bi) {
     clear_entire_screen();
 }
 
-
 void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
-    // Проверяем границы всего экрана
     if (x >= screen_width_pixels || y >= screen_height_pixels) return;
     framebuffer[y * pixels_per_scan_line + x] = color;
 }
 
+// Отрисовка символа 8x8
 void put_char_graphic(char c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color) {
     if (c < 32 || c > 127) c = '?';
     
     unsigned char* glyph = full_font_data[c - 32];
-    const uint32_t char_width = 8;
-    const uint32_t char_height = 8;
-    const uint32_t padding_x = 1;
-    const uint32_t padding_y = 1;
+    
+    // Переводим позиции символа в пиксели
+    uint32_t base_x = x * (CHAR_WIDTH + CHAR_PADDING_X);
+    uint32_t base_y = y * (CHAR_HEIGHT + CHAR_PADDING_Y);
+    
+    // Ограничиваем область отрисовки размерами экрана
+    if (base_x >= screen_width_pixels || base_y >= screen_height_pixels) return;
     
     // Преобразуем цвета если нужно
     uint32_t converted_fg = fg_color;
     uint32_t converted_bg = bg_color;
     
-    // Переводим позиции символа в пиксели
-    uint32_t base_x = x * (char_width + padding_x);
-    uint32_t base_y = y * (char_height + padding_y);
-    
-    // Ограничиваем область отрисовки размерами экрана
-    if (base_x >= screen_width_pixels || base_y >= screen_height_pixels) return;
-    
-    for (uint32_t cy = 0; cy < char_height + padding_y; cy++) {
+    for (uint32_t cy = 0; cy < CHAR_HEIGHT + CHAR_PADDING_Y; cy++) {
         uint32_t target_y = base_y + cy;
         if (target_y >= screen_height_pixels) break;
         
-        for (uint32_t cx = 0; cx < char_width + padding_x; cx++) {
+        for (uint32_t cx = 0; cx < CHAR_WIDTH + CHAR_PADDING_X; cx++) {
             uint32_t target_x = base_x + cx;
             if (target_x >= screen_width_pixels) break;
             
-            if (cx < char_width && cy < char_height) {
+            if (cx < CHAR_WIDTH && cy < CHAR_HEIGHT) {
+                // Внутри символа: проверяем бит шрифта
                 if ((glyph[cy] >> (7 - cx)) & 1) {
                     put_pixel(target_x, target_y, converted_fg);
                 } else {
                     put_pixel(target_x, target_y, converted_bg);
                 }
             } else {
-                // Заливаем отступы цветом фона
+                // Отступы заливаем цветом фона
                 put_pixel(target_x, target_y, converted_bg);
             }
         }
     }
 }
-
 
 void put_char(char c) {
     if (c == '\n') {
@@ -232,9 +231,9 @@ void put_char(char c) {
 }
 
 void scroll_screen(void) {
-    // Сдвигаем содержимое экрана вверх на одну строку
-    uint32_t char_height_pixels = 9; // 8 + 1 отступ
+    uint32_t char_height_pixels = CHAR_HEIGHT + CHAR_PADDING_Y;
     
+    // Сдвигаем содержимое экрана вверх на высоту одного символа
     for (uint32_t y = char_height_pixels; y < screen_height_pixels; y++) {
         for (uint32_t x = 0; x < screen_width_pixels; x++) {
             uint32_t src_pixel = framebuffer[y * pixels_per_scan_line + x];
@@ -254,11 +253,10 @@ void scroll_screen(void) {
     current_y = screen_height_chars - 1;
 }
 
-
 // Очищает только область консоли (для символов)
 void clear_screen(void) {
-    uint32_t console_width = screen_width_chars * 9;
-    uint32_t console_height = screen_height_chars * 9;
+    uint32_t console_width = screen_width_chars * (CHAR_WIDTH + CHAR_PADDING_X);
+    uint32_t console_height = screen_height_chars * (CHAR_HEIGHT + CHAR_PADDING_Y);
     
     // Ограничиваем размер консоли размером экрана
     if (console_width > screen_width_pixels) console_width = screen_width_pixels;
@@ -309,11 +307,19 @@ void utoa(uint64_t value, char* buffer, int base) {
     } while (value > 0);
 }
 
+void itoa(int64_t value, char* buffer, int base) {
+    if (value < 0 && base == 10) {
+        *buffer++ = '-';
+        value = -value;
+    }
+    utoa((uint64_t)value, buffer, base);
+}
+
 void printf(const char* format, ...) {
     va_list args;
     va_start(args, format);
     
-    char buffer[20];
+    char buffer[32];
     
     while (*format) {
         if (*format == '%') {
@@ -321,17 +327,26 @@ void printf(const char* format, ...) {
             if (*format == 's') {
                 char* str = va_arg(args, char*);
                 print_string(str);
-            } else if (*format == 'd' || *format == 'u') {
+            } else if (*format == 'd') {
+                int64_t val = va_arg(args, int64_t);
+                itoa(val, buffer, 10);
+                print_string(buffer);
+            } else if (*format == 'u') {
                 uint64_t val = va_arg(args, uint64_t);
                 utoa(val, buffer, 10);
                 print_string(buffer);
             } else if (*format == 'x' || *format == 'p' || *format == 'l') {
                 uint64_t val = va_arg(args, uint64_t);
                 utoa(val, buffer, 16);
-                print_string("0x");
+                if (*format == 'p' || *format == 'l') {
+                    print_string("0x");
+                }
                 print_string(buffer);
             } else if (*format == '%') {
                 put_char('%');
+            } else if (*format == 'c') {
+                char c = (char)va_arg(args, int);
+                put_char(c);
             }
         } else {
             put_char(*format);
@@ -339,4 +354,66 @@ void printf(const char* format, ...) {
         format++;
     }
     va_end(args);
+}
+
+// Функция для отображения системной информации
+void display_system_info(BootInfo* bi) {
+    // Заголовок
+    current_color = convert_color(0x00AAFF); // Голубой
+    printf("\n");
+    printf("================================================\n");
+    printf("             LufiraOS Kernel v1.0              \n");
+    printf("================================================\n\n");
+    
+    // Системная информация
+    current_color = convert_color(0x55FF55); // Зеленый
+    printf("SYSTEM INFORMATION:\n");
+    printf("-------------------\n");
+    
+    current_color = convert_color(0xFFFFFF); // Белый
+    printf("  Architecture:     x86_64\n");
+    printf("  Build Date:       %s\n", __DATE__);
+    printf("  Build Time:       %s\n", __TIME__);
+    
+    // Информация о памяти
+    current_color = convert_color(0x55FF55);
+    printf("\nMEMORY INFORMATION:\n");
+    printf("-------------------\n");
+    
+    current_color = convert_color(0xFFFFFF);
+    printf("  Total Memory:     %u MB\n", (uint32_t)(bi->TotalMemory / (1024 * 1024)));
+    printf("  Framebuffer:      0x%lx\n", bi->FrameBufferBase);
+    printf("  FB Size:          %u KB\n", (uint32_t)(bi->FrameBufferSize / 1024));
+    
+    // Информация о дисплее
+    current_color = convert_color(0x55FF55);
+    printf("\nDISPLAY INFORMATION:\n");
+    printf("--------------------\n");
+    
+    current_color = convert_color(0xFFFFFF);
+    printf("  Resolution:       %d x %d\n", bi->HorizontalResolution, bi->VerticalResolution);
+    printf("  Pixel Format:     %s\n", (bi->PixelFormat == 0) ? "RGB" : "BGR");
+    printf("  Pixels/Line:      %d\n", bi->PixelsPerScanLine);
+    printf("  Console Grid:     %d x %d chars\n", screen_width_chars, screen_height_chars);
+    
+    // Информация о загрузчике
+    current_color = convert_color(0x55FF55);
+    printf("\nBOOT INFORMATION:\n");
+    printf("-----------------\n");
+    
+    current_color = convert_color(0xFFFFFF);
+    printf("  Memory Map Size:  %u bytes\n", (uint32_t)bi->MemoryMapSize);
+    printf("  Descriptor Size:  %u bytes\n", bi->MemoryMapDescriptorSize);
+    
+    // Состояние системы
+    current_color = convert_color(0x55FF55);
+    printf("\nSYSTEM STATUS:\n");
+    printf("--------------\n");
+    
+    current_color = convert_color(0xFFFFFF);
+    printf("  Console:          READY\n");
+    printf("  Keyboard:         INITIALIZING...\n");
+    printf("  Memory Manager:   NOT INITIALIZED\n");
+    printf("  Interrupts:       DISABLED\n");
+    printf("  Task Manager:     NOT INITIALIZED\n");
 }

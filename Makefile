@@ -50,9 +50,6 @@ KERNEL_SOURCES := \
 
 KERNEL_OBJECTS := $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/kernel/%.o,$(KERNEL_SOURCES))
 
-# Цели
-all: $(BUILD_DIR)/myos.iso
-
 # Подключаем правила для загрузчика
 include bootloader/Makefile.inc
 
@@ -84,10 +81,6 @@ $(ISO_DIR)/boot/grub/grub.cfg:
 	echo '  chainloader /EFI/BOOT/BOOTX64.EFI' >> $@
 	echo '}' >> $@
 
-# Создание гибридного ISO (UEFI + BIOS)
-$(BUILD_DIR)/myos.iso: $(ISO_DIR)/EFI/BOOT/BOOTX64.EFI $(ISO_DIR)/kernel.bin $(ISO_DIR)/boot/grub/grub.cfg
-	grub-mkrescue -o $@ $(ISO_DIR) --modules="part_gpt part_msdos fat normal boot linux configfile chain"
-
 # Создание образа диска для UEFI
 $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin
 	dd if=/dev/zero of=$@ bs=1M count=10
@@ -96,16 +89,6 @@ $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin
 	mmd -i $@ ::/EFI/BOOT
 	mcopy -i $@ $(BUILD_DIR)/BOOTX64.EFI ::/EFI/BOOT/
 	mcopy -i $@ $(BUILD_DIR)/kernel.bin ::/
-
-# Запуск в QEMU с ISO
-run-iso: $(BUILD_DIR)/myos.iso
-	qemu-system-x86_64 \
-		-bios /usr/share/ovmf/OVMF.fd \
-		-cdrom $(BUILD_DIR)/myos.iso \
-		-net none \
-		-serial stdio \
-		-m 256M \
-		-no-reboot
 
 # Запуск в QEMU с диском
 run-disk: $(BUILD_DIR)/disk.img
@@ -118,21 +101,6 @@ run-disk: $(BUILD_DIR)/disk.img
 
 # Быстрый запуск
 run: run-disk
-
-# Отладка
-debug: $(BUILD_DIR)/myos.iso
-	qemu-system-x86_64 \
-		-bios /usr/share/ovmf/OVMF.fd \
-		-cdrom $(BUILD_DIR)/myos.iso \
-		-net none \
-		-serial stdio \
-		-s -S \
-		-m 256M \
-		-no-reboot
-
-# Проверка содержимого ISO
-check-iso: $(BUILD_DIR)/myos.iso
-	xorriso -indev $(BUILD_DIR)/myos.iso -report_el_torito as_mkisofs
 
 # Очистка
 clean:

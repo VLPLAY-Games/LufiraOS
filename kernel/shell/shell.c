@@ -85,8 +85,8 @@ void execute_command(void) {
 }
 
 void show_prompt(void) {
-    current_color = 0xFFFFFF;
-    printf("\n> ");
+    current_color = convert_color(0x00AAFF); // Голубой
+    printf("\n[lufiraos@kernel] $ ");
     
     // Сбрасываем состояние ввода
     input_buffer_index = 0;

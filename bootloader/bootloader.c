@@ -8,6 +8,10 @@ typedef struct {
     uint32_t VerticalResolution;
     uint32_t PixelsPerScanLine;
     uint32_t PixelFormat;  // 0 = RGB, 1 = BGR
+    uint64_t TotalMemory;   // Общая память в байтах
+    uint64_t MemoryMapSize; // Размер карты памяти
+    void* MemoryMap;        // Указатель на карту памяти
+    uint32_t MemoryMapDescriptorSize; // Размер дескриптора
 } BootInfo;
 
 typedef void (*KernelEntry)(BootInfo*);
@@ -24,7 +28,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     Print(L"Firmware Vendor:      %s\n", ST->FirmwareVendor);
     Print(L"UEFI Specification:   %d.%02d\n", ST->Hdr.Revision >> 16, ST->Hdr.Revision & 0xFFFF);
 
-    // 2. Системное время (правильный год)
+    // 2. Системное время
     EFI_TIME Time;
     if (!EFI_ERROR(uefi_call_wrapper(RT->GetTime, 2, &Time, NULL))) {
         Print(L"System Date/Time:     %02d/%02d/%04d  %02d:%02d:%02d\n", 
@@ -66,7 +70,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     // 6. Графика (GOP)
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
     EFI_GUID gopGuid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
-    BootInfo bi;
+    BootInfo bi = {0};
     EFI_STATUS status = uefi_call_wrapper(BS->LocateProtocol, 3, &gopGuid, NULL, (VOID**)&gop);
     if (!EFI_ERROR(status)) {
         bi.FrameBufferBase = gop->Mode->FrameBufferBase;
@@ -83,7 +87,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             bi.PixelFormat = 0; // RGB
             Print(L"Pixel Format:          RGB (Red-Green-Blue)\n");
         } else {
-            // По умолчанию RGB
             bi.PixelFormat = 0;
             Print(L"Pixel Format:          RGB (default, unknown format)\n");
         }
@@ -92,6 +95,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         Print(L"Current Resolution:   %dx%d\n", bi.HorizontalResolution, bi.VerticalResolution);
         Print(L"Pixels Per Line:      %d px\n", bi.PixelsPerScanLine);
     }
+
+    // Сохраняем информацию о памяти для ядра
+    bi.TotalMemory = TotalRAM;
+    bi.MemoryMapSize = MemoryMapSize;
+    bi.MemoryMap = MemoryMap;
+    bi.MemoryMapDescriptorSize = DescriptorSize;
 
     // 7. Загрузка ядра
     EFI_FILE_IO_INTERFACE *FileSystem;
@@ -109,7 +118,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     // Получаем информацию о файле для определения размера
     EFI_FILE_INFO *FileInfo;
-    UINTN FileInfoSize = sizeof(EFI_FILE_INFO) + 128; // Буфер с запасом
+    UINTN FileInfoSize = sizeof(EFI_FILE_INFO) + 128;
     uefi_call_wrapper(BS->AllocatePool, 3, EfiLoaderData, FileInfoSize, (VOID**)&FileInfo);
     status = uefi_call_wrapper(KernelFile->GetInfo, 4, KernelFile, &gEfiFileInfoGuid, &FileInfoSize, FileInfo);
     
@@ -118,7 +127,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         Print(L"Kernel File Size:     %ld KB\n", KernelSize / 1024);
     }
     
-    // Освобождаем память для информации о файле
     uefi_call_wrapper(BS->FreePool, 1, FileInfo);
 
     EFI_PHYSICAL_ADDRESS KernelBase = 0x100000;
@@ -131,16 +139,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     Print(L"\nAll systems ready. Handing over to LufiraOS in 5 seconds...\n");
     Print(L"Press ENTER to skip countdown.\n\n");
     
-    // Обратный отсчет 5 секунд с возможностью пропуска
     EFI_INPUT_KEY Key;
     UINTN Index;
     EFI_EVENT TimerEvent;
-    UINT64 TimerPeriod = 10000000; // 1 секунда в 100-наносекундных единицах
+    UINT64 TimerPeriod = 10000000;
     
     uefi_call_wrapper(BS->CreateEvent, 5, EVT_TIMER, 0, NULL, NULL, &TimerEvent);
     
     for (int i = 5; i > 0; i--) {
-        // Проверяем, не нажата ли клавиша Enter
         status = uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 2, ST->ConIn, &Key);
         if (!EFI_ERROR(status)) {
             if (Key.UnicodeChar == L'\r' || Key.UnicodeChar == L'\n') {
@@ -149,14 +155,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             }
         }
         
-        // Ждем 1 секунду
         uefi_call_wrapper(BS->SetTimer, 3, TimerEvent, TimerRelative, TimerPeriod);
         EFI_EVENT WaitList[] = {TimerEvent, ST->ConIn->WaitForKey};
         status = uefi_call_wrapper(BS->WaitForEvent, 3, 2, WaitList, &Index);
         
-        if (Index == 0) { // Таймер
+        if (Index == 0) {
             Print(L"%d... ", i);
-        } else { // Клавиша
+        } else {
             uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 2, ST->ConIn, &Key);
             if (Key.UnicodeChar == L'\r' || Key.UnicodeChar == L'\n') {
                 Print(L"Countdown skipped. Starting kernel now...\n");
@@ -168,7 +173,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     uefi_call_wrapper(BS->CloseEvent, 1, TimerEvent);
     
     Print(L"\nStarting LufiraOS Kernel...\n");
-    uefi_call_wrapper(BS->Stall, 1, 1000000); // 1 секунда задержки перед передачей управления
+    uefi_call_wrapper(BS->Stall, 1, 1000000);
 
     // Обновляем карту памяти перед самым выходом
     uefi_call_wrapper(BS->GetMemoryMap, 5, &MemoryMapSize, MemoryMap, &MapKey, &DescriptorSize, &DescriptorVersion);

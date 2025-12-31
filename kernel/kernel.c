@@ -8,29 +8,26 @@
 __attribute__((section(".text.prologue")))
 void _start(BootInfo* bi) {
     initialize_console(bi);
-    clear_screen();
+    
+    // Отображаем подробную системную информацию
+    display_system_info(bi);
+    
+    // Инициализируем клавиатуру
     keyboard_init();
     
-    current_y = 1;
+    // Обновляем статус клавиатуры
+    current_color = convert_color(0x55FF55);
+    printf("\n  Keyboard:         READY\n");
     
-    current_color = 0xAAAAAA;
-    printf("LufiraOS Kernel v1.0 Boot Sequence:\n");
-    printf("-----------------------------------\n\n");
+    current_color = convert_color(0x00AAFF); // Голубой
+    printf("\n================================================\n");
+    printf("  Type 'help' for available commands\n");
+    printf("================================================\n\n");
     
-    current_color = 0xFFFFFF;
-    printf("Detected Resolution: %d x %d\n", bi->HorizontalResolution, bi->VerticalResolution);
-    printf("Framebuffer Address: 0x%x\n", bi->FrameBufferBase);
-    printf("Characters Grid: %d x %d\n\n", screen_width_chars, screen_height_chars);
-    
-    current_color = 0x55FF55;
-    printf("Keyboard initialized: OK\n");
-    printf("System status: OK.\n");
-    
-    current_color = 0xFFFFFF;
+    current_color = convert_color(0xFFFFFF);
     show_prompt();
     
     while (1) {
-        // Проверяем клавиатуру
         keyboard_handler();
         __asm__ volatile ("pause");
     }
