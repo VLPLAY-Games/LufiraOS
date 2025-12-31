@@ -17,7 +17,8 @@ KERNEL_DIR := kernel
 ISO_DIR := $(BUILD_DIR)/iso
 
 # Создаем директории
-$(shell mkdir -p $(BUILD_DIR) $(ISO_DIR)/boot/grub $(ISO_DIR)/EFI/BOOT)
+$(shell mkdir -p $(BUILD_DIR) $(ISO_DIR)/boot/grub $(ISO_DIR)/EFI/BOOT \
+    $(BUILD_DIR)/kernel/drivers $(BUILD_DIR)/kernel/shell $(BUILD_DIR)/kernel/system)
 
 # Флаги для загрузчика
 BOOTLOADER_CFLAGS := -I$(EFI_INC) -I$(EFI_INC_ARCH) \
@@ -34,9 +35,20 @@ BOOTLOADER_LDFLAGS := -nostdlib -znocombreloc \
 KERNEL_CFLAGS := -m64 -ffreestanding -fno-stack-protector -fno-stack-check \
                  -fno-asynchronous-unwind-tables -fno-builtin \
                  -mno-red-zone -mgeneral-regs-only \
-                 -Wall -Wextra -std=gnu11 -c
+                 -Wall -Wextra -std=gnu11 -c -I$(KERNEL_DIR)
 
+# Флаги для линковки ядра
 KERNEL_LDFLAGS := -static -nostdlib -z max-page-size=0x1000 --gc-sections
+
+# Исходные файлы ядра
+KERNEL_SOURCES := \
+    $(KERNEL_DIR)/kernel.c \
+    $(KERNEL_DIR)/drivers/console.c \
+    $(KERNEL_DIR)/drivers/keyboard.c \
+    $(KERNEL_DIR)/shell/shell.c \
+    $(KERNEL_DIR)/system/commands.c
+
+KERNEL_OBJECTS := $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/kernel/%.o,$(KERNEL_SOURCES))
 
 # Цели
 all: $(BUILD_DIR)/myos.iso
@@ -45,11 +57,12 @@ all: $(BUILD_DIR)/myos.iso
 include bootloader/Makefile.inc
 
 # Правила для ядра
-$(BUILD_DIR)/kernel.o: $(KERNEL_DIR)/kernel.c
+$(BUILD_DIR)/kernel/%.o: $(KERNEL_DIR)/%.c
+	@mkdir -p $(dir $@)
 	$(CC) $(KERNEL_CFLAGS) -o $@ $<
 
-$(BUILD_DIR)/kernel.elf: $(BUILD_DIR)/kernel.o $(KERNEL_DIR)/linker.ld
-	$(LD) $(KERNEL_LDFLAGS) -T $(KERNEL_DIR)/linker.ld -o $@ $<
+$(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(KERNEL_DIR)/linker.ld
+	$(LD) $(KERNEL_LDFLAGS) -T $(KERNEL_DIR)/linker.ld -o $@ $(KERNEL_OBJECTS)
 
 $(BUILD_DIR)/kernel.bin: $(BUILD_DIR)/kernel.elf
 	$(OBJCOPY) -O binary $< $@
@@ -66,8 +79,8 @@ $(ISO_DIR)/boot/grub/grub.cfg:
 	echo 'set timeout=5' > $@
 	echo 'set default=0' >> $@
 	echo '' >> $@
-	echo 'menuentry "MyOS" {' >> $@
-	echo '  echo "Loading MyOS..."' >> $@
+	echo 'menuentry "LufiraOS" {' >> $@
+	echo '  echo "Loading LufiraOS..."' >> $@
 	echo '  chainloader /EFI/BOOT/BOOTX64.EFI' >> $@
 	echo '}' >> $@
 
@@ -75,7 +88,7 @@ $(ISO_DIR)/boot/grub/grub.cfg:
 $(BUILD_DIR)/myos.iso: $(ISO_DIR)/EFI/BOOT/BOOTX64.EFI $(ISO_DIR)/kernel.bin $(ISO_DIR)/boot/grub/grub.cfg
 	grub-mkrescue -o $@ $(ISO_DIR) --modules="part_gpt part_msdos fat normal boot linux configfile chain"
 
-# Создание образа диска для UEFI (альтернативный способ)
+# Создание образа диска для UEFI
 $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin
 	dd if=/dev/zero of=$@ bs=1M count=10
 	mkfs.fat -F 16 $@
@@ -101,7 +114,7 @@ run-disk: $(BUILD_DIR)/disk.img
 		-drive format=raw,file=$(BUILD_DIR)/disk.img \
 		-net none \
 		-serial stdio \
-		-m 256M \
+		-m 256M
 
 # Быстрый запуск
 run: run-disk
