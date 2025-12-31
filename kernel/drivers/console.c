@@ -15,13 +15,19 @@ uint32_t screen_width_pixels;
 uint32_t screen_height_pixels;
 uint32_t pixel_format = 0;
 
+// Переменные для мигающего курсора
+int cursor_visible = 1;
+int cursor_enabled = 1;
+uint32_t cursor_blink_counter = 0;
+uint32_t cursor_blink_rate = 500000; // Скорость мигания
+
 // Размеры символа 8x8
 #define CHAR_WIDTH 8
 #define CHAR_HEIGHT 8
 #define CHAR_PADDING_X 1
 #define CHAR_PADDING_Y 4
 
-// --- Самодельный шрифт 8x8 пикселей ---
+// --- Самодельный улучшенный шрифт 8x8 пикселей ---
 static unsigned char full_font_data[][8] = {
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, /* (space) */
     {0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x18}, /* ! */
@@ -155,6 +161,11 @@ void initialize_console(BootInfo* bi) {
     current_x = 0;
     current_y = 0;
     
+    // Инициализация курсора
+    cursor_visible = 1;
+    cursor_enabled = 1;
+    cursor_blink_counter = 0;
+    
     // Очищаем весь экран при инициализации
     clear_entire_screen();
 }
@@ -205,6 +216,11 @@ void put_char_graphic(char c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_
 }
 
 void put_char(char c) {
+    // Стираем курсор перед отрисовкой символа
+    if (cursor_enabled && cursor_visible) {
+        erase_cursor();
+    }
+    
     if (c == '\n') {
         current_x = 0;
         current_y++;
@@ -227,6 +243,11 @@ void put_char(char c) {
         scroll_screen();
         current_y = screen_height_chars - 1;
         current_x = 0;
+    }
+    
+    // Восстанавливаем курсор после отрисовки символа
+    if (cursor_enabled && cursor_visible) {
+        draw_cursor();
     }
 }
 
@@ -255,6 +276,11 @@ void scroll_screen(void) {
 
 // Очищает только область консоли (для символов)
 void clear_screen(void) {
+    // Стираем курсор если он видим
+    if (cursor_enabled && cursor_visible) {
+        erase_cursor();
+    }
+    
     uint32_t console_width = screen_width_chars * (CHAR_WIDTH + CHAR_PADDING_X);
     uint32_t console_height = screen_height_chars * (CHAR_HEIGHT + CHAR_PADDING_Y);
     
@@ -269,10 +295,20 @@ void clear_screen(void) {
     }
     current_x = 0;
     current_y = 0;
+    
+    // Восстанавливаем курсор
+    if (cursor_enabled && cursor_visible) {
+        draw_cursor();
+    }
 }
 
 // Очищает весь экран полностью
 void clear_entire_screen(void) {
+    // Стираем курсор если он видим
+    if (cursor_enabled && cursor_visible) {
+        erase_cursor();
+    }
+    
     for (uint32_t y = 0; y < screen_height_pixels; y++) {
         for (uint32_t x = 0; x < screen_width_pixels; x++) {
             framebuffer[y * pixels_per_scan_line + x] = current_bg_color;
@@ -280,6 +316,11 @@ void clear_entire_screen(void) {
     }
     current_x = 0;
     current_y = 0;
+    
+    // Восстанавливаем курсор
+    if (cursor_enabled && cursor_visible) {
+        draw_cursor();
+    }
 }
 
 void print_string(const char* str) {
@@ -416,4 +457,90 @@ void display_system_info(BootInfo* bi) {
     printf("  Memory Manager:   NOT INITIALIZED\n");
     printf("  Interrupts:       DISABLED\n");
     printf("  Task Manager:     NOT INITIALIZED\n");
+}
+
+// ==================== ФУНКЦИИ КУРСОРА ====================
+
+// Отрисовка курсора (подчеркивание в текущей позиции)
+void draw_cursor(void) {
+    if (!cursor_enabled) return;
+    
+    // Сохраняем текущий цвет
+    uint32_t saved_color = current_color;
+    
+    // Устанавливаем цвет курсора (белый)
+    current_color = convert_color(0xFFFFFF);
+    
+    // Вычисляем позицию курсора (нижняя часть текущего символа)
+    uint32_t base_x = current_x * (CHAR_WIDTH + CHAR_PADDING_X);
+    uint32_t base_y = current_y * (CHAR_HEIGHT + CHAR_PADDING_Y) + CHAR_HEIGHT;
+    
+    // Отрисовываем горизонтальную линию (подчеркивание)
+    for (uint32_t x = 0; x < CHAR_WIDTH; x++) {
+        uint32_t target_x = base_x + x;
+        uint32_t target_y = base_y;
+        
+        if (target_x < screen_width_pixels && target_y < screen_height_pixels) {
+            put_pixel(target_x, target_y, current_color);
+        }
+    }
+    
+    // Восстанавливаем цвет
+    current_color = saved_color;
+    
+    cursor_visible = 1;
+}
+
+// Стирание курсора
+void erase_cursor(void) {
+    if (!cursor_enabled) return;
+    
+    // Вычисляем позицию курсора
+    uint32_t base_x = current_x * (CHAR_WIDTH + CHAR_PADDING_X);
+    uint32_t base_y = current_y * (CHAR_HEIGHT + CHAR_PADDING_Y) + CHAR_HEIGHT;
+    
+    // Стираем горизонтальную линию (заливаем цветом фона)
+    for (uint32_t x = 0; x < CHAR_WIDTH; x++) {
+        uint32_t target_x = base_x + x;
+        uint32_t target_y = base_y;
+        
+        if (target_x < screen_width_pixels && target_y < screen_height_pixels) {
+            put_pixel(target_x, target_y, current_bg_color);
+        }
+    }
+    
+    cursor_visible = 0;
+}
+
+// Обновление состояния курсора (мигание)
+void update_cursor(void) {
+    if (!cursor_enabled) return;
+    
+    cursor_blink_counter++;
+    
+    // Мигаем с заданной частотой
+    if (cursor_blink_counter >= cursor_blink_rate) {
+        cursor_blink_counter = 0;
+        
+        if (cursor_visible) {
+            erase_cursor();
+        } else {
+            draw_cursor();
+        }
+    }
+}
+
+// Включение/выключение курсора
+void enable_cursor(int enabled) {
+    if (cursor_enabled && !enabled) {
+        // Выключаем курсор - стираем его
+        erase_cursor();
+    }
+    
+    cursor_enabled = enabled;
+    
+    if (cursor_enabled && !cursor_visible) {
+        // Включаем курсор - рисуем его
+        draw_cursor();
+    }
 }

@@ -85,12 +85,17 @@ void execute_command(void) {
 }
 
 void show_prompt(void) {
-    current_color = convert_color(0x00AAFF); // Голубой
+    current_color = convert_color(0xFFFFFF);
     printf("\n[lufiraos@kernel] $ ");
     
     // Сбрасываем состояние ввода
     input_buffer_index = 0;
     for (int i = 0; i < INPUT_BUFFER_SIZE; i++) {
         input_buffer[i] = 0;
+    }
+    
+    // Восстанавливаем видимость курсора если он был стерт
+    if (cursor_enabled && !cursor_visible) {
+        draw_cursor();
     }
 }

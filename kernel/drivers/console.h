@@ -30,6 +30,12 @@ extern uint32_t screen_width_pixels;
 extern uint32_t screen_height_pixels;
 extern uint32_t pixel_format;
 
+// Флаги и счетчики для мигающего курсора
+extern int cursor_visible;
+extern int cursor_enabled;
+extern uint32_t cursor_blink_counter;
+extern uint32_t cursor_blink_rate;
+
 // Прототипы функций
 void initialize_console(BootInfo* bi);
 void put_pixel(uint32_t x, uint32_t y, uint32_t color);
@@ -43,6 +49,12 @@ void clear_entire_screen(void);
 void scroll_screen(void);
 void utoa(uint64_t value, char* buffer, int base);
 void itoa(int64_t value, char* buffer, int base);
+
+// Функции для работы с курсором
+void draw_cursor(void);
+void erase_cursor(void);
+void update_cursor(void);
+void enable_cursor(int enabled);
 
 // Функция для отображения системной информации
 void display_system_info(BootInfo* bi);

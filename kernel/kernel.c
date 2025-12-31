@@ -27,8 +27,16 @@ void _start(BootInfo* bi) {
     current_color = convert_color(0xFFFFFF);
     show_prompt();
     
+    // Рисуем начальный курсор
+    draw_cursor();
+    
     while (1) {
+        // Проверяем клавиатуру
         keyboard_handler();
+        
+        // Обновляем курсор (мигание)
+        update_cursor();
+        
         __asm__ volatile ("pause");
     }
 }
