@@ -14,10 +14,9 @@ EFI_LIB := /usr/lib
 BUILD_DIR := build
 BOOTLOADER_DIR := bootloader
 KERNEL_DIR := kernel
-ISO_DIR := $(BUILD_DIR)/iso
 
 # Создаем директории
-$(shell mkdir -p $(BUILD_DIR) $(ISO_DIR)/boot/grub $(ISO_DIR)/EFI/BOOT \
+$(shell mkdir -p $(BUILD_DIR) \
     $(BUILD_DIR)/kernel/drivers $(BUILD_DIR)/kernel/shell $(BUILD_DIR)/kernel/system)
 
 # Флаги для загрузчика
@@ -64,23 +63,6 @@ $(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(KERNEL_DIR)/linker.ld
 $(BUILD_DIR)/kernel.bin: $(BUILD_DIR)/kernel.elf
 	$(OBJCOPY) -O binary $< $@
 
-# Подготовка файлов для ISO
-$(ISO_DIR)/EFI/BOOT/BOOTX64.EFI: $(BUILD_DIR)/BOOTX64.EFI
-	cp $< $@
-
-$(ISO_DIR)/kernel.bin: $(BUILD_DIR)/kernel.bin
-	cp $< $@
-
-# Grub конфигурация для UEFI
-$(ISO_DIR)/boot/grub/grub.cfg:
-	echo 'set timeout=5' > $@
-	echo 'set default=0' >> $@
-	echo '' >> $@
-	echo 'menuentry "LufiraOS" {' >> $@
-	echo '  echo "Loading LufiraOS..."' >> $@
-	echo '  chainloader /EFI/BOOT/BOOTX64.EFI' >> $@
-	echo '}' >> $@
-
 # Создание образа диска для UEFI
 $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin
 	dd if=/dev/zero of=$@ bs=1M count=10
@@ -106,4 +88,4 @@ run: run-disk
 clean:
 	rm -rf $(BUILD_DIR)
 
-.PHONY: all run run-iso run-disk debug check-iso clean
+.PHONY: all run run-disk debug clean
