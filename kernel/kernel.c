@@ -1,5 +1,5 @@
 #include <stdint.h>
-#include <stdarg.h> // Для обработки аргументов printf
+#include <stdarg.h>
 
 // --- Структуры данных ---
 typedef struct {
@@ -11,7 +11,6 @@ typedef struct {
 } BootInfo;
 
 // --- Встроенный шрифт 8x8 пикселей ---
-// Содержит символы ASCII от 32 (' ') до 127 ('~')
 static unsigned char full_font_data[][8] = {
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, /* (space) */
     {0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x00}, /* ! */
@@ -113,12 +112,47 @@ static unsigned char full_font_data[][8] = {
 // --- Глобальные переменные состояния консоли ---
 static uint32_t current_x = 0;
 static uint32_t current_y = 0;
-static uint32_t screen_width_chars; // Ширина в символах (например, 100)
-static uint32_t screen_height_chars; // Высота в символах (например, 30)
+static uint32_t screen_width_chars;
+static uint32_t screen_height_chars;
 static uint32_t* framebuffer;
-static uint32_t current_color = 0xFFFFFF; // Белый
-static uint32_t current_bg_color = 0x000000; // Черный
+static uint32_t current_color = 0xFFFFFF;
+static uint32_t current_bg_color = 0x000000;
 static uint32_t pixels_per_scan_line;
+
+// --- Структуры и переменные для клавиатуры ---
+#define KEYBOARD_DATA_PORT 0x60
+#define KEYBOARD_STATUS_PORT 0x64
+#define KEYBOARD_COMMAND_PORT 0x64
+
+// Буфер ввода командной строки
+#define INPUT_BUFFER_SIZE 256
+static char input_buffer[INPUT_BUFFER_SIZE];
+static uint32_t input_buffer_index = 0;
+
+// Таблица скан-кодов (Set 1) - только основные клавиши
+static const char scancode_to_char[128] = {
+    0,  27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
+    '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
+    0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0, '\\',
+    'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' ', 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+};
+
+// Shift-версия (грубая реализация)
+static const char scancode_to_char_shift[128] = {
+    0,  27, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b',
+    '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n',
+    0, 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0, '|',
+    'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, '*', 0, ' ', 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+};
+
+static int shift_pressed = 0;
+static int caps_lock = 0;
 
 // --- Прототипы функций ---
 void initialize_console(BootInfo* bi);
@@ -130,43 +164,53 @@ void printf(const char* format, ...);
 void clear_screen(void);
 void scroll_screen(void);
 void utoa(uint64_t value, char* buffer, int base);
+void keyboard_init(void);
+void keyboard_handler(void);
+uint8_t keyboard_read_scancode(void);
+char keyboard_scancode_to_char(uint8_t scancode);
+void process_keypress(char c);
+void execute_command(void);
+void show_prompt(void);
+int strcmp(const char* s1, const char* s2);  // Добавлен прототип
 
 // --- Точка входа ядра ---
 __attribute__((section(".text.prologue")))
 void _start(BootInfo* bi) {
     initialize_console(bi);
     clear_screen();
-
-    current_y = 1; 
-
-    current_color = 0xAAAAAA; // Серый
+    keyboard_init();
+    
+    current_y = 1;
+    
+    current_color = 0xAAAAAA;
     printf("LufiraOS Kernel v1.0 Boot Sequence:\n");
     printf("-----------------------------------\n\n");
     
-    current_color = 0xFFFFFF; // Белый
+    current_color = 0xFFFFFF;
     printf("Detected Resolution: %d x %d\n", bi->HorizontalResolution, bi->VerticalResolution);
     printf("Framebuffer Address: 0x%x\n", bi->FrameBufferBase);
     printf("Characters Grid: %d x %d\n\n", screen_width_chars, screen_height_chars);
     
-    current_color = 0x55FF55; // Светло-зеленый
+    current_color = 0x55FF55;
+    printf("Keyboard initialized: OK\n");
     printf("System status: OK.\n");
-
+    
     current_color = 0xFFFFFF;
-    printf("\n> ");
-
+    show_prompt();
+    
     while (1) {
-        __asm__ volatile ("hlt"); // Ожидание прерывания (например, нажатия клавиши)
+        // Проверяем клавиатуру
+        keyboard_handler();
+        __asm__ volatile ("pause"); // Замена hlt для экономии энергии
     }
 }
 
 // --- Реализация функций консоли ---
-
 void initialize_console(BootInfo* bi) {
     framebuffer = (uint32_t*)bi->FrameBufferBase;
     pixels_per_scan_line = bi->PixelsPerScanLine;
-    // Пересчитываем размер сетки: (Ширина пикселей) / (Ширина символа + отступ)
-    screen_width_chars = bi->HorizontalResolution / 9; 
-    screen_height_chars = bi->VerticalResolution / 9; // Высота символа + отступ
+    screen_width_chars = bi->HorizontalResolution / 9;
+    screen_height_chars = bi->VerticalResolution / 9;
     current_x = 0;
     current_y = 0;
 }
@@ -176,53 +220,52 @@ void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
     framebuffer[y * pixels_per_scan_line + x] = color;
 }
 
-// Рисует символ 8x8 с заданным цветом фона и переднего плана
 void put_char_graphic(char c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color) {
-    if (c < 32 || c > 127) c = '?'; 
-
-    unsigned char* glyph = full_font_data[c - 32]; 
+    if (c < 32 || c > 127) c = '?';
+    
+    unsigned char* glyph = full_font_data[c - 32];
     const uint32_t char_width = 8;
     const uint32_t char_height = 8;
-    // Добавляем отступ в 1 пиксель справа и снизу
-    const uint32_t padding_x = 1; 
+    const uint32_t padding_x = 1;
     const uint32_t padding_y = 1;
-
-    for (uint32_t cy = 0; cy < char_height + padding_y; cy++) { 
+    
+    for (uint32_t cy = 0; cy < char_height + padding_y; cy++) {
         for (uint32_t cx = 0; cx < char_width + padding_x; cx++) {
             uint32_t target_x = x * (char_width + padding_x) + cx;
             uint32_t target_y = y * (char_height + padding_y) + cy;
-
+            
             if (cx < char_width && cy < char_height) {
-                // Если мы внутри зоны символа, проверяем бит шрифта
                 if ((glyph[cy] >> (7 - cx)) & 1) {
                     put_pixel(target_x, target_y, fg_color);
                 } else {
                     put_pixel(target_x, target_y, bg_color);
                 }
             } else {
-                // Если мы в зоне отступа, рисуем фон
                 put_pixel(target_x, target_y, bg_color);
             }
         }
     }
 }
 
-
-// Обрабатывает символы для консольного вывода (перенос строки, прокрутка)
 void put_char(char c) {
     if (c == '\n') {
         current_x = 0;
         current_y++;
+    } else if (c == '\b') { // Backspace
+        if (current_x > 0) {
+            current_x--;
+            put_char_graphic(' ', current_x, current_y, current_color, current_bg_color);
+        }
     } else {
         put_char_graphic(c, current_x, current_y, current_color, current_bg_color);
         current_x++;
     }
-
+    
     if (current_x >= screen_width_chars) {
         current_x = 0;
         current_y++;
     }
-
+    
     if (current_y >= screen_height_chars) {
         scroll_screen();
         current_y = screen_height_chars - 1;
@@ -231,22 +274,10 @@ void put_char(char c) {
 }
 
 void scroll_screen(void) {
-    // Копируем все строки, кроме первой, на одну строку выше
-    for (uint32_t y = 1; y < screen_height_chars; y++) {
-        for (uint32_t x = 0; x < screen_width_chars; x++) {
-             // Очень неэффективно, но работает для простого ядра
-             // В реальном ядре использовался бы memcpy на уровне пикселей
-             char temp_char = ' '; // Заглушка, так как у нас нет буфера символов
-             // Приходится перерисовывать пиксели
-             // put_char_graphic(temp_char, x, y-1, current_color, current_bg_color);
-        }
-    }
-    // Очищаем последнюю строку
-    // clear_screen_row(screen_height_chars - 1);
-    // Из-за сложности реализации прокрутки на уровне пикселей без memcpy, просто очистим весь экран
-    clear_screen(); 
-    current_y = 0;
+    // Упрощенная прокрутка: очищаем экран
+    clear_screen();
     current_x = 0;
+    current_y = screen_height_chars - 5; // Оставляем место для приглашения
 }
 
 void clear_screen(void) {
@@ -265,18 +296,17 @@ void print_string(const char* str) {
     }
 }
 
-// --- Базовая реализация printf (упрощенная) ---
-
+// --- Реализация printf ---
 void utoa(uint64_t value, char* buffer, int base) {
     char* original_buffer = buffer;
     uint64_t temp = value;
     int digits = 0;
-
+    
     do {
         digits++;
         temp /= base;
     } while (temp > 0);
-
+    
     buffer += digits;
     *buffer = '\0';
     
@@ -290,8 +320,8 @@ void printf(const char* format, ...) {
     va_list args;
     va_start(args, format);
     
-    char buffer[20]; // Достаточно для 64-битного числа в любом формате
-
+    char buffer[20];
+    
     while (*format) {
         if (*format == '%') {
             format++;
@@ -305,6 +335,7 @@ void printf(const char* format, ...) {
             } else if (*format == 'x' || *format == 'p' || *format == 'l') {
                 uint64_t val = va_arg(args, uint64_t);
                 utoa(val, buffer, 16);
+                print_string("0x");
                 print_string(buffer);
             } else if (*format == '%') {
                 put_char('%');
@@ -315,4 +346,160 @@ void printf(const char* format, ...) {
         format++;
     }
     va_end(args);
+}
+
+// --- Реализация поддержки клавиатуры ---
+void keyboard_init(void) {
+    // Сброс контроллера клавиатуры
+    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xFF), "Nd"(KEYBOARD_COMMAND_PORT));
+    
+    // Ожидание сброса
+    for (volatile int i = 0; i < 100000; i++);
+    
+    // Включение прерываний клавиатуры (если будем использовать прерывания)
+    // __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xAE), "Nd"(KEYBOARD_COMMAND_PORT));
+    
+    // Очистка буфера клавиатуры
+    uint8_t temp;
+    uint8_t status;
+    
+    while (1) {
+        __asm__ volatile ("inb %1, %0" : "=a"(status) : "Nd"(KEYBOARD_STATUS_PORT));
+        if (!(status & 1)) break;
+        __asm__ volatile ("inb %1, %0" : "=a"(temp) : "Nd"(KEYBOARD_DATA_PORT));
+    }
+}
+
+uint8_t keyboard_read_scancode(void) {
+    // Ждем, пока в буфере появится данные
+    uint8_t status;
+    do {
+        __asm__ volatile ("inb %1, %0" : "=a"(status) : "Nd"(KEYBOARD_STATUS_PORT));
+    } while (!(status & 1));
+    
+    // Читаем скан-код
+    uint8_t scancode;
+    __asm__ volatile ("inb %1, %0" : "=a"(scancode) : "Nd"(KEYBOARD_DATA_PORT));
+    return scancode;
+}
+
+char keyboard_scancode_to_char(uint8_t scancode) {
+    if (scancode & 0x80) {
+        // Код отпускания клавиши
+        uint8_t keycode = scancode & 0x7F;
+        
+        // Обработка отпускания модификаторов
+        if (keycode == 0x2A || keycode == 0x36) { // Левый или правый Shift
+            shift_pressed = 0;
+        }
+        return 0;
+    }
+    
+    // Обработка нажатия модификаторов
+    if (scancode == 0x2A || scancode == 0x36) { // Левый или правый Shift
+        shift_pressed = 1;
+        return 0;
+    } else if (scancode == 0x3A) { // Caps Lock
+        caps_lock = !caps_lock;
+        return 0;
+    }
+    
+    // Преобразование скан-кода в символ
+    char result;
+    int use_shift = shift_pressed ^ caps_lock; // XOR: если shift или caps нажат
+    
+    if (use_shift && scancode < 128) {
+        result = scancode_to_char_shift[scancode];
+    } else if (scancode < 128) {
+        result = scancode_to_char[scancode];
+    } else {
+        result = 0;
+    }
+    
+    return result;
+}
+
+void process_keypress(char c) {
+    if (c == 0) return;
+    
+    if (c == '\n') { // Enter
+        put_char('\n');
+        execute_command();
+        show_prompt();
+        return;
+    }
+    
+    if (c == '\b') { // Backspace
+        if (input_buffer_index > 0) {
+            input_buffer_index--;
+            put_char('\b');
+        }
+        return;
+    }
+    
+    // Обычный символ
+    if (input_buffer_index < INPUT_BUFFER_SIZE - 1) {
+        input_buffer[input_buffer_index++] = c;
+        put_char(c);
+    }
+}
+
+// Простая реализация strcmp
+int strcmp(const char* s1, const char* s2) {
+    while (*s1 && (*s1 == *s2)) {
+        s1++;
+        s2++;
+    }
+    return *(const unsigned char*)s1 - *(const unsigned char*)s2;
+}
+
+void execute_command(void) {
+    input_buffer[input_buffer_index] = '\0';
+    
+    if (input_buffer_index == 0) return;
+    
+    // Простые команды
+    if (strcmp(input_buffer, "help") == 0) {
+        printf("\nAvailable commands:\n");
+        printf("  help    - Show this help\n");
+        printf("  clear   - Clear screen\n");
+        printf("  reboot  - Reboot system\n");
+        printf("  version - Show kernel version\n");
+    } else if (strcmp(input_buffer, "clear") == 0) {
+        clear_screen();
+    } else if (strcmp(input_buffer, "reboot") == 0) {
+        printf("\nRebooting...\n");
+        // Перезагрузка через 8042 контроллер
+        __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64));
+    } else if (strcmp(input_buffer, "version") == 0) {
+        printf("\nLufiraOS Kernel v1.0\n");
+        printf("Built: %s %s\n", __DATE__, __TIME__);
+    } else {
+        printf("\nUnknown command: %s\n", input_buffer);
+    }
+    
+    // Очищаем буфер
+    input_buffer_index = 0;
+}
+
+void show_prompt(void) {
+    current_color = 0xFFFFFF;
+    printf("\n> ");
+    
+    // Сбрасываем состояние ввода
+    input_buffer_index = 0;
+    for (int i = 0; i < INPUT_BUFFER_SIZE; i++) {
+        input_buffer[i] = 0;
+    }
+}
+
+void keyboard_handler(void) {
+    uint8_t status;
+    __asm__ volatile ("inb %1, %0" : "=a"(status) : "Nd"(KEYBOARD_STATUS_PORT));
+    
+    if (status & 1) { // Есть данные в буфере
+        uint8_t scancode = keyboard_read_scancode();
+        char c = keyboard_scancode_to_char(scancode);
+        process_keypress(c);
+    }
 }

@@ -77,8 +77,8 @@ $(BUILD_DIR)/myos.iso: $(ISO_DIR)/EFI/BOOT/BOOTX64.EFI $(ISO_DIR)/kernel.bin $(I
 
 # Создание образа диска для UEFI (альтернативный способ)
 $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin
-	dd if=/dev/zero of=$@ bs=1M count=64
-	mkfs.fat -F 32 $@
+	dd if=/dev/zero of=$@ bs=1M count=10
+	mkfs.fat -F 16 $@
 	mmd -i $@ ::/EFI
 	mmd -i $@ ::/EFI/BOOT
 	mcopy -i $@ $(BUILD_DIR)/BOOTX64.EFI ::/EFI/BOOT/
