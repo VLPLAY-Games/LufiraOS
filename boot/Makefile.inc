@@ -1,9 +1,9 @@
 # Правила для загрузчика
 
 # Исходные файлы загрузчика
-BOOTLOADER_SRC := $(BOOTLOADER_DIR)/bootloader.c
-BOOTLOADER_OBJ := $(BUILD_DIR)/bootloader.o
-BOOTLOADER_SO := $(BUILD_DIR)/bootloader.so
+BOOTLOADER_SRC := $(BOOTLOADER_DIR)/boot.c
+BOOTLOADER_OBJ := $(BUILD_DIR)/boot.o
+BOOTLOADER_SO := $(BUILD_DIR)/boot.so
 
 # Сборка загрузчика
 $(BOOTLOADER_OBJ): $(BOOTLOADER_SRC)

@@ -12,7 +12,7 @@ EFI_LIB := /usr/lib
 
 # Директории
 BUILD_DIR := build
-BOOTLOADER_DIR := bootloader
+BOOTLOADER_DIR := boot
 KERNEL_DIR := kernel
 
 # Создаем директории
@@ -50,7 +50,7 @@ KERNEL_SOURCES := \
 KERNEL_OBJECTS := $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/kernel/%.o,$(KERNEL_SOURCES))
 
 # Подключаем правила для загрузчика
-include bootloader/Makefile.inc
+include boot/Makefile.inc
 
 # Правила для ядра
 $(BUILD_DIR)/kernel/%.o: $(KERNEL_DIR)/%.c
@@ -73,7 +73,7 @@ $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin
 	mcopy -i $@ $(BUILD_DIR)/kernel.bin ::/
 
 # Запуск в QEMU с диском
-run-disk: $(BUILD_DIR)/disk.img
+run: $(BUILD_DIR)/disk.img
 	qemu-system-x86_64 \
 		-bios /usr/share/ovmf/OVMF.fd \
 		-drive format=raw,file=$(BUILD_DIR)/disk.img \
@@ -81,11 +81,8 @@ run-disk: $(BUILD_DIR)/disk.img
 		-serial stdio \
 		-m 256M
 
-# Быстрый запуск
-run: run-disk
-
 # Очистка
 clean:
 	rm -rf $(BUILD_DIR)
 
-.PHONY: all run run-disk debug clean
+.PHONY: all run clean

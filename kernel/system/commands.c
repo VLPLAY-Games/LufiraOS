@@ -31,17 +31,30 @@ void command_reboot(void) {
 
 void command_shutdown(void) {
     printf("\nShutting down system...\n");
-    // Попытка выключения через ACPI
+    
+    // Попытка выключения через ACPI (QEMU и современные системы)
+    // Для QEMU используем порт 0x604
     __asm__ volatile ("outw %0, %1" : : "a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
     
-    // Запасной метод через порт
-    __asm__ volatile ("outw %0, %1" : : "a"((uint16_t)0x3400), "Nd"((uint16_t)0x4004));
+    // Запасной метод для QEMU (более старый)
+    __asm__ volatile ("outw %0, %1" : : "a"((uint16_t)0x3400), "Nd"((uint16_t)0x604));
     
+    // Метод для Bochs и старых версий QEMU
+    __asm__ volatile ("outw %0, %1" : : "a"((uint16_t)0x2000), "Nd"((uint16_t)0xB004));
+    
+    // Метод через порт 0x64 (8042 контроллер) - для реального железа
+    __asm__ volatile (
+        "mov $0xFE, %%al\n"
+        "out %%al, $0x64\n"
+        : : : "eax"
+    );
+    
+    // Если все еще работает
     printf("Shutdown command sent. System may require manual power off.\n");
 }
 
 void command_version(void) {
-    printf("\nLufiraOS Kernel v1.0\n");
+    printf("\nLufiraOS Kernel v0.1\n");
     printf("Built: %s %s\n", __DATE__, __TIME__);
     printf("Architecture: x86_64\n");
 }
