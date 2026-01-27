@@ -10,6 +10,7 @@ void command_help(void) {
     printf("  shutdown  - Shutdown system\n");
     printf("  version   - Show kernel version\n");
     printf("  echo      - Echo text back\n");
+    printf("  history   - Show command history\n");
 }
 
 void command_clear(void) {

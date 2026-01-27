@@ -201,8 +201,10 @@ void process_keypress(int key) {
             shell_handle_right_arrow();
             return;
         case KEY_UP_ARROW:
+            shell_handle_up_arrow();
+            return;
         case KEY_DOWN_ARROW:
-            // Пока не реализовано
+            shell_handle_down_arrow();
             return;
     }
     
