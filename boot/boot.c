@@ -58,7 +58,7 @@ VOID PrintColored(CONST CHAR16 *String, UINTN Foreground, UINTN Background) {
 VOID DrawHorizontalLine(UINTN Length, UINTN X, UINTN Y) {
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X, Y);
     for (UINTN i = 0; i < Length; i++) {
-        Print(L"─");
+        Print(L"-");
     }
 }
 
@@ -67,9 +67,9 @@ VOID DrawBox(UINTN X, UINTN Y, UINTN Width, UINTN Height, CONST CHAR16 *Title) {
     
     // Верхняя граница
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X, Y);
-    Print(L"┌");
-    for (UINTN i = 0; i < Width - 2; i++) Print(L"─");
-    Print(L"┐");
+    Print(L"+");
+    for (UINTN i = 0; i < Width - 2; i++) Print(L"-");
+    Print(L"+");
     
     // Заголовок
     if (Title != NULL) {
@@ -82,21 +82,29 @@ VOID DrawBox(UINTN X, UINTN Y, UINTN Width, UINTN Height, CONST CHAR16 *Title) {
     // Боковые границы
     for (UINTN i = 1; i < Height - 1; i++) {
         uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X, Y + i);
-        Print(L"│");
+        Print(L"|");
         uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X + Width - 1, Y + i);
-        Print(L"│");
+        Print(L"|");
     }
     
     // Нижняя граница
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X, Y + Height - 1);
-    Print(L"└");
-    for (UINTN i = 0; i < Width - 2; i++) Print(L"─");
-    Print(L"┘");
+    Print(L"+");
+    for (UINTN i = 0; i < Width - 2; i++) Print(L"-");
+    Print(L"+");
     
     SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
 }
 
 VOID ShowProgressBar(UINTN Current, UINTN Total, UINTN X, UINTN Y, UINTN Width) {
+    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X, Y);
+    
+    // Очищаем строку от предыдущего прогресса
+    SetColor(COLOR_BLACK, COLOR_BLACK);
+    for (UINTN i = 0; i < Width + 10; i++) {
+        Print(L" ");
+    }
+    
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X, Y);
     
     SetColor(COLOR_BLUE, COLOR_BLACK);
@@ -106,12 +114,12 @@ VOID ShowProgressBar(UINTN Current, UINTN Total, UINTN X, UINTN Y, UINTN Width) 
     
     SetColor(COLOR_GREEN, COLOR_BLACK);
     for (UINTN i = 0; i < Progress; i++) {
-        Print(L"█");
+        Print(L"#");
     }
     
     SetColor(COLOR_DARKGRAY, COLOR_BLACK);
     for (UINTN i = Progress; i < Width; i++) {
-        Print(L"░");
+        Print(L".");
     }
     
     SetColor(COLOR_BLUE, COLOR_BLACK);
@@ -122,6 +130,15 @@ VOID ShowProgressBar(UINTN Current, UINTN Total, UINTN X, UINTN Y, UINTN Width) 
 // ==================== ФУНКЦИИ ДЛЯ ВЫВОДА ИНФОРМАЦИИ ====================
 VOID PrintInfo(CONST CHAR16 *Label, CONST CHAR16 *Value, BOOLEAN Important, UINTN X, UINTN Y) {
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X, Y);
+    
+    // Очищаем строку
+    SetColor(COLOR_BLACK, COLOR_BLACK);
+    for (UINTN i = 0; i < 76; i++) {
+        Print(L" ");
+    }
+    
+    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X, Y);
+    
     SetColor(COLOR_CYAN, COLOR_BLACK);
     Print(L"  ");
     Print(Label);
@@ -155,9 +172,9 @@ VOID ShowAdvancedInfo(EFI_LOADED_IMAGE *LoadedImage, EFI_FILE_HANDLE KernelFile,
     // Заголовок
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 1);
     SetColor(COLOR_YELLOW, COLOR_BLACK);
-    Print(L"╔══════════════════════════════════════════════════════════════════════╗\n");
-    Print(L"║                  LufiraOS Advanced System Information                ║\n");
-    Print(L"╚══════════════════════════════════════════════════════════════════════╝\n\n");
+    Print(L"+==========================================================================+\n");
+    Print(L"|                  LufiraOS Advanced System Information                |\n");
+    Print(L"+==========================================================================+\n\n");
     
     SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
     
@@ -240,6 +257,14 @@ VOID ShowAdvancedInfo(EFI_LOADED_IMAGE *LoadedImage, EFI_FILE_HANDLE KernelFile,
     
     // Инструкция для возврата
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 35);
+    
+    // Очищаем строку
+    SetColor(COLOR_BLACK, COLOR_BLACK);
+    for (UINTN i = 0; i < 76; i++) {
+        Print(L" ");
+    }
+    
+    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 35);
     SetColor(COLOR_YELLOW, COLOR_BLACK);
     Print(L"Press ");
     SetColor(COLOR_CYAN, COLOR_BLACK);
@@ -273,28 +298,28 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 1);
     
     SetColor(COLOR_BLUE, COLOR_BLACK);
-    Print(L"╔══════════════════════════════════════════════════════════════════════╗\n");
+    Print(L"+==========================================================================+\n");
     
     SetColor(COLOR_CYAN, COLOR_BLACK);
-    Print(L"║                                                                      ║\n");
+    Print(L"|                                                                      |\n");
     
     SetColor(COLOR_YELLOW, COLOR_BLACK);
-    Print(L"║    ██╗     ██╗   ██╗███████╗██╗██████╗  █████╗     ███████╗███████╗  ║\n");
-    Print(L"║    ██║     ██║   ██║██╔════╝██║██╔══██╗██╔══██╗    ██═══██╝██╔════╝  ║\n");
-    Print(L"║    ██║     ██║   ██║█████╗  ██║██████╔╝███████║    ██═══██╗███████╗  ║\n");
-    Print(L"║    ██║     ██║   ██║██╔══╝  ██║██╔══██╗██╔══██║    ██═══██║╚════██║  ║\n");
-    Print(L"║    ███████╗╚██████╔╝██║     ██║██║  ██║██║  ██║    ███████║███████║  ║\n");
-    Print(L"║    ╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝    ╚══════╝╚══════╝  ║\n");
+    Print(L"|    ██╗     ██╗   ██╗███████╗██╗██████╗  █████╗     ███████╗███████╗  |\n");
+    Print(L"|    ██║     ██║   ██║██╔════╝██║██╔══██╗██╔══██╗    ██═══██╝██╔════╝  |\n");
+    Print(L"|    ██║     ██║   ██║█████╗  ██║██████╔╝███████║    ██═══██╗███████╗  |\n");
+    Print(L"|    ██║     ██║   ██║██╔══╝  ██║██╔══██╗██╔══██║    ██═══██║╚════██║  |\n");
+    Print(L"|    ███████╗╚██████╔╝██║     ██║██║  ██║██║  ██║    ███████║███████║  |\n");
+    Print(L"|    ╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝    ╚══════╝╚══════╝  |\n");
     
     SetColor(COLOR_CYAN, COLOR_BLACK);
-    Print(L"║                                                                      ║\n");
+    Print(L"|                                                                      |\n");
     
     SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
-    Print(L"║                         UEFI Bootloader v0.1.2                       ║\n");
-    Print(L"║                       Copyright © 2024 LufiraOS                       ║\n");
+    Print(L"|                         UEFI Bootloader v0.1.2                       |\n");
+    Print(L"|                       Copyright © 2024 LufiraOS                       |\n");
     
     SetColor(COLOR_BLUE, COLOR_BLACK);
-    Print(L"╚══════════════════════════════════════════════════════════════════════╝\n\n");
+    Print(L"+==========================================================================+\n\n");
     
     SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
     
@@ -419,7 +444,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     DrawBox(2, 25, 76, 6, L"Kernel Loading");
     
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 27);
-    
     PrintColored(L"[1/4] ", COLOR_GREEN, COLOR_BLACK);
     Print(L"Locating boot device... ");
     
@@ -435,7 +459,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     PrintColored(L"OK\n", COLOR_GREEN, COLOR_BLACK);
     
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 28);
-    
     PrintColored(L"[2/4] ", COLOR_GREEN, COLOR_BLACK);
     Print(L"Opening kernel file... ");
     
@@ -462,7 +485,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     uefi_call_wrapper(gBS->FreePool, 1, KernelFileInfo);
     
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 29);
-    
     PrintColored(L"[3/4] ", COLOR_GREEN, COLOR_BLACK);
     Print(L"Allocating kernel memory... ");
     
@@ -487,7 +509,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     PrintColored(L"OK\n", COLOR_GREEN, COLOR_BLACK);
     
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 30);
-    
     PrintColored(L"[4/4] ", COLOR_GREEN, COLOR_BLACK);
     Print(L"Loading kernel... ");
     
@@ -508,8 +529,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         uefi_call_wrapper(gBS->Stall, 1, 10000); // 10ms задержка
     }
     
-    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 66, 31);
-    PrintColored(L" COMPLETE\n", COLOR_GREEN, COLOR_BLACK);
+    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 70, 31);
+    PrintColored(L"COMPLETE\n", COLOR_GREEN, COLOR_BLACK);
     
     // Сохраняем информацию о памяти для ядра
     bi.TotalMemory = TotalRAM;
@@ -541,17 +562,19 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     
     // ==================== ОБРАТНЫЙ ОТСЧЕТ ====================
     EFI_INPUT_KEY Key;
-    UINTN Index;
-    EFI_EVENT TimerEvent;
-    UINT64 TimerPeriod = 10000000; // 1 секунда
-    
-    uefi_call_wrapper(gBS->CreateEvent, 5, EVT_TIMER, 0, NULL, NULL, &TimerEvent);
-    
     BOOLEAN SkipCountdown = FALSE;
     BOOLEAN ShowInfo = FALSE;
     
     for (int i = 5; i > 0 && !SkipCountdown; i--) {
         // Отображаем стилизованный обратный отсчет
+        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 38);
+        
+        // Очищаем строку
+        SetColor(COLOR_BLACK, COLOR_BLACK);
+        for (UINTN j = 0; j < 50; j++) {
+            Print(L" ");
+        }
+        
         uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 38);
         
         SetColor(COLOR_BLUE, COLOR_BLACK);
@@ -563,40 +586,67 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         
         // Анимация загрузки
         uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 39);
+        
+        // Очищаем строку
+        SetColor(COLOR_BLACK, COLOR_BLACK);
+        for (UINTN j = 0; j < 50; j++) {
+            Print(L" ");
+        }
+        
+        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 39);
+        
         SetColor(COLOR_GREEN, COLOR_BLACK);
         for (int j = 0; j < (5 - i); j++) {
-            Print(L"▓");
+            Print(L"#");
         }
         SetColor(COLOR_DARKGRAY, COLOR_BLACK);
         for (int j = (5 - i); j < 5; j++) {
-            Print(L"░");
+            Print(L".");
         }
         
-        // Проверяем ввод
-        EFI_EVENT WaitList[] = {TimerEvent, gST->ConIn->WaitForKey};
-        status = uefi_call_wrapper(gBS->WaitForEvent, 3, 2, WaitList, &Index);
-        
-        if (Index == 1) {
-            uefi_call_wrapper(gST->ConIn->ReadKeyStroke, 2, gST->ConIn, &Key);
-            
-            if (Key.UnicodeChar == L'\r' || Key.UnicodeChar == L'\n') {
-                SkipCountdown = TRUE;
-                uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 38);
-                PrintColored(L"[ ▶ Starting kernel immediately... ]", COLOR_GREEN, COLOR_BLACK);
-            } else if (Key.UnicodeChar == L'i' || Key.UnicodeChar == L'I') {
-                ShowInfo = TRUE;
-                break;
-            } else if (Key.UnicodeChar == 0x1B || Key.ScanCode == 0x17) { // ESC
-                uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 38);
-                PrintColored(L"[ ✖ Boot cancelled by user ]", COLOR_RED, COLOR_BLACK);
-                while(1) __asm__ volatile("hlt");
+        // Ждем 1 секунду, но каждые 100 мс проверяем нажатие клавиши
+        for (int j = 0; j < 10; j++) {
+            // Проверяем, есть ли нажатие клавиши
+            status = uefi_call_wrapper(gST->ConIn->ReadKeyStroke, 2, gST->ConIn, &Key);
+            if (!EFI_ERROR(status)) {
+                // Обработка нажатия
+                if (Key.UnicodeChar == L'\r' || Key.UnicodeChar == L'\n') {
+                    SkipCountdown = TRUE;
+                    
+                    // Очищаем строку с обратным отсчетом
+                    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 38);
+                    SetColor(COLOR_BLACK, COLOR_BLACK);
+                    for (UINTN k = 0; k < 50; k++) {
+                        Print(L" ");
+                    }
+                    
+                    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 38);
+                    PrintColored(L"[ ▶ Starting kernel immediately... ]", COLOR_GREEN, COLOR_BLACK);
+                    break;
+                } else if (Key.UnicodeChar == L'i' || Key.UnicodeChar == L'I') {
+                    ShowInfo = TRUE;
+                    break;
+                } else if (Key.UnicodeChar == 0x1B || Key.ScanCode == 0x17) { // ESC
+                    
+                    // Очищаем строку с обратным отсчетом
+                    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 38);
+                    SetColor(COLOR_BLACK, COLOR_BLACK);
+                    for (UINTN k = 0; k < 50; k++) {
+                        Print(L" ");
+                    }
+                    
+                    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 38);
+                    PrintColored(L"[ ✖ Boot cancelled by user ]", COLOR_RED, COLOR_BLACK);
+                    while(1) __asm__ volatile("hlt");
+                }
             }
+            // Ждем 100 мс
+            uefi_call_wrapper(gBS->Stall, 1, 100000);
         }
-        
-        uefi_call_wrapper(gBS->SetTimer, 3, TimerEvent, TimerRelative, TimerPeriod);
+        if (SkipCountdown || ShowInfo) {
+            break;
+        }
     }
-    
-    uefi_call_wrapper(gBS->CloseEvent, 1, TimerEvent);
     
     // ==================== РЕЖИМ ДОПОЛНИТЕЛЬНОЙ ИНФОРМАЦИИ ====================
     if (ShowInfo) {
@@ -613,9 +663,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     // ==================== ПЕРЕХОД К ЯДРУ ====================
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 40);
     SetColor(COLOR_GREEN, COLOR_BLACK);
-    Print(L"══════════════════════════════════════════════════════════════════════\n");
+    Print(L"==========================================================================\n");
     Print(L"        Switching to 64-bit mode and starting LufiraOS kernel...\n");
-    Print(L"══════════════════════════════════════════════════════════════════════\n");
+    Print(L"==========================================================================\n");
     
     uefi_call_wrapper(gBS->Stall, 1, 2000000); // 2 секунды задержка
 
