@@ -27,6 +27,21 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     // 1. Базовая информация о прошивке
     Print(L"Firmware Vendor:      %s\n", ST->FirmwareVendor);
     Print(L"UEFI Specification:   %d.%02d\n", ST->Hdr.Revision >> 16, ST->Hdr.Revision & 0xFFFF);
+    EFI_GUID gEfiGlobalVariableGuid = {0x8BE4DF61, 0x93CA, 0x11D2, {0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C}};
+    UINT8 SecureBoot;
+    UINTN DataSize = sizeof(SecureBoot);
+    EFI_STATUS sb_status = uefi_call_wrapper(RT->GetVariable, 5, 
+        L"SecureBoot", 
+        &gEfiGlobalVariableGuid,
+        NULL, 
+        &DataSize, 
+        &SecureBoot);
+
+    if (!EFI_ERROR(sb_status)) {
+        Print(L"Secure Boot:          %s\n", SecureBoot ? L"Enabled" : L"Disabled");
+    } else {
+        Print(L"Secure Boot:          Unknown/Not Supported\n");
+    }
 
     // 2. Системное время
     EFI_TIME Time;
@@ -60,6 +75,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             Print(L"ACPI 2.0 Table:       Found at 0x%lx\n", ST->ConfigurationTable[i].VendorTable);
         }
     }
+    
+
 
     // 5. Данные об образе (Image Info)
     EFI_LOADED_IMAGE *LoadedImage;
