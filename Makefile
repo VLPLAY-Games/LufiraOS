@@ -79,7 +79,7 @@ run: $(BUILD_DIR)/disk.img
 		-drive format=raw,file=$(BUILD_DIR)/disk.img \
 		-net none \
 		-serial stdio \
-		-m 256M
+		-m 64M
 
 # Очистка
 clean:

@@ -55,6 +55,9 @@ void draw_cursor(void);
 void erase_cursor(void);
 void update_cursor(void);
 void enable_cursor(int enabled);
+void move_cursor_left(void);
+void move_cursor_right(void);
+void set_cursor_position(uint32_t x, uint32_t y);
 
 // Функция для отображения системной информации
 void display_system_info(BootInfo* bi);

@@ -544,3 +544,31 @@ void enable_cursor(int enabled) {
         draw_cursor();
     }
 }
+
+// Перемещение курсора влево
+void move_cursor_left(void) {
+    if (current_x > 0) {
+        erase_cursor();
+        current_x--;
+        draw_cursor();
+    }
+}
+
+// Перемещение курсора вправо
+void move_cursor_right(void) {
+    if (current_x < screen_width_chars - 1) {
+        erase_cursor();
+        current_x++;
+        draw_cursor();
+    }
+}
+
+// Установка позиции курсора
+void set_cursor_position(uint32_t x, uint32_t y) {
+    if (x >= screen_width_chars || y >= screen_height_chars) return;
+    
+    erase_cursor();
+    current_x = x;
+    current_y = y;
+    draw_cursor();
+}

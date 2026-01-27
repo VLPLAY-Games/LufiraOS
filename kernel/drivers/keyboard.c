@@ -86,7 +86,7 @@ uint8_t keyboard_read_scancode(void) {
     return scancode;
 }
 
-char keyboard_scancode_to_char(uint8_t scancode) {
+int keyboard_scancode_to_key(uint8_t scancode) {
     // Обработка префикса расширенного скан-кода
     if (scancode == 0xE0) {
         extended_scancode = 1;
@@ -137,8 +137,20 @@ char keyboard_scancode_to_char(uint8_t scancode) {
                 return 0;
         }
     } else {
-        // Обработка расширенных кодов (правые Ctrl/Alt и др.)
+        // Обработка расширенных кодов (стрелочки и другие)
         switch (scancode) {
+            case 0x4B: // Стрелка влево
+                extended_scancode = 0;
+                return KEY_LEFT_ARROW;
+            case 0x4D: // Стрелка вправо
+                extended_scancode = 0;
+                return KEY_RIGHT_ARROW;
+            case 0x48: // Стрелка вверх
+                extended_scancode = 0;
+                return KEY_UP_ARROW;
+            case 0x50: // Стрелка вниз
+                extended_scancode = 0;
+                return KEY_DOWN_ARROW;
             case 0x1D: // Правый Ctrl (E0 1D)
                 ctrl_pressed = 1;
                 extended_scancode = 0;
@@ -154,7 +166,7 @@ char keyboard_scancode_to_char(uint8_t scancode) {
     }
     
     // Преобразование скан-кода в символ
-    char result = 0;
+    int result = 0;
     
     if (scancode < 128) {
         // Определяем, использовать ли shift версию
@@ -177,29 +189,35 @@ char keyboard_scancode_to_char(uint8_t scancode) {
     return result;
 }
 
-void process_keypress(char c) {
-    if (c == 0) return;
+void process_keypress(int key) {
+    if (key == 0) return;
     
-    if (c == '\n') { // Enter
-        put_char('\n');
-        execute_command();
-        show_prompt();
+    // Обработка специальных клавиш
+    switch (key) {
+        case KEY_LEFT_ARROW:
+            shell_handle_left_arrow();
+            return;
+        case KEY_RIGHT_ARROW:
+            shell_handle_right_arrow();
+            return;
+        case KEY_UP_ARROW:
+        case KEY_DOWN_ARROW:
+            // Пока не реализовано
+            return;
+    }
+    
+    if (key == '\n') { // Enter
+        shell_handle_enter();
         return;
     }
     
-    if (c == '\b') { // Backspace
-        if (input_buffer_index > 0) {
-            input_buffer_index--;
-            put_char('\b');
-        }
+    if (key == '\b') { // Backspace
+        shell_handle_backspace();
         return;
     }
     
     // Обычный символ
-    if (input_buffer_index < INPUT_BUFFER_SIZE - 1) {
-        input_buffer[input_buffer_index++] = c;
-        put_char(c);
-    }
+    shell_handle_char(key);
 }
 
 void keyboard_handler(void) {
@@ -208,7 +226,7 @@ void keyboard_handler(void) {
     
     if (status & 1) { // Есть данные в буфере
         uint8_t scancode = keyboard_read_scancode();
-        char c = keyboard_scancode_to_char(scancode);
-        process_keypress(c);
+        int key = keyboard_scancode_to_key(scancode);
+        process_keypress(key);
     }
 }
