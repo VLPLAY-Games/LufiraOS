@@ -1,31 +1,70 @@
 #include <stdint.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include "console.h"
 
 // Глобальные переменные состояния консоли
 uint32_t current_x = 0;
 uint32_t current_y = 0;
-uint32_t screen_width_chars;
-uint32_t screen_height_chars;
-uint32_t* framebuffer;
+uint32_t screen_width_chars = 0;
+uint32_t screen_height_chars = 0;
+uint32_t* framebuffer = NULL;
 uint32_t current_color = 0xFFFFFF;
 uint32_t current_bg_color = 0x000000;
-uint32_t pixels_per_scan_line;
-uint32_t screen_width_pixels;
-uint32_t screen_height_pixels;
+uint32_t pixels_per_scan_line = 0;
+uint32_t screen_width_pixels = 0;
+uint32_t screen_height_pixels = 0;
 uint32_t pixel_format = 0;
 
 // Переменные для мигающего курсора
 int cursor_visible = 1;
 int cursor_enabled = 1;
 uint32_t cursor_blink_counter = 0;
-uint32_t cursor_blink_rate = 500000; // Скорость мигания
+uint32_t cursor_blink_rate = 500000;
+
+// Текущая цветовая пара
+ColorPair current_colors = {
+    .fg_color = 0xFFFFFF,
+    .bg_color = 0x000000,
+    .fg_index = COLOR_WHITE,
+    .bg_index = COLOR_BLACK
+};
 
 // Размеры символа 8x8
 #define CHAR_WIDTH 8
 #define CHAR_HEIGHT 8
 #define CHAR_PADDING_X 1
 #define CHAR_PADDING_Y 4
+
+// 16-цветная палитра VGA (в формате 0xRRGGBB)
+const uint32_t color_palette_16[] = {
+    0x000000, // BLACK
+    0x0000AA, // BLUE
+    0x00AA00, // GREEN
+    0x00AAAA, // CYAN
+    0xAA0000, // RED
+    0xAA00AA, // MAGENTA
+    0xAA5500, // BROWN
+    0xAAAAAA, // LIGHT_GRAY
+    0x555555, // DARK_GRAY
+    0x5555FF, // LIGHT_BLUE
+    0x55FF55, // LIGHT_GREEN
+    0x55FFFF, // LIGHT_CYAN
+    0xFF5555, // LIGHT_RED
+    0xFF55FF, // LIGHT_MAGENTA
+    0xFFFF55, // YELLOW
+    0xFFFFFF  // WHITE
+};
+
+// Имена цветов
+const char* color_names_16[] = {
+    "BLACK", "BLUE", "GREEN", "CYAN", "RED", "MAGENTA", "BROWN", "LIGHT_GRAY",
+    "DARK_GRAY", "LIGHT_BLUE", "LIGHT_GREEN", "LIGHT_CYAN", "LIGHT_RED", 
+    "LIGHT_MAGENTA", "YELLOW", "WHITE"
+};
+
+// 256-цветная палитра (инициализируется динамически)
+uint32_t color_palette_256[256] = {0};
 
 // --- Самодельный улучшенный шрифт 8x8 пикселей ---
 static unsigned char full_font_data[][8] = {
@@ -128,14 +167,54 @@ static unsigned char full_font_data[][8] = {
 
 // Преобразование цвета из RGB в BGR если нужно
 uint32_t convert_color(uint32_t color) {
-    if (pixel_format == 0) {
-        return color;
-    } else {
-        uint8_t r = (color >> 16) & 0xFF;
-        uint8_t g = (color >> 8) & 0xFF;
-        uint8_t b = color & 0xFF;
-        return (b << 16) | (g << 8) | r;
+    // if (pixel_format == 0) {
+    //     return color; // RGB формат
+    // } else {
+    //     // BGR формат: преобразуем RGB в BGR
+    //     uint8_t r = (color >> 16) & 0xFF;
+    //     uint8_t g = (color >> 8) & 0xFF;
+    //     uint8_t b = color & 0xFF;
+    //     return (b << 16) | (g << 8) | r;
+    // }
+    return color;
+}
+
+// Инициализация 256-цветной палитры
+void init_256_color_palette(void) {
+    // 0-15: 16 стандартных цветов VGA
+    for (int i = 0; i < 16; i++) {
+        color_palette_256[i] = color_palette_16[i];
     }
+    
+    // 16-231: 6x6x6 RGB куб
+    int index = 16;
+    for (int r = 0; r < 6; r++) {
+        for (int g = 0; g < 6; g++) {
+            for (int b = 0; b < 6; b++) {
+                uint8_t red = r * 51;   // 0, 51, 102, 153, 204, 255
+                uint8_t green = g * 51;
+                uint8_t blue = b * 51;
+                uint32_t rgb = (red << 16) | (green << 8) | blue;
+                color_palette_256[index++] = rgb;
+            }
+        }
+    }
+    
+    // 232-255: Оттенки серого
+    for (int i = 0; i < 24; i++) {
+        uint8_t gray = 8 + i * 10;
+        if (gray > 238) gray = 238;
+        uint32_t rgb = (gray << 16) | (gray << 8) | gray;
+        color_palette_256[232 + i] = rgb;
+    }
+}
+
+// Получение цвета из палитры с преобразованием
+uint32_t get_color_from_palette(int index) {
+    if (index < 0 || index >= 256) {
+        return convert_color(0xFFFFFF); // Белый по умолчанию
+    }
+    return convert_color(color_palette_256[index]);
 }
 
 void initialize_console(BootInfo* bi) {
@@ -145,12 +224,16 @@ void initialize_console(BootInfo* bi) {
     screen_height_pixels = bi->VerticalResolution;
     pixel_format = bi->PixelFormat;
     
+    // Инициализируем 256-цветную палитру
+    init_256_color_palette();
+    
     // Преобразуем стандартные цвета
-    current_color = convert_color(0xFFFFFF);
-    current_bg_color = convert_color(0x000000);
+    current_colors.fg_color = convert_color(0xFFFFFF);
+    current_colors.bg_color = convert_color(0x000000);
+    current_color = current_colors.fg_color;
+    current_bg_color = current_colors.bg_color;
     
     // Вычисляем количество символов, которые поместятся на экране
-    // Каждый символ: 8 пикселей + 1 пиксель отступ = 9 пикселей
     screen_width_chars = screen_width_pixels / (CHAR_WIDTH + CHAR_PADDING_X);
     screen_height_chars = screen_height_pixels / (CHAR_HEIGHT + CHAR_PADDING_Y);
     
@@ -175,6 +258,14 @@ void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
     framebuffer[y * pixels_per_scan_line + x] = color;
 }
 
+// Получение имени цвета
+const char* get_color_name(ConsoleColor color) {
+    if (color >= 0 && color <= 15) {
+        return color_names_16[color];
+    }
+    return "RGB";
+}
+
 // Отрисовка символа 8x8
 void put_char_graphic(char c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color) {
     if (c < 32 || c > 127) c = '?';
@@ -188,10 +279,6 @@ void put_char_graphic(char c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_
     // Ограничиваем область отрисовки размерами экрана
     if (base_x >= screen_width_pixels || base_y >= screen_height_pixels) return;
     
-    // Преобразуем цвета если нужно
-    uint32_t converted_fg = fg_color;
-    uint32_t converted_bg = bg_color;
-    
     for (uint32_t cy = 0; cy < CHAR_HEIGHT + CHAR_PADDING_Y; cy++) {
         uint32_t target_y = base_y + cy;
         if (target_y >= screen_height_pixels) break;
@@ -203,13 +290,13 @@ void put_char_graphic(char c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_
             if (cx < CHAR_WIDTH && cy < CHAR_HEIGHT) {
                 // Внутри символа: проверяем бит шрифта
                 if ((glyph[cy] >> (7 - cx)) & 1) {
-                    put_pixel(target_x, target_y, converted_fg);
+                    put_pixel(target_x, target_y, fg_color);
                 } else {
-                    put_pixel(target_x, target_y, converted_bg);
+                    put_pixel(target_x, target_y, bg_color);
                 }
             } else {
                 // Отступы заливаем цветом фона
-                put_pixel(target_x, target_y, converted_bg);
+                put_pixel(target_x, target_y, bg_color);
             }
         }
     }
@@ -397,8 +484,164 @@ void printf(const char* format, ...) {
     va_end(args);
 }
 
+// ==================== ФУНКЦИИ ДЛЯ РАБОТЫ С ЦВЕТАМИ ====================
+
+// Установка цветов по индексам (0-15)
+void set_color_by_index(ConsoleColor fg, ConsoleColor bg) {
+    if (fg >= 0 && fg <= 255) {
+        current_colors.fg_index = fg;
+        current_colors.fg_color = get_color_from_palette(fg);
+        current_color = current_colors.fg_color;
+    }
+    if (bg >= 0 && bg <= 255) {
+        current_colors.bg_index = bg;
+        current_colors.bg_color = get_color_from_palette(bg);
+        current_bg_color = current_colors.bg_color;
+    }
+}
+
+// Установка цветов по RGB значениям
+void set_color_by_rgb(uint32_t fg_rgb, uint32_t bg_rgb) {
+    current_colors.fg_color = convert_color(fg_rgb);
+    current_colors.bg_color = convert_color(bg_rgb);
+    current_colors.fg_index = COLOR_RGB;
+    current_colors.bg_index = COLOR_RGB;
+    current_color = current_colors.fg_color;
+    current_bg_color = current_colors.bg_color;
+}
+
+// Установка цвета текста по индексу
+void set_foreground_color(ConsoleColor color) {
+    if (color >= 0 && color <= 255) {
+        current_colors.fg_index = color;
+        current_colors.fg_color = get_color_from_palette(color);
+        current_color = current_colors.fg_color;
+    }
+}
+
+// Установка цвета фона по индексу
+void set_background_color(ConsoleColor color) {
+    if (color >= 0 && color <= 255) {
+        current_colors.bg_index = color;
+        current_colors.bg_color = get_color_from_palette(color);
+        current_bg_color = current_colors.bg_color;
+    }
+}
+
+// Установка цвета текста по RGB
+void set_foreground_rgb(uint32_t rgb) {
+    current_colors.fg_color = convert_color(rgb);
+    current_colors.fg_index = COLOR_RGB;
+    current_color = current_colors.fg_color;
+}
+
+// Установка цвета фона по RGB
+void set_background_rgb(uint32_t rgb) {
+    current_colors.bg_color = convert_color(rgb);
+    current_colors.bg_index = COLOR_RGB;
+    current_bg_color = current_colors.bg_color;
+}
+
+// Сброс цветов к значениям по умолчанию
+void reset_colors(void) {
+    set_color_by_index(COLOR_WHITE, COLOR_BLACK);
+}
+
+// Преобразование RGB в ближайший цвет из 16-цветной палитры
+ConsoleColor find_closest_color(uint32_t rgb) {
+    uint8_t r = (rgb >> 16) & 0xFF;
+    uint8_t g = (rgb >> 8) & 0xFF;
+    uint8_t b = rgb & 0xFF;
+    
+    // Простая эвристика для определения цвета
+    if (r == g && g == b) {
+        // Оттенки серого
+        if (r < 64) return COLOR_BLACK;
+        if (r < 128) return COLOR_DARK_GRAY;
+        if (r < 192) return COLOR_LIGHT_GRAY;
+        return COLOR_WHITE;
+    }
+    
+    // Определяем доминирующий цвет
+    if (r > g && r > b) {
+        if (r > 200) return COLOR_LIGHT_RED;
+        return COLOR_RED;
+    } else if (g > r && g > b) {
+        if (g > 200) return COLOR_LIGHT_GREEN;
+        return COLOR_GREEN;
+    } else if (b > r && b > g) {
+        if (b > 200) return COLOR_LIGHT_BLUE;
+        return COLOR_BLUE;
+    } else if (r == g && r > b) {
+        if (r > 200) return COLOR_YELLOW;
+        return COLOR_BROWN;
+    } else if (r == b && r > g) {
+        return COLOR_MAGENTA;
+    } else if (g == b && g > r) {
+        return COLOR_CYAN;
+    }
+    
+    return COLOR_WHITE;
+}
+
+// Вывод таблицы 16-цветной палитры
+void print_color_table_16(void) {
+    printf("\n16-Color Palette:\n");
+    printf("----------------\n");
+    
+    // Сохраняем текущие цвета
+    ColorPair saved_colors = current_colors;
+    uint32_t saved_color = current_color;
+    uint32_t saved_bg_color = current_bg_color;
+    
+    for (int i = 0; i < 16; i++) {
+        // Выводим индекс и название белым цветом
+        set_foreground_color(COLOR_WHITE);
+        
+        // Выводим индекс
+        if (i < 10) {
+            printf("  %d: ", i);
+        } else {
+            printf(" %d: ", i);
+        }
+        
+        // Выводим имя цвета
+        printf("%s", color_names_16[i]);
+        
+        // Дополняем пробелами для выравнивания
+        int name_len = 0;
+        const char* p = color_names_16[i];
+        while (*p++) name_len++;
+        
+        for (int j = name_len; j < 13; j++) {
+            put_char(' ');
+        }
+        
+        // Устанавливаем цвет текста для решеток
+        if (i == COLOR_BLACK) {
+            // Для черного цвета используем темно-серый, чтобы было видно на черном фоне
+            set_foreground_color(COLOR_DARK_GRAY);
+        } else {
+            set_foreground_color((ConsoleColor)i);
+        }
+        
+        // Выводим четыре решетки
+        printf(" [####]\n");
+    }
+    
+    // Восстанавливаем цвета
+    current_colors = saved_colors;
+    current_color = saved_color;
+    current_bg_color = saved_bg_color;
+}
+
 // Функция для отображения системной информации
 void display_system_info(BootInfo* bi) {
+    // Сохраняем текущие цвета
+    ColorPair saved_colors = current_colors;
+    uint32_t saved_color = current_color;
+    uint32_t saved_bg_color = current_bg_color;
+    
     // Заголовок
     current_color = convert_color(0x00AAFF); // Голубой
     printf("\n");
@@ -436,6 +679,7 @@ void display_system_info(BootInfo* bi) {
     printf("  Pixel Format:     %s\n", (bi->PixelFormat == 0) ? "RGB" : "BGR");
     printf("  Pixels/Line:      %d\n", bi->PixelsPerScanLine);
     printf("  Console Grid:     %d x %d chars\n", screen_width_chars, screen_height_chars);
+    printf("  Color Support:    256 colors\n");
     
     // Информация о загрузчике
     current_color = convert_color(0x55FF55);
@@ -452,11 +696,16 @@ void display_system_info(BootInfo* bi) {
     printf("--------------\n");
     
     current_color = convert_color(0xFFFFFF);
-    printf("  Console:          READY\n");
-    printf("  Keyboard:         INITIALIZING...\n");
+    printf("  Console:          READY (256 colors)\n");
+    printf("  Keyboard:         READY\n");
     printf("  Memory Manager:   NOT INITIALIZED\n");
     printf("  Interrupts:       DISABLED\n");
     printf("  Task Manager:     NOT INITIALIZED\n");
+    
+    // Восстанавливаем цвета
+    current_colors = saved_colors;
+    current_color = saved_color;
+    current_bg_color = saved_bg_color;
 }
 
 // ==================== ФУНКЦИИ КУРСОРА ====================

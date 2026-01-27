@@ -1,5 +1,4 @@
 #include "shell.h"
-#include <stddef.h>
 #include "../system/commands.h"
 #include "../drivers/console.h"
 #include "../drivers/keyboard.h"
@@ -28,6 +27,19 @@ int strcmp(const char* s1, const char* s2) {
         s1++;
         s2++;
     }
+    return *(const unsigned char*)s1 - *(const unsigned char*)s2;
+}
+
+// Реализация strncmp
+int strncmp(const char* s1, const char* s2, size_t n) {
+    if (n == 0) return 0;
+    
+    while (n-- && *s1 && (*s1 == *s2)) {
+        s1++;
+        s2++;
+    }
+    
+    if (n == (size_t)-1) return 0;
     return *(const unsigned char*)s1 - *(const unsigned char*)s2;
 }
 
@@ -112,20 +124,17 @@ void shell_refresh_input_line(void) {
     // Очищаем область команды
     for (uint32_t i = 0; i < screen_width_chars - command_start_x; i++) {
         put_char_graphic(' ', command_start_x + i, command_start_y, 
-                         convert_color(0xFFFFFF), convert_color(0x000000));
+                         current_color, current_bg_color);
     }
     
     // Выводим текущую строку
     for (uint32_t i = 0; i < current_line_length; i++) {
         put_char_graphic(current_line[i], command_start_x + i, command_start_y,
-                         convert_color(0xFFFFFF), convert_color(0x000000));
+                         current_color, current_bg_color);
     }
     
     // Устанавливаем курсор в правильную позицию
     set_cursor_position(command_start_x + cursor_position_in_line, command_start_y);
-    
-    // Восстанавливаем цвет
-    current_color = convert_color(0xFFFFFF);
 }
 
 // Загрузка команды из истории в текущую строку
@@ -272,6 +281,14 @@ void shell_handle_down_arrow(void) {
 void execute_command(void) {
     if (input_buffer_index == 0) return;
     
+    // Преобразуем команду к нижнему регистру для сравнения
+    char cmd_lower[INPUT_BUFFER_SIZE];
+    for (int i = 0; i < input_buffer_index; i++) {
+        cmd_lower[i] = to_lower(input_buffer[i]);
+        if (cmd_lower[i] == '\0') break;
+    }
+    cmd_lower[input_buffer_index] = '\0';
+    
     // Используем сравнение без учета регистра для определения команды
     if (strcmp_case_insensitive(input_buffer, "help") == 0) {
         command_help();
@@ -289,6 +306,17 @@ void execute_command(void) {
         for (int i = 0; i < history_count; i++) {
             printf("  %d: %s\n", i + 1, command_history[i]);
         }
+    } else if (strcmp_case_insensitive(input_buffer, "colors") == 0) {
+        command_colors();
+    } else if (strcmp_case_insensitive(input_buffer, "reset") == 0) {
+        reset_colors();
+        printf("\nColors reset to default (white on black)\n");
+    } else if (strncmp(cmd_lower, "color ", 6) == 0) {
+        command_color();
+    } else if (strncmp(cmd_lower, "fg ", 3) == 0) {
+        command_fg();
+    } else if (strncmp(cmd_lower, "bg ", 3) == 0) {
+        command_bg();
     } else if (strcmp_case_insensitive(input_buffer, "echo") == 0) {
         printf("\nUsage: echo <text>\n");
     } else {
@@ -320,7 +348,6 @@ void execute_command(void) {
 }
 
 void show_prompt(void) {
-    current_color = convert_color(0xFFFFFF);
     printf("\n[lufiraos@kernel] $ ");
     
     // Запоминаем позицию начала ввода команды
