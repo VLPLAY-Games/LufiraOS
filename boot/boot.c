@@ -96,47 +96,9 @@ VOID DrawBox(UINTN X, UINTN Y, UINTN Width, UINTN Height, CONST CHAR16 *Title) {
     SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
 }
 
-VOID ShowProgressBar(UINTN Current, UINTN Total, UINTN X, UINTN Y, UINTN Width) {
-    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X, Y);
-    
-    // Очищаем строку от предыдущего прогресса
-    SetColor(COLOR_BLACK, COLOR_BLACK);
-    for (UINTN i = 0; i < Width + 10; i++) {
-        Print(L" ");
-    }
-    
-    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X, Y);
-    
-    SetColor(COLOR_BLUE, COLOR_BLACK);
-    Print(L"[");
-    
-    UINTN Progress = (Current * Width) / Total;
-    
-    SetColor(COLOR_GREEN, COLOR_BLACK);
-    for (UINTN i = 0; i < Progress; i++) {
-        Print(L"#");
-    }
-    
-    SetColor(COLOR_DARKGRAY, COLOR_BLACK);
-    for (UINTN i = Progress; i < Width; i++) {
-        Print(L".");
-    }
-    
-    SetColor(COLOR_BLUE, COLOR_BLACK);
-    Print(L"] %d%%", (Current * 100) / Total);
-    SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
-}
 
 // ==================== ФУНКЦИИ ДЛЯ ВЫВОДА ИНФОРМАЦИИ ====================
 VOID PrintInfo(CONST CHAR16 *Label, CONST CHAR16 *Value, BOOLEAN Important, UINTN X, UINTN Y) {
-    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X, Y);
-    
-    // Очищаем строку
-    SetColor(COLOR_BLACK, COLOR_BLACK);
-    for (UINTN i = 0; i < 76; i++) {
-        Print(L" ");
-    }
-    
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X, Y);
     
     SetColor(COLOR_CYAN, COLOR_BLACK);
@@ -257,16 +219,8 @@ VOID ShowAdvancedInfo(EFI_LOADED_IMAGE *LoadedImage, EFI_FILE_HANDLE KernelFile,
     
     // Инструкция для возврата
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 35);
-    
-    // Очищаем строку
-    SetColor(COLOR_BLACK, COLOR_BLACK);
-    for (UINTN i = 0; i < 76; i++) {
-        Print(L" ");
-    }
-    
-    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 35);
     SetColor(COLOR_YELLOW, COLOR_BLACK);
-    Print(L"Press ");
+    Print(L"\n\nPress ");
     SetColor(COLOR_CYAN, COLOR_BLACK);
     Print(L"ENTER");
     SetColor(COLOR_YELLOW, COLOR_BLACK);
@@ -281,6 +235,7 @@ VOID ShowAdvancedInfo(EFI_LOADED_IMAGE *LoadedImage, EFI_FILE_HANDLE KernelFile,
         }
     }
 }
+
 
 // ==================== ГЛАВНАЯ ФУНКЦИЯ ====================
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
@@ -512,25 +467,40 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     PrintColored(L"[4/4] ", COLOR_GREEN, COLOR_BLACK);
     Print(L"Loading kernel... ");
     
-    // Показываем прогресс-бар загрузки
-    ShowProgressBar(0, 100, 24, 31, 40);
-    
     // Имитация прогресса загрузки (с реальной загрузкой)
     UINTN ChunkSize = 65536; // 64KB за раз
     UINTN TotalLoaded = 0;
+    
+    // Простой индикатор загрузки с точками
+    UINTN dotCount = 0;
     
     for (UINTN i = 0; TotalLoaded < bi.KernelSize; i++) {
         UINTN ToRead = (bi.KernelSize - TotalLoaded) > ChunkSize ? ChunkSize : (bi.KernelSize - TotalLoaded);
         uefi_call_wrapper(KernelFile->Read, 3, KernelFile, &ToRead, (VOID*)(KernelBase + TotalLoaded));
         TotalLoaded += ToRead;
         
-        // Обновляем прогресс-бар
-        ShowProgressBar(TotalLoaded, bi.KernelSize, 24, 31, 40);
-        uefi_call_wrapper(gBS->Stall, 1, 10000); // 10ms задержка
+        // Показываем точку каждые 64KB
+        if (i % 4 == 0) {
+            uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 24 + dotCount, 30);
+            SetColor(COLOR_YELLOW, COLOR_BLACK);
+            Print(L".");
+            dotCount++;
+            SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
+        }
+        
+        uefi_call_wrapper(gBS->Stall, 1, 5000); // 5ms задержка
     }
     
-    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 70, 31);
-    PrintColored(L"COMPLETE\n", COLOR_GREEN, COLOR_BLACK);
+    // Очищаем строку и выводим завершение
+    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 24, 30);
+    SetColor(COLOR_BLACK, COLOR_BLACK);
+    for (UINTN i = 0; i < 40; i++) {
+        Print(L" ");
+    }
+    
+    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 24, 30);
+    SetColor(COLOR_GREEN, COLOR_BLACK);
+    Print(L"  COMPLETE");
     
     // Сохраняем информацию о памяти для ядра
     bi.TotalMemory = TotalRAM;
@@ -543,10 +513,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 35);
     SetColor(COLOR_YELLOW, COLOR_BLACK);
-    Print(L"🚀 Starting LufiraOS in 5 seconds...\n");
+    Print(L"\nStarting LufiraOS in 5 seconds...\n");
     
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 36);
-    Print(L"   Press ");
+    Print(L"Press ");
     SetColor(COLOR_CYAN, COLOR_BLACK);
     Print(L"ENTER");
     SetColor(COLOR_YELLOW, COLOR_BLACK);
@@ -565,44 +535,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     BOOLEAN SkipCountdown = FALSE;
     BOOLEAN ShowInfo = FALSE;
     
+    // Отображаем начальное состояние
+    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 38);
+    SetColor(COLOR_YELLOW, COLOR_BLACK);
+    Print(L"\n\nStarting LufiraOS in 5 seconds... ");
+    
     for (int i = 5; i > 0 && !SkipCountdown; i--) {
-        // Отображаем стилизованный обратный отсчет
-        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 38);
-        
-        // Очищаем строку
-        SetColor(COLOR_BLACK, COLOR_BLACK);
-        for (UINTN j = 0; j < 50; j++) {
-            Print(L" ");
-        }
-        
-        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 38);
-        
-        SetColor(COLOR_BLUE, COLOR_BLACK);
-        Print(L"[ ");
-        SetColor(COLOR_YELLOW, COLOR_BLACK);
-        Print(L"Starting in %d second%s", i, i == 1 ? L"" : L"s");
-        SetColor(COLOR_BLUE, COLOR_BLACK);
-        Print(L" ]");
-        
-        // Анимация загрузки
-        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 39);
-        
-        // Очищаем строку
-        SetColor(COLOR_BLACK, COLOR_BLACK);
-        for (UINTN j = 0; j < 50; j++) {
-            Print(L" ");
-        }
-        
-        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 39);
-        
-        SetColor(COLOR_GREEN, COLOR_BLACK);
-        for (int j = 0; j < (5 - i); j++) {
-            Print(L"#");
-        }
-        SetColor(COLOR_DARKGRAY, COLOR_BLACK);
-        for (int j = (5 - i); j < 5; j++) {
-            Print(L".");
-        }
+        // Обновляем обратный отсчет
+        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 35, 38);
+        SetColor(COLOR_CYAN, COLOR_BLACK);
+        Print(L"%d sec...", i);
         
         // Ждем 1 секунду, но каждые 100 мс проверяем нажатие клавиши
         for (int j = 0; j < 10; j++) {
@@ -614,14 +556,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                     SkipCountdown = TRUE;
                     
                     // Очищаем строку с обратным отсчетом
-                    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 38);
+                    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 38);
                     SetColor(COLOR_BLACK, COLOR_BLACK);
-                    for (UINTN k = 0; k < 50; k++) {
+                    for (UINTN k = 0; k < 76; k++) {
                         Print(L" ");
                     }
                     
-                    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 38);
-                    PrintColored(L"[ ▶ Starting kernel immediately... ]", COLOR_GREEN, COLOR_BLACK);
+                    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 38);
+                    PrintColored(L"Starting kernel immediately...", COLOR_GREEN, COLOR_BLACK);
                     break;
                 } else if (Key.UnicodeChar == L'i' || Key.UnicodeChar == L'I') {
                     ShowInfo = TRUE;
@@ -629,14 +571,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                 } else if (Key.UnicodeChar == 0x1B || Key.ScanCode == 0x17) { // ESC
                     
                     // Очищаем строку с обратным отсчетом
-                    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 38);
+                    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 38);
                     SetColor(COLOR_BLACK, COLOR_BLACK);
-                    for (UINTN k = 0; k < 50; k++) {
+                    for (UINTN k = 0; k < 76; k++) {
                         Print(L" ");
                     }
                     
-                    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 10, 38);
-                    PrintColored(L"[ ✖ Boot cancelled by user ]", COLOR_RED, COLOR_BLACK);
+                    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 38);
+                    PrintColored(L"\nBoot cancelled by user", COLOR_RED, COLOR_BLACK);
                     while(1) __asm__ volatile("hlt");
                 }
             }
@@ -646,6 +588,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         if (SkipCountdown || ShowInfo) {
             break;
         }
+    }
+    
+    // Очищаем обратный отсчет перед продолжением
+    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 38);
+    SetColor(COLOR_BLACK, COLOR_BLACK);
+    for (UINTN k = 0; k < 76; k++) {
+        Print(L" ");
     }
     
     // ==================== РЕЖИМ ДОПОЛНИТЕЛЬНОЙ ИНФОРМАЦИИ ====================
@@ -663,7 +612,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     // ==================== ПЕРЕХОД К ЯДРУ ====================
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 40);
     SetColor(COLOR_GREEN, COLOR_BLACK);
-    Print(L"==========================================================================\n");
+    Print(L"\n==========================================================================\n");
     Print(L"        Switching to 64-bit mode and starting LufiraOS kernel...\n");
     Print(L"==========================================================================\n");
     
