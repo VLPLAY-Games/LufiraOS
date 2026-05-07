@@ -191,10 +191,14 @@ static int is_dot_or_dotdot(const char* name) {
 
 void command_cd(const char* path) {
     if (!path || !*path) return;
-    // обрабатываем ".."
+
+    /* handle ".." */
     if (strcmp(path, "..") == 0) {
-        if (cwd_first_cluster == 0) return; // уже корень
-        // читаем запись ".." в текущем каталоге
+        if (cwd_first_cluster == 0 && fatfs.fat_type != 32) {
+            /* already root (FAT12/16) */
+            return;
+        }
+        /* read dotdot entry from current directory */
         fat_dir_t dir;
         fat_opendir(&fatfs, cwd_first_cluster, &dir);
         fat_dir_entry_t entry;
@@ -202,12 +206,13 @@ void command_cd(const char* path) {
             if (entry.name[0] == '.' && entry.name[1] == '.' && entry.name[2] == ' ') {
                 uint32_t parent = read_le16((const uint8_t*)&entry.first_cluster_low);
                 cwd_first_cluster = parent;
-                // обновляем строку пути (удаляем последний компонент)
+                /* update path string (strip last component) */
                 int len = 0; while (cwd_path[len]) len++;
                 if (len > 1) {
-                    cwd_path[len-1] = '\0'; // убираем слеш
-                    char *slash = 0;
-                    for (int i = 0; cwd_path[i]; i++) if (cwd_path[i] == '/') slash = &cwd_path[i];
+                    cwd_path[len-1] = '\0';        // remove trailing '/'
+                    char *slash = NULL;
+                    for (int i = 0; cwd_path[i]; i++)
+                        if (cwd_path[i] == '/') slash = &cwd_path[i];
                     if (slash) *slash = '\0';
                     else cwd_path[0] = '/', cwd_path[1] = '\0';
                 }
@@ -220,39 +225,27 @@ void command_cd(const char* path) {
         return;
     }
 
-    // обычный cd: ищем директорию в текущем каталоге
-    fat_dir_t dir;
-    fat_opendir(&fatfs, cwd_first_cluster, &dir);
-    fat_dir_entry_t entry;
-    int found = 0;
-    while (fat_readdir(&dir, &entry)) {
-        if (entry.attr & 0x10) { // это директория
-            char name[13]; int pos = 0;
-            for (int j=0; j<8 && entry.name[j]!=' '; j++) name[pos++] = entry.name[j];
-            if (entry.name[8]!=' ') {
-                name[pos++] = '.';
-                for (int j=8; j<11 && entry.name[j]!=' '; j++) name[pos++] = entry.name[j];
-            }
-            name[pos] = '\0';
-            if (strcmp(name, path) == 0 && !is_dot_or_dotdot(name)) {
-                cwd_first_cluster = read_le16((const uint8_t*)&entry.first_cluster_low);
-                // обновляем cwd_path
-                if (cwd_path[0] == '/' && cwd_path[1] == '\0')
-                    strcpy(cwd_path + 1, name);
-                else {
-                    int len = 0; while (cwd_path[len]) len++;
-                    if (len + 1 + pos < 255) {
-                        cwd_path[len] = '/';
-                        strcpy(cwd_path + len + 1, name);
-                    }
-                }
-                found = 1;
-                break;
-            }
+    /* ordinary cd */
+    fat_dir_entry_t ent;
+    if (fat_find_entry(&fatfs, cwd_first_cluster, path, &ent) == 0) {
+        if (!(ent.attr & 0x10)) {
+            printf("\ncd: not a directory: %s\n", path);
+            return;
         }
+        uint32_t new_cluster = read_le16((const uint8_t*)&ent.first_cluster_low);
+        cwd_first_cluster = new_cluster;
+        /* append name to cwd_path */
+        int len = 0; while (cwd_path[len]) len++;
+        int plen = 0; while (path[plen]) plen++;
+        if (len + 1 + plen < 255) {
+            if (cwd_path[0] != '/' || cwd_path[1] != '\0') // not just "/"
+                cwd_path[len++] = '/';
+            for (int i = 0; path[i]; i++) cwd_path[len++] = path[i];
+            cwd_path[len] = '\0';
+        }
+    } else {
+        printf("\ncd: no such directory: %s\n", path);
     }
-    fat_closedir(&dir);
-    if (!found) printf("\ncd: no such directory: %s\n", path);
 }
 
 void command_ls(const char* flags) {
@@ -268,18 +261,22 @@ void command_ls(const char* flags) {
     int count = 0;
     while (fat_readdir(&dir, &entry)) {
         char name[13]; int pos = 0;
-        for (int j=0; j<8 && entry.name[j]!=' '; j++) name[pos++] = entry.name[j];
-        if (entry.name[8]!=' ') {
+        for (int j = 0; j < 8 && entry.name[j] != ' '; j++)
+            name[pos++] = (char)entry.name[j];
+        if (entry.name[8] != ' ') {
             name[pos++] = '.';
-            for (int j=8; j<11 && entry.name[j]!=' '; j++) name[pos++] = entry.name[j];
+            for (int j = 8; j < 11 && entry.name[j] != ' '; j++)
+                name[pos++] = (char)entry.name[j];
         }
         name[pos] = '\0';
         if (long_fmt) {
             uint32_t size = read_le32((const uint8_t*)&entry.file_size);
             char type = (entry.attr & 0x10) ? 'd' : '-';
-            printf("%c %8u %s\n", type, size, name);
+            printf("%c ", type);
+            printf("%u ", size);
+            printf("%s\n", name);
         } else {
-            printf("%-14s", name);
+            printf("%s  ", name);
             if (++count % 4 == 0) printf("\n");
         }
     }
@@ -307,8 +304,6 @@ void command_touch(const char* name) {
         return;
     }
     int res = fat_create_file(&fatfs, cwd_first_cluster, name);
-    if (res == 0)
-        printf("\nFile created: %s\n", name);
-    else
-        printf("\ntouch failed (error %d)\n", res);
+    if (res == 0) printf("\nFile created: %s\n", name);
+    else printf("\ntouch failed (error %d)\n", res);
 }

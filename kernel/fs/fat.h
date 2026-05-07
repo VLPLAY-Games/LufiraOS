@@ -58,6 +58,7 @@ typedef struct {
     uint32_t    cluster_size;
     uint32_t    total_sectors;
     uint8_t     fat_type;
+    uint32_t    root_cluster;   // FAT32: first cluster of root dir
 } fat_fs_t;
 
 typedef struct {
@@ -70,6 +71,9 @@ typedef struct {
     uint32_t    entries_per_cluster;
     int         is_root;
 } fat_dir_t;
+
+int fat_find_entry(fat_fs_t *fs, uint32_t dir_cluster,
+                   const char *filename, fat_dir_entry_t *out_entry);
 
 uint16_t read_le16(const uint8_t *p);
 uint32_t read_le32(const uint8_t *p);
