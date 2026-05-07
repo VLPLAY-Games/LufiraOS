@@ -59,6 +59,9 @@ typedef struct {
     uint32_t    total_sectors;
     uint8_t     fat_type;
     uint32_t    root_cluster;
+    /* new fields for dirty tracking */
+    uint8_t*    dirty_map;          // битовая карта изменённых секторов
+    uint32_t    dirty_map_size;     // размер карты в байтах
 } fat_fs_t;
 
 typedef struct {
@@ -90,6 +93,7 @@ int fat_mkdir(fat_fs_t *fs, uint32_t parent_cluster, const char *name);
 int fat_rm(fat_fs_t *fs, uint32_t parent_cluster, const char *name);
 int fat_create_file(fat_fs_t *fs, uint32_t parent_cluster, const char *name);
 
-void fat_flush(fat_fs_t *fs);   // НОВОЕ
+void fat_mark_sector_dirty(fat_fs_t *fs, uint32_t lba);
+void fat_flush(fat_fs_t *fs);
 
 #endif
