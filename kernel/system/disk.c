@@ -33,19 +33,19 @@ static inline void outw(uint16_t port, uint16_t data) {
 }
 
 static int ata_wait_ready(void) {
-    for (int i = 0; i < 100000; i++) {
+    for (volatile int i = 0; i < 100000; i++) {
         uint8_t status = inb(ATA_STATUS);
-        if (!(status & 0x80)) return 0; // BSY clear
+        if (!(status & 0x80)) return 0;   // BSY clear -> ready
         for (volatile int j = 0; j < 1000; j++);
     }
     return -1;
 }
 
 static int ata_wait_drq(void) {
-    for (int i = 0; i < 100000; i++) {
+    for (volatile int i = 0; i < 100000; i++) {
         uint8_t status = inb(ATA_STATUS);
-        if (status & 0x08) return 0; // DRQ set
-        if (status & 0x01) return -1; // ERR
+        if (status & 0x08) return 0;      // DRQ set
+        if (status & 0x01) return -2;     // error
         for (volatile int j = 0; j < 1000; j++);
     }
     return -1;
@@ -81,10 +81,11 @@ int disk_write_sectors(uint32_t lba, uint8_t sector_count, const void *buffer) {
         if (ata_wait_drq() != 0) return -1;
         for (int i = 0; i < 256; i++)
             outw(ATA_DATA, buf[i + s * 256]);
-        // Wait for write to complete (BUSY clear)
-        for (volatile int j = 0; j < 10000; j++) {
+        // Дожидаемся сброса BSY после записи
+        for (volatile int j = 0; j < 100000; j++) {
             uint8_t status = inb(ATA_STATUS);
             if (!(status & 0x80)) break;
+            for (volatile int k = 0; k < 1000; k++);
         }
     }
     return 0;

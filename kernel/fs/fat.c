@@ -601,9 +601,29 @@ int fat_create_file(fat_fs_t *fs, uint32_t parent_cluster, const char *name) {
 }
 
 void fat_flush(fat_fs_t *fs) {
-    // Ограничение: пишем максимум 255 секторов за раз (но проще посекторно)
-    for (uint32_t lba = 0; lba < fs->total_sectors; lba++) {
-        uint8_t *sector = fs->image + lba * 512;
-        disk_write_sectors(lba, 1, sector);
+    uint8_t disk_sector[512];
+    printf("\nFlushing FAT to disk... ");
+    uint32_t total = fs->total_sectors;
+    uint32_t written = 0;
+    for (uint32_t lba = 0; lba < total; lba++) {
+        uint8_t *mem_sector = fs->image + lba * 512;
+        if (disk_read_sectors(lba, 1, disk_sector) == 0) {
+            int changed = 0;
+            for (int i = 0; i < 512; i++) {
+                if (mem_sector[i] != disk_sector[i]) {
+                    changed = 1;
+                    break;
+                }
+            }
+            if (changed) {
+                if (disk_write_sectors(lba, 1, mem_sector) == 0)
+                    written++;
+            }
+        } else {
+            // fallback: записать, если чтение не удалось
+            if (disk_write_sectors(lba, 1, mem_sector) == 0)
+                written++;
+        }
     }
+    printf("done (%u sectors written).\n", written);
 }
