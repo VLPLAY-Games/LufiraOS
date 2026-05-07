@@ -610,38 +610,112 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         Print(L"Resuming boot process...\n");
         uefi_call_wrapper(gBS->Stall, 1, 2000000); // 2 секунды задержки
     }
-    
-    // ==================== ЗАГРУЗКА ОБРАЗА ESP ====================
-    // Получаем размер тома через Block I/O
-    EFI_BLOCK_IO_PROTOCOL *BlockIo;
+
+    // ==================== ЗАГРУЗКА ОБРАЗА ESP (БЫСТРОЕ КОПИРОВАНИЕ) ====================
+    EFI_BLOCK_IO_PROTOCOL *BlockIo = NULL;
     EFI_GUID BlockIoGuid = EFI_BLOCK_IO_PROTOCOL_GUID;
-    status = uefi_call_wrapper(gBS->HandleProtocol, 3, LoadedImage->DeviceHandle,
-                               &BlockIoGuid, (VOID**)&BlockIo);
-    if (!EFI_ERROR(status) && BlockIo->Media->BlockSize > 0) {
-        UINT64 VolumeSize = BlockIo->Media->LastBlock * BlockIo->Media->BlockSize + BlockIo->Media->BlockSize;
-        if (VolumeSize == 0) VolumeSize = 32*1024*1024; // fallback
-        UINTN FatPages = (VolumeSize + 4095) / 4096;
-        EFI_PHYSICAL_ADDRESS FATBase;
-        status = uefi_call_wrapper(gBS->AllocatePages, 4, AllocateAnyPages,
-                                   EfiLoaderData, FatPages, &FATBase);
+    status = uefi_call_wrapper(gBS->HandleProtocol, 3,
+        LoadedImage->DeviceHandle, &BlockIoGuid, (VOID**)&BlockIo);
+
+    if (EFI_ERROR(status)) {
+        EFI_DEVICE_PATH_PROTOCOL *DevicePath;
+        EFI_GUID DevicePathGuid = EFI_DEVICE_PATH_PROTOCOL_GUID;
+        status = uefi_call_wrapper(gBS->HandleProtocol, 3,
+            LoadedImage->DeviceHandle, &DevicePathGuid, (VOID**)&DevicePath);
         if (!EFI_ERROR(status)) {
-            UINTN BlockSize = BlockIo->Media->BlockSize;
-            UINTN NumBlocks = VolumeSize / BlockSize;
-            for (UINTN i = 0; i < NumBlocks; i++) {
-                uefi_call_wrapper(BlockIo->ReadBlocks, 5, BlockIo,
-                                  BlockIo->Media->MediaId, i,
-                                  BlockSize, (VOID*)(FATBase + i * BlockSize));
+            EFI_HANDLE blockHandle;
+            status = uefi_call_wrapper(gBS->LocateDevicePath, 3,
+                &BlockIoGuid, &DevicePath, &blockHandle);
+            if (!EFI_ERROR(status)) {
+                status = uefi_call_wrapper(gBS->HandleProtocol, 3,
+                    blockHandle, &BlockIoGuid, (VOID**)&BlockIo);
             }
-            bi.FATImageBase = FATBase;
-            bi.FATImageSize = VolumeSize;
+        }
+    }
+
+    if (!EFI_ERROR(status) && BlockIo && BlockIo->Media &&
+        BlockIo->Media->BlockSize >= 512) {
+
+        UINTN BlockSize = BlockIo->Media->BlockSize;
+        UINT64 VolumeSectors = 0;
+        UINT8 BootSector[512];
+
+        // Читаем boot sector
+        if (BlockSize == 512) {
+            status = uefi_call_wrapper(BlockIo->ReadBlocks, 5, BlockIo,
+                BlockIo->Media->MediaId, 0, BlockSize, BootSector);
+        } else {
+            UINT8 AlignedBuf[4096];
+            status = uefi_call_wrapper(BlockIo->ReadBlocks, 5, BlockIo,
+                BlockIo->Media->MediaId, 0, BlockSize, AlignedBuf);
+            if (!EFI_ERROR(status))
+                CopyMem(BootSector, AlignedBuf, 512);
+        }
+
+        if (!EFI_ERROR(status)) {
+            if (BootSector[510] == 0x55 && BootSector[511] == 0xAA) {
+                UINT16 TotalSectors16 = *(UINT16*)(BootSector + 19);
+                UINT32 TotalSectors32 = *(UINT32*)(BootSector + 32);
+                VolumeSectors = TotalSectors16 ? TotalSectors16 : TotalSectors32;
+            }
+            if (VolumeSectors == 0) {
+                VolumeSectors = BlockIo->Media->LastBlock + 1;
+            }
+
+            // Ограничим размер образа (например, весь диск, но не более 256 МБ)
+            UINT64 MaxImageSize = 256ULL * 1024 * 1024;
+            UINT64 VolumeSize = VolumeSectors * BlockSize;
+            UINT64 CopySize = (VolumeSize < MaxImageSize) ? VolumeSize : MaxImageSize;
+
+            UINTN Pages = (CopySize + 4095) / 4096;
+            EFI_PHYSICAL_ADDRESS FATBase = 0;
+            status = uefi_call_wrapper(gBS->AllocatePages, 4,
+                AllocateAnyPages, EfiLoaderData, Pages, &FATBase);
+
+            if (!EFI_ERROR(status)) {
+                // Быстрое копирование: читаем по 128 блоков (64 КБ) за вызов
+                UINTN MaxBlocksPerTransfer = 1024;
+                UINTN TotalBlocks = (UINTN)(CopySize / BlockSize);
+                UINT8* Buffer = (UINT8*)FATBase;
+
+                for (UINTN i = 0; i < TotalBlocks; i += MaxBlocksPerTransfer) {
+                    UINTN BlocksNow = (TotalBlocks - i) > MaxBlocksPerTransfer ?
+                                     MaxBlocksPerTransfer : (TotalBlocks - i);
+                    status = uefi_call_wrapper(BlockIo->ReadBlocks, 5, BlockIo,
+                        BlockIo->Media->MediaId, i,
+                        BlocksNow * BlockSize,
+                        Buffer + (i * BlockSize));
+                    if (EFI_ERROR(status)) {
+                        break;
+                    }
+                }
+
+                if (!EFI_ERROR(status)) {
+                    bi.FATImageBase = FATBase;
+                    bi.FATImageSize = CopySize;
+                } else {
+                    bi.FATImageBase = 0;
+                    bi.FATImageSize = 0;
+                    PrintColored(L"ERROR: Failed to read full FAT image\n",
+                                 COLOR_RED, COLOR_BLACK);
+                }
+            } else {
+                bi.FATImageBase = 0;
+                bi.FATImageSize = 0;
+                PrintColored(L"ERROR: Cannot allocate memory for FAT image\n",
+                             COLOR_RED, COLOR_BLACK);
+            }
         } else {
             bi.FATImageBase = 0;
             bi.FATImageSize = 0;
+            PrintColored(L"ERROR: Cannot read boot sector\n", COLOR_RED, COLOR_BLACK);
         }
     } else {
         bi.FATImageBase = 0;
         bi.FATImageSize = 0;
+        PrintColored(L"Warning: Block I/O not available\n", COLOR_YELLOW, COLOR_BLACK);
     }
+
     
     // ==================== ПЕРЕХОД К ЯДРУ ====================
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 40);
@@ -651,8 +725,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     Print(L"==========================================================================\n");
     
     uefi_call_wrapper(gBS->Stall, 1, 2000000); // 2 секунды задержка
-
-    uefi_call_wrapper(gBS->GetMemoryMap, 5, &MemoryMapSize, MemoryMap, &MapKey, &DescriptorSize, &DescriptorVersion);
     
     // Очищаем экран перед запуском ядра
     SetColor(COLOR_BLACK, COLOR_BLACK);
