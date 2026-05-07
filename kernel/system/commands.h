@@ -24,5 +24,6 @@ void command_cd(const char* path);
 void command_ls(const char* flags);
 void command_mkdir(const char* name);
 void command_rm(const char* name);
+void command_touch(const char* name);
 
 #endif

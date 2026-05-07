@@ -1,4 +1,5 @@
 #include "fat.h"
+#include <stddef.h>   // <-- добавлено для NULL
 
 static void* memcpy(void* dest, const void* src, unsigned int n) {
     char* d = (char*)dest;
@@ -6,21 +7,26 @@ static void* memcpy(void* dest, const void* src, unsigned int n) {
     while (n--) *d++ = *s++;
     return dest;
 }
+
 static void* memset(void* s, int c, unsigned int n) {
     unsigned char* p = (unsigned char*)s;
     while (n--) *p++ = (unsigned char)c;
     return s;
 }
+
 uint32_t read_le32(const uint8_t *p) {
     return p[0] | (p[1]<<8) | (p[2]<<16) | (p[3]<<24);
 }
+
 uint16_t read_le16(const uint8_t *p) {
     return p[0] | (p[1]<<8);
 }
+
 static void write_le16(uint8_t *p, uint16_t val) {
     p[0] = val & 0xFF;
     p[1] = (val >> 8) & 0xFF;
 }
+
 static void write_le32(uint8_t *p, uint32_t val) {
     p[0] = val & 0xFF;
     p[1] = (val >> 8) & 0xFF;
@@ -172,7 +178,7 @@ static fat_dir_entry_t* find_in_root(fat_fs_t *fs, const char* name8_3) {
         if (e->name[0]==0xE5 || e->attr==0x0F) continue;
         int match = 1;
         for (int j=0; j<11; j++) {
-            if (e->name[j] != name8_3[j]) { match=0; break; }
+            if (e->name[j] != (uint8_t)name8_3[j]) { match=0; break; }
         }
         if (match) return e;
     }
@@ -226,10 +232,10 @@ int fat_list_root(fat_fs_t *fs, char names[][12], int max_count) {
         if (e->name[0]==0xE5 || e->attr==0x0F) continue;
         char name[13];
         int pos = 0;
-        for (int j=0; j<8 && e->name[j]!=' '; j++) name[pos++] = e->name[j];
+        for (int j=0; j<8 && e->name[j]!=' '; j++) name[pos++] = (char)e->name[j];
         if (e->name[8]!=' ') {
             name[pos++] = '.';
-            for (int j=8; j<11 && e->name[j]!=' '; j++) name[pos++] = e->name[j];
+            for (int j=8; j<11 && e->name[j]!=' '; j++) name[pos++] = (char)e->name[j];
         }
         name[pos] = '\0';
         for (int k=0; k<12; k++) {
@@ -246,92 +252,63 @@ int fat_opendir(fat_fs_t *fs, uint32_t first_cluster, fat_dir_t *dir) {
     dir->fs = fs;
     dir->first_cluster = first_cluster;
     dir->current_cluster = first_cluster;
-    dir->sector_buf = 0;
-    dir->sector_offset = 0;
-    dir->entries_left = 0;
-    dir->total_entries = 0;
-    dir->is_root = (first_cluster == 0);
+    dir->entry_index_in_cluster = 0;
 
     if (first_cluster == 0) {
-        // корень
+        dir->is_root = 1;
         dir->total_entries = fs->root_entries;
-        dir->entries_left = fs->root_entries;
-        dir->sector_offset = 0;
-        dir->sector_buf = 0; // будет выделено при чтении
-        return 0;
-    }
-    // иначе обычная директория
-    uint32_t bytes_per_cluster = fs->cluster_size * 512;
-    dir->total_entries = bytes_per_cluster / 32; // приблизительно
-    dir->entries_left = 0; // заполним при первом readdir
-    return 0;
-}
-
-static uint8_t* read_dir_sector(fat_dir_t *dir, uint32_t *remaining) {
-    fat_fs_t *fs = dir->fs;
-    if (dir->is_root) {
-        uint8_t *root = fs->image + fs->root_dir_start * 512;
-        uint32_t off = dir->sector_offset;
-        *remaining = dir->entries_left;
-        return root + off * 32;
+        dir->entries_per_cluster = fs->root_entries;
+        dir->entries_left_in_dir = fs->root_entries;
     } else {
-        if (dir->current_cluster < 2) return 0;
-        uint32_t byte_offset = dir->sector_offset * 32;
-        uint32_t bytes_per_cluster = fs->cluster_size * 512;
-        if (byte_offset >= bytes_per_cluster) {
-            // переходим к следующему кластеру
-            uint32_t next = get_fat_entry(fs, dir->current_cluster);
-            if (next >= 0xFFF8) return 0;
-            dir->current_cluster = next;
-            dir->sector_offset = 0;
-            byte_offset = 0;
-        }
-        const uint8_t *data = cluster_to_sector(fs, dir->current_cluster);
-        if (!data) return 0;
-        *remaining = (bytes_per_cluster - byte_offset) / 32;
-        // динамически выделяем буфер? Нет, будем работать напрямую с образом
-        // но нужно вернуть указатель на запись в образе.
-        return (uint8_t*)(data + byte_offset);
+        dir->is_root = 0;
+        dir->entries_per_cluster = (fs->cluster_size * 512) / 32;
+        dir->total_entries = 0;
+        dir->entries_left_in_dir = 0;
     }
+    return 0;
 }
 
 int fat_readdir(fat_dir_t *dir, fat_dir_entry_t *entry) {
     if (!dir || !entry) return -1;
+
     while (1) {
-        if (dir->entries_left == 0) {
-            if (dir->is_root) return 0; // больше нет
-            // обычная директория: проверим следующий кластер
-            if (dir->current_cluster < 2 || get_fat_entry(dir->fs, dir->current_cluster) >= 0xFFF8)
-                return 0;
-            dir->current_cluster = get_fat_entry(dir->fs, dir->current_cluster);
-            dir->sector_offset = 0;
-            uint32_t bytes_per_cluster = dir->fs->cluster_size * 512;
-            dir->entries_left = bytes_per_cluster / 32;
-            dir->total_entries += dir->entries_left;
-        }
-        fat_dir_entry_t *e = (fat_dir_entry_t*)((uint8_t*)dir->fs->image);
         if (dir->is_root) {
-            e = (fat_dir_entry_t*)(dir->fs->image + dir->fs->root_dir_start * 512 +
-                                   (dir->total_entries - dir->entries_left) * 32);
+            if (dir->entries_left_in_dir == 0) return 0;
+            uint32_t index = dir->total_entries - dir->entries_left_in_dir;
+            fat_dir_entry_t *e = (fat_dir_entry_t*)(dir->fs->image +
+                dir->fs->root_dir_start * 512 + index * 32);
+            dir->entries_left_in_dir--;
+            if (e->name[0] == 0x00) return 0;
+            if (e->name[0] == 0xE5 || e->attr == 0x0F) continue;
+            memcpy(entry, e, sizeof(fat_dir_entry_t));
+            return 1;
         } else {
-            uint32_t byte_off = (dir->total_entries - dir->entries_left) * 32;
+            if (dir->entries_left_in_dir == 0) {
+                uint32_t next = get_fat_entry(dir->fs, dir->current_cluster);
+                if (next >= 0xFFF8) return 0;
+                dir->current_cluster = next;
+                dir->entry_index_in_cluster = 0;
+                dir->entries_left_in_dir = dir->entries_per_cluster;
+            }
             const uint8_t *data = cluster_to_sector(dir->fs, dir->current_cluster);
-            e = (fat_dir_entry_t*)(data + byte_off);
+            if (!data) return 0;
+            uint32_t offset = dir->entry_index_in_cluster * 32;
+            fat_dir_entry_t *e = (fat_dir_entry_t*)(data + offset);
+            dir->entry_index_in_cluster++;
+            dir->entries_left_in_dir--;
+            if (e->name[0] == 0x00) return 0;
+            if (e->name[0] == 0xE5 || e->attr == 0x0F) continue;
+            memcpy(entry, e, sizeof(fat_dir_entry_t));
+            return 1;
         }
-        dir->entries_left--;
-        if (e->name[0] == 0x00) return 0; // конец
-        if (e->name[0] == 0xE5 || e->attr == 0x0F) continue; // пропускаем
-        memcpy(entry, e, sizeof(fat_dir_entry_t));
-        return 1;
     }
 }
 
 int fat_closedir(fat_dir_t *dir) {
-    // ничего не делаем
+    (void)dir;
     return 0;
 }
 
-// Поиск свободного кластера (возвращает номер или 0)
 static uint32_t find_free_cluster(fat_fs_t *fs) {
     uint32_t max_cluster = (fs->total_sectors - fs->data_start) / fs->cluster_size + 2;
     for (uint32_t i = 2; i < max_cluster; i++) {
@@ -341,7 +318,6 @@ static uint32_t find_free_cluster(fat_fs_t *fs) {
     return 0;
 }
 
-// Освободить цепочку кластеров
 static void free_cluster_chain(fat_fs_t *fs, uint32_t start) {
     while (start >= 2 && start < 0xFFF8) {
         uint32_t next = get_fat_entry(fs, start);
@@ -351,30 +327,84 @@ static void free_cluster_chain(fat_fs_t *fs, uint32_t start) {
     }
 }
 
-// Найти свободную запись в директории, возвращает указатель на entry в образе
-static fat_dir_entry_t* find_free_dir_entry(fat_fs_t *fs, uint32_t parent_cluster) {
+static fat_dir_entry_t* find_free_dir_entry(fat_fs_t *fs, uint32_t parent_cluster,
+                                            fat_dir_entry_t **next_entry_ptr) {
+    *next_entry_ptr = NULL;
     if (parent_cluster == 0) {
         uint8_t *root = fs->image + fs->root_dir_start * 512;
+        // Ищем свободный слот, но не трогаем последний, если он терминатор
         for (uint32_t i = 0; i < fs->root_entries; i++) {
             fat_dir_entry_t *e = (fat_dir_entry_t*)(root + i*32);
-            if (e->name[0] == 0x00 || e->name[0] == 0xE5) return e;
+            if (e->name[0] == 0x00 || e->name[0] == 0xE5) {
+                // Если это последний слот, нельзя использовать, кроме случая, когда он 0xE5
+                if (i == fs->root_entries - 1) {
+                    // Последний слот – если он 0x00, пропускаем (терминатор)
+                    // Если 0xE5, использовать рискованно, так как нет места для нового терминатора
+                    // Поэтому отказываемся, если это последний слот
+                    continue; // Точнее: если это последний слот, не используем его.
+                }
+                // Убедимся, что после него есть место для терминатора, если мы перезаписываем 0x00
+                if (e->name[0] == 0x00) {
+                    // Проверим, есть ли следующий слот
+                    if (i + 1 < fs->root_entries) {
+                        *next_entry_ptr = (fat_dir_entry_t*)(root + (i+1)*32);
+                        return e;
+                    } else {
+                        // Не должно случиться, так как i не последний по условию выше
+                        continue;
+                    }
+                } else { // 0xE5
+                    // Следующий слот может быть или не быть. Если он существует и в нём 0x00, то терминатор остаётся.
+                    // Если там не 0x00, это не наша забота, но это допустимо.
+                    if (i + 1 < fs->root_entries)
+                        *next_entry_ptr = (fat_dir_entry_t*)(root + (i+1)*32);
+                    return e;
+                }
+            }
         }
-        return 0;
+        return NULL; // Нет подходящего свободного места
     } else {
+        // Для подкаталогов аналогичная логика не реализована (пропускаем)
         uint32_t cluster = parent_cluster;
+        uint32_t entries_per_cluster = (fs->cluster_size * 512) / 32;
         while (cluster >= 2) {
             uint8_t *data = (uint8_t*)cluster_to_sector(fs, cluster);
-            uint32_t entries_per_cluster = (fs->cluster_size * 512) / 32;
             for (uint32_t i = 0; i < entries_per_cluster; i++) {
                 fat_dir_entry_t *e = (fat_dir_entry_t*)(data + i*32);
-                if (e->name[0] == 0x00 || e->name[0] == 0xE5) return e;
+                if (e->name[0] == 0x00 || e->name[0] == 0xE5) {
+                    // Если 0x00 и есть следующий слот, можно использовать
+                    if (e->name[0] == 0x00) {
+                        if (i + 1 < entries_per_cluster) {
+                            *next_entry_ptr = (fat_dir_entry_t*)(data + (i+1)*32);
+                            return e;
+                        } else {
+                            // нужно искать в следующем кластере
+                            uint32_t next_cluster = get_fat_entry(fs, cluster);
+                            if (next_cluster >= 2 && next_cluster < 0xFFF8) {
+                                uint8_t *next_data = (uint8_t*)cluster_to_sector(fs, next_cluster);
+                                *next_entry_ptr = (fat_dir_entry_t*)next_data;
+                                return e;
+                            }
+                            // иначе нет места для терминатора, не используем
+                        }
+                    } else { // 0xE5
+                        if (i + 1 < entries_per_cluster)
+                            *next_entry_ptr = (fat_dir_entry_t*)(data + (i+1)*32);
+                        else {
+                            uint32_t next_cluster = get_fat_entry(fs, cluster);
+                            if (next_cluster >= 2 && next_cluster < 0xFFF8) {
+                                *next_entry_ptr = (fat_dir_entry_t*)cluster_to_sector(fs, next_cluster);
+                            }
+                        }
+                        return e;
+                    }
+                }
             }
             uint32_t next = get_fat_entry(fs, cluster);
             if (next >= 0xFFF8) break;
             cluster = next;
         }
-        // Если не нашли, можно попытаться расширить цепочку (но пока не реализовано)
-        return 0;
+        return NULL;
     }
 }
 
@@ -382,86 +412,109 @@ int fat_mkdir(fat_fs_t *fs, uint32_t parent_cluster, const char *name) {
     if (!name || !*name) return -1;
     char sname[11];
     to_short_name(name, sname);
-    // проверка на существование
-    fat_dir_entry_t *existing = 0;
+
+    fat_dir_entry_t *existing = NULL;
     if (parent_cluster == 0) {
         existing = find_in_root(fs, sname);
     } else {
-        // упрощённо: ищем в parent_cluster (не реализовано полное, но можно сказать, что mkdir только в корне)
-        // Для совместимости с текущим кодом будем искать в корне.
-        existing = find_in_root(fs, sname);
+        existing = find_in_root(fs, sname); // TODO: поиск в подкаталоге
     }
-    if (existing) return -2; // уже существует
+    if (existing) return -2;
 
-    fat_dir_entry_t *free_entry = find_free_dir_entry(fs, parent_cluster);
-    if (!free_entry) return -3; // нет места
+    fat_dir_entry_t *next_entry = NULL;
+    fat_dir_entry_t *free_entry = find_free_dir_entry(fs, parent_cluster, &next_entry);
+    if (!free_entry) return -3; // Нет места
 
-    // Выделяем один кластер для новой директории
     uint32_t new_cluster = find_free_cluster(fs);
     if (!new_cluster) return -4;
 
-    // Помечаем кластер как последний
     set_fat_entry(fs, new_cluster, 0xFFFF);
-
-    // Инициализируем . и .. записи внутри нового кластера
     uint8_t *data = (uint8_t*)cluster_to_sector(fs, new_cluster);
     memset(data, 0, 512 * fs->cluster_size);
+
     fat_dir_entry_t *dot = (fat_dir_entry_t*)data;
     memset(dot->name, ' ', 11);
     dot->name[0] = '.';
-    dot->attr = 0x10; // Directory
+    dot->attr = 0x10;
     write_le16((uint8_t*)&dot->first_cluster_low, new_cluster & 0xFFFF);
-    // .. запись указывает на parent_cluster (0 для корня)
+
     fat_dir_entry_t *dotdot = (fat_dir_entry_t*)(data + 32);
     memset(dotdot->name, ' ', 11);
     dotdot->name[0] = '.'; dotdot->name[1] = '.';
     dotdot->attr = 0x10;
     write_le16((uint8_t*)&dotdot->first_cluster_low, parent_cluster & 0xFFFF);
 
-    // Заполняем свободную запись в родительской директории
     memset(free_entry, 0, sizeof(fat_dir_entry_t));
     memcpy(free_entry->name, sname, 11);
     free_entry->attr = 0x10;
     write_le16((uint8_t*)&free_entry->first_cluster_low, new_cluster & 0xFFFF);
     write_le32((uint8_t*)&free_entry->file_size, 0);
 
+    // Если next_entry != NULL и перед этим мы перезаписали 0x00, новый терминатор уже там (указатель на слот, который раньше был 0x??)
+    // Но чтобы гарантировать, надо в next_entry записать 0x00, если он не 0x00
+    if (next_entry && next_entry->name[0] != 0x00) {
+        next_entry->name[0] = 0x00;
+    }
+
     return 0;
 }
+
 
 int fat_rm(fat_fs_t *fs, uint32_t parent_cluster, const char *name) {
     if (!name || !*name) return -1;
     char sname[11];
     to_short_name(name, sname);
-    fat_dir_entry_t *entry = 0;
+    fat_dir_entry_t *entry = NULL;
     if (parent_cluster == 0) {
         entry = find_in_root(fs, sname);
     } else {
-        // ищем в родительской директории (пока только для корня)
         entry = find_in_root(fs, sname);
     }
     if (!entry) return -2;
-    if (entry->name[0] == '.' && entry->name[1] == ' ') return -3; // запрещено удалять .
-    if (entry->attr & 0x10) { // это директория
-        // проверим, что она пуста (кроме . и ..)
+    if (entry->name[0] == '.' && entry->name[1] == ' ') return -3;
+
+    if (entry->attr & 0x10) {
         uint32_t dir_cluster = read_le16((const uint8_t*)&entry->first_cluster_low);
         uint8_t *data = (uint8_t*)cluster_to_sector(fs, dir_cluster);
         uint32_t entries_per_cluster = (fs->cluster_size * 512) / 32;
         for (uint32_t i = 2; i < entries_per_cluster; i++) {
             fat_dir_entry_t *e = (fat_dir_entry_t*)(data + i*32);
-            if (e->name[0] != 0x00 && e->name[0] != 0xE5) return -4; // не пуста
+            if (e->name[0] != 0x00 && e->name[0] != 0xE5) return -4;
         }
         free_cluster_chain(fs, dir_cluster);
     } else {
-        // обычный файл
         uint32_t cluster = read_le16((const uint8_t*)&entry->first_cluster_low);
         free_cluster_chain(fs, cluster);
     }
-    // помечаем запись как удалённую
     entry->name[0] = 0xE5;
     return 0;
 }
 
 int fat_create_file(fat_fs_t *fs, uint32_t parent_cluster, const char *name) {
-    (void)fs; (void)parent_cluster; (void)name;
-    return -1; // не реализовано
+    if (!name || !*name) return -1;
+    char sname[11];
+    to_short_name(name, sname);
+
+    // Проверка существования
+    fat_dir_entry_t *existing = NULL;
+    if (parent_cluster == 0) {
+        existing = find_in_root(fs, sname);
+    }
+    if (existing) return -2;
+
+    fat_dir_entry_t *next_entry = NULL;
+    fat_dir_entry_t *free_entry = find_free_dir_entry(fs, parent_cluster, &next_entry);
+    if (!free_entry) return -3;
+
+    memset(free_entry, 0, sizeof(fat_dir_entry_t));
+    memcpy(free_entry->name, sname, 11);
+    free_entry->attr = 0x20; // Archive
+    write_le16((uint8_t*)&free_entry->first_cluster_low, 0); // нет кластеров
+    write_le32((uint8_t*)&free_entry->file_size, 0);
+
+    if (next_entry && next_entry->name[0] != 0x00) {
+        next_entry->name[0] = 0x00;
+    }
+
+    return 0;
 }

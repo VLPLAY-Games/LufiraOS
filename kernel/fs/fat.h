@@ -2,9 +2,6 @@
 #define FAT_H
 #include <stdint.h>
 
-uint16_t read_le16(const uint8_t *p);
-uint32_t read_le32(const uint8_t *p);
-
 typedef struct {
     uint8_t  jump[3];
     char     oem[8];
@@ -37,7 +34,7 @@ typedef struct {
 } __attribute__((packed)) fat_bpb_t;
 
 typedef struct {
-    char     name[11];
+    uint8_t  name[11];        // <-- изменено с char на uint8_t
     uint8_t  attr;
     uint8_t  reserved;
     uint8_t  creation_time_tenths;
@@ -60,27 +57,28 @@ typedef struct {
     uint32_t    root_entries;
     uint32_t    cluster_size;
     uint32_t    total_sectors;
-    uint8_t     fat_type;   // 12, 16 или 32
+    uint8_t     fat_type;
 } fat_fs_t;
 
-// Итератор по директории
 typedef struct {
     fat_fs_t*   fs;
-    uint32_t    first_cluster;   // 0 = корень
+    uint32_t    first_cluster;
     uint32_t    current_cluster;
-    uint8_t*    sector_buf;      // временный буфер сектора (512 байт)
-    uint32_t    sector_offset;   // текущее смещение в байтах внутри сектора
-    uint32_t    entries_left;    // оставшиеся записи в директории
-    uint32_t    total_entries;   // фиксировано только для корня, иначе 0
+    uint32_t    entries_left_in_dir;
+    uint32_t    entry_index_in_cluster;
+    uint32_t    total_entries;
+    uint32_t    entries_per_cluster;
     int         is_root;
 } fat_dir_t;
+
+uint16_t read_le16(const uint8_t *p);
+uint32_t read_le32(const uint8_t *p);
 
 int fat_init(fat_fs_t *fs, void *image, uint32_t image_size);
 int fat_open(fat_fs_t *fs, const char *filename, uint32_t *size);
 int fat_read_file(fat_fs_t *fs, const char *filename, void *buffer, uint32_t size);
 int fat_list_root(fat_fs_t *fs, char names[][12], int max_count);
 
-// Новые функции
 int fat_opendir(fat_fs_t *fs, uint32_t first_cluster, fat_dir_t *dir);
 int fat_readdir(fat_dir_t *dir, fat_dir_entry_t *entry);
 int fat_closedir(fat_dir_t *dir);

@@ -218,6 +218,8 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "rm") == 0) {
         if (*args == '\0') printf("\nUsage: rm <name>\n");
         else command_rm(args);
+    } else if (strcmp(cmd_lower, "touch") == 0) {
+        command_touch(args);
     } else if (strcmp(cmd_lower, "cat") == 0) {
         if (input_buffer_index <= 4) {
             printf("\nUsage: cat <filename>\n");

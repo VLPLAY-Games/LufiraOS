@@ -69,6 +69,7 @@ void command_help(void) {
     printf(" mkdir <name> - Create directory\n");
     printf(" rm <name> - Remove file or empty directory\n");
     printf(" cat <file> - Display file content\n");
+    printf(" touch <filename> - Create empty file\n");
 }
 void command_clear(void) { clear_screen(); show_prompt(); }
 void command_reboot(void) {
@@ -298,4 +299,16 @@ void command_rm(const char* name) {
     int res = fat_rm(&fatfs, cwd_first_cluster, name);
     if (res == 0) printf("\nRemoved: %s\n", name);
     else printf("\nrm failed (error %d)\n", res);
+}
+
+void command_touch(const char* name) {
+    if (!name || !*name) {
+        printf("\nUsage: touch <filename>\n");
+        return;
+    }
+    int res = fat_create_file(&fatfs, cwd_first_cluster, name);
+    if (res == 0)
+        printf("\nFile created: %s\n", name);
+    else
+        printf("\ntouch failed (error %d)\n", res);
 }
