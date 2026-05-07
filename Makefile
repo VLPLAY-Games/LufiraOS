@@ -47,7 +47,8 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/shell/shell.c \
     $(KERNEL_DIR)/system/commands.c \
     $(KERNEL_DIR)/system/gdt.c \
-    $(KERNEL_DIR)/system/idt.c
+    $(KERNEL_DIR)/system/idt.c \
+	$(KERNEL_DIR)/system/irq.c
 
 KERNEL_ASM_SOURCES := \
     $(KERNEL_DIR)/system/interrupts.S

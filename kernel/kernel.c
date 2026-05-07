@@ -5,6 +5,7 @@
 #include "shell/shell.h"
 #include "system/gdt.h"
 #include "system/idt.h"
+#include "system/irq.h"          // <-- добавлено для irq_init()
 
 // Базовые функции для портов
 static inline uint8_t inb(uint16_t port) {
@@ -38,8 +39,10 @@ static void pic_remap(void) {
     outb(PIC2_DATA, 0x02);    // tell slave its cascade identity
     outb(PIC1_DATA, 0x01);    // ICW4
     outb(PIC2_DATA, 0x01);    // ICW4
-    outb(PIC1_DATA, 0xFF);    // mask all IRQs on master
-    outb(PIC2_DATA, 0xFF);    // mask all IRQs on slave
+
+    // Маскируем ВСЕ IRQ – потом irq_init() разрешит нужные
+    outb(PIC1_DATA, 0xFF);
+    outb(PIC2_DATA, 0xFF);
 }
 
 // --- Точка входа ядра ---
@@ -50,7 +53,8 @@ void _start(BootInfo* bi) {
     initialize_console(bi);
     gdt_init();
     idt_init();
-    pic_remap();                   // маскируем все IRQ от PIC
+    pic_remap();                // перенастройка PIC (все IRQ пока замаскированы)
+    irq_init();                 // разрешаем IRQ0 и IRQ1
 
     display_system_info(bi);
     keyboard_init();
@@ -66,9 +70,10 @@ void _start(BootInfo* bi) {
     show_prompt();
     draw_cursor();
 
+    asm volatile ("sti");       // разрешаем маскируемые прерывания
+
+    // Основной idle-цикл – ждём прерывания
     while (1) {
-        keyboard_handler();
-        update_cursor();
-        __asm__ volatile ("pause");
+        asm volatile ("hlt");
     }
 }

@@ -20,7 +20,7 @@ uint32_t pixel_format = 0;
 int cursor_visible = 1;
 int cursor_enabled = 1;
 uint32_t cursor_blink_counter = 0;
-uint32_t cursor_blink_rate = 500000;
+uint32_t cursor_blink_rate = 10;
 
 // Текущая цветовая пара
 ColorPair current_colors = {

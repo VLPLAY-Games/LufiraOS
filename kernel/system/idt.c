@@ -1,11 +1,12 @@
 #include "idt.h"
 #include "interrupts.h"
+#include "irq.h"                       // <-- добавлено
 #include "drivers/console.h"
 #include <stdint.h>
 #include <stddef.h>
 
 extern void (*isr_stub_table[])(void);
-extern void isr_default(void);               // заглушка для неиспользуемых векторов
+extern void isr_default(void);
 
 typedef struct __attribute__((packed)) {
     uint16_t offset_low;
@@ -26,38 +27,19 @@ static idt_entry_t idt[256] __attribute__((aligned(16)));
 static idt_ptr_t   idt_descriptor;
 
 static const char* const exception_names[32] = {
-    "Divide by zero",               // 0
-    "Debug",                        // 1
-    "NMI",                          // 2
-    "Breakpoint",                   // 3
-    "Overflow",                     // 4
-    "Bound range exceeded",         // 5
-    "Invalid opcode",              // 6
-    "Device not available",        // 7
-    "Double fault",                // 8
-    "Coprocessor segment overrun", // 9
-    "Invalid TSS",                 // 10
-    "Segment not present",         // 11
-    "Stack-segment fault",         // 12
-    "General protection fault",    // 13
-    "Page fault",                  // 14
-    "Reserved",                    // 15
-    "x87 floating-point exception",// 16
-    "Alignment check",             // 17
-    "Machine check",               // 18
-    "SIMD floating-point exception",// 19
-    "Virtualization exception",    // 20
-    "Control protection exception",// 21
-    "Reserved",                    // 22
-    "Reserved",                    // 23
-    "Reserved",                    // 24
-    "Reserved",                    // 25
-    "Reserved",                    // 26
-    "Reserved",                    // 27
-    "Hypervisor injection",        // 28
-    "VMM communication",           // 29
-    "Security exception",          // 30
-    "Reserved"                     // 31
+    "Divide by zero", "Debug", "NMI", "Breakpoint",
+    "Overflow", "Bound range exceeded", "Invalid opcode",
+    "Device not available", "Double fault",
+    "Coprocessor segment overrun", "Invalid TSS",
+    "Segment not present", "Stack-segment fault",
+    "General protection fault", "Page fault",
+    "Reserved", "x87 floating-point exception",
+    "Alignment check", "Machine check",
+    "SIMD floating-point exception",
+    "Virtualization exception", "Control protection exception",
+    "Reserved", "Reserved", "Reserved", "Reserved", "Reserved",
+    "Reserved", "Hypervisor injection", "VMM communication",
+    "Security exception", "Reserved"
 };
 
 static void idt_set_gate(uint8_t vector, uintptr_t handler, uint16_t selector, uint8_t type_attr) {
@@ -74,13 +56,12 @@ static void idt_load(const idt_ptr_t* idtr) {
     asm volatile ("lidt %0" : : "m"(*idtr) : "memory");
 }
 
-// Вспомогательные функции для вывода дампа (без изменений)
+// Вспомогательные функции вывода (без изменений)
 static void hex64_to_string(uint64_t value, char out[19]) {
     static const char digits[] = "0123456789ABCDEF";
     out[0] = '0'; out[1] = 'x';
-    for (int i = 0; i < 16; ++i) {
+    for (int i = 0; i < 16; ++i)
         out[2 + i] = digits[(value >> ((15 - i) * 4)) & 0xF];
-    }
     out[18] = '\0';
 }
 static void print_hex_value(uint64_t value) {
@@ -114,6 +95,13 @@ static void print_page_fault_details(uint64_t error_code) {
 }
 
 void FORCE_ALIGN_ARG_POINTER isr_common_handler(interrupt_frame_t* frame) {
+    // Если это аппаратное прерывание (векторы 32-47)
+    if (frame->vector >= 32 && frame->vector <= 47) {
+        irq_handler(frame->vector);
+        return;
+    }
+
+    // Исключения – выводим дамп
     current_color = convert_color(0xFF5555);
     printf("\n\n================ EXCEPTION ================\n");
     printf(" Vector : ");
@@ -125,11 +113,11 @@ void FORCE_ALIGN_ARG_POINTER isr_common_handler(interrupt_frame_t* frame) {
     print_hex_line("RIP", frame->rip);
     print_hex_line("CS", frame->cs);
     print_hex_line("RFLAGS", frame->rflags);
-    if (frame->vector == 14) {
+    if (frame->vector == 14)
         print_page_fault_details(frame->error_code);
-    } else if (frame->vector == 13 && frame->error_code != 0) {
+    else if (frame->vector == 13 && frame->error_code != 0)
         print_hex_line("GPF selector index", (frame->error_code >> 3));
-    }
+
     printf("\n Register dump:\n");
     print_hex_line("RAX", frame->rax);
     print_hex_line("RBX", frame->rbx);
@@ -148,19 +136,25 @@ void FORCE_ALIGN_ARG_POINTER isr_common_handler(interrupt_frame_t* frame) {
     print_hex_line("R15", frame->r15);
     printf("\n System halted.\n");
     current_color = convert_color(0xFFFFFF);
+
     for (;;) {
         asm volatile ("cli; hlt");
     }
 }
 
 void idt_init(void) {
-    // Исключения 0..31
+    // Исключения 0..31 через существующие stubs
     for (int i = 0; i < 32; i++) {
         idt_set_gate(i, (uintptr_t)isr_stub_table[i], 0x08, 0x8E);
     }
 
-    // Заполняем векторы 32..255 безопасной заглушкой
-    for (int i = 32; i < 256; i++) {
+    // IRQ 0-15 -> векторы 32-47
+    for (int i = 32; i < 48; i++) {
+        idt_set_gate(i, (uintptr_t)isr_stub_table[i], 0x08, 0x8E);
+    }
+
+    // Остальные векторы (48-255) – безопасная заглушка
+    for (int i = 48; i < 256; i++) {
         idt_set_gate(i, (uintptr_t)isr_default, 0x08, 0x8E);
     }
 

@@ -40,7 +40,7 @@ isr_common:
     addq $16, %rsp
     iretq
 
-// Универсальная заглушка для неиспользуемых прерываний (векторы 32-255)
+// Заглушка для неиспользуемых векторов (48-255)
 .global isr_default
 .type isr_default, @function
 isr_default:
@@ -101,6 +101,35 @@ ISR_ERR 21
 ISR_ERR 29
 ISR_ERR 30
 
+// ================ НОВОЕ: IRQ 0–15 → векторы 32–47 ================
+.macro IRQ num
+    .global irq\num
+    .type irq\num, @function
+irq\num:
+    cli
+    pushq $0
+    pushq $\num
+    jmp isr_common
+.endm
+
+IRQ 32
+IRQ 33
+IRQ 34
+IRQ 35
+IRQ 36
+IRQ 37
+IRQ 38
+IRQ 39
+IRQ 40
+IRQ 41
+IRQ 42
+IRQ 43
+IRQ 44
+IRQ 45
+IRQ 46
+IRQ 47
+
+// ================ ТАБЛИЦА stubs (первые 256 векторов) ================
 .section .rodata
 .global isr_stub_table
 .type isr_stub_table, @object
@@ -138,6 +167,30 @@ isr_stub_table:
     .quad isr29
     .quad isr30
     .quad isr31
+
+    // IRQ 0..15 → векторы 32..47
+    .quad irq32
+    .quad irq33
+    .quad irq34
+    .quad irq35
+    .quad irq36
+    .quad irq37
+    .quad irq38
+    .quad irq39
+    .quad irq40
+    .quad irq41
+    .quad irq42
+    .quad irq43
+    .quad irq44
+    .quad irq45
+    .quad irq46
+    .quad irq47
+
+    // Остальные 208 векторов – заглушка
+    .rept 208
+        .quad isr_default
+    .endr
+
 .size isr_stub_table, .-isr_stub_table
 
 .section .note.GNU-stack,"",@progbits
