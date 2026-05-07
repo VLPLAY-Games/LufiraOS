@@ -3,11 +3,9 @@
 
 #include <stdint.h>
 
-// Вспомогательные функции
 int atoi(const char* str);
 int hex_to_int(const char* hex);
 
-// Прототипы функций команд
 void command_help(void);
 void command_clear(void);
 void command_reboot(void);
@@ -19,5 +17,12 @@ void command_fg(void);
 void command_bg(void);
 void command_status(void);
 void command_trap(void);
+
+// Новые команды
+void command_pwd(void);
+void command_cd(const char* path);
+void command_ls(const char* flags);
+void command_mkdir(const char* name);
+void command_rm(const char* name);
 
 #endif
