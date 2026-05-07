@@ -280,75 +280,108 @@ void shell_handle_down_arrow(void) {
 
 void execute_command(void) {
     if (input_buffer_index == 0) return;
-    
-    // Преобразуем команду к нижнему регистру для сравнения
+
+    // Делаем копию команды в нижнем регистре
     char cmd_lower[INPUT_BUFFER_SIZE];
-    for (int i = 0; i < input_buffer_index; i++) {
+
+    for (uint32_t i = 0; i < input_buffer_index; i++) {
         cmd_lower[i] = to_lower(input_buffer[i]);
-        if (cmd_lower[i] == '\0') break;
     }
+
     cmd_lower[input_buffer_index] = '\0';
-    
-    // Используем сравнение без учета регистра для определения команды
-    if (strcmp_case_insensitive(input_buffer, "help") == 0) {
+
+    // Ищем аргументы
+    char* args = cmd_lower;
+
+    while (*args != '\0' && *args != ' ') {
+        args++;
+    }
+
+    if (*args != '\0') {
+        *args = '\0';
+        args++;
+
+        while (*args == ' ') {
+            args++;
+        }
+    }
+
+    // ================= COMMAND DISPATCHER =================
+
+    if (strcmp(cmd_lower, "help") == 0) {
+
         command_help();
-    } else if (strcmp_case_insensitive(input_buffer, "clear") == 0) {
+
+    } else if (strcmp(cmd_lower, "clear") == 0) {
+
         command_clear();
-    } else if (strcmp_case_insensitive(input_buffer, "reboot") == 0) {
+
+    } else if (strcmp(cmd_lower, "reboot") == 0) {
+
         command_reboot();
-    } else if (strcmp_case_insensitive(input_buffer, "shutdown") == 0) {
+
+    } else if (strcmp(cmd_lower, "shutdown") == 0) {
+
         command_shutdown();
-    } else if (strcmp_case_insensitive(input_buffer, "version") == 0) {
+
+    } else if (strcmp(cmd_lower, "version") == 0) {
+
         command_version();
-    } else if (strcmp_case_insensitive(input_buffer, "history") == 0) {
-        // Новая команда для отображения истории
+
+    } else if (strcmp(cmd_lower, "history") == 0) {
+
         printf("\nCommand History (last %d commands):\n", history_count);
+
         for (int i = 0; i < history_count; i++) {
             printf("  %d: %s\n", i + 1, command_history[i]);
         }
-    } else if (strcmp_case_insensitive(input_buffer, "colors") == 0) {
+
+    } else if (strcmp(cmd_lower, "colors") == 0) {
+
         command_colors();
-    } else if (strcmp_case_insensitive(input_buffer, "reset") == 0) {
+
+    } else if (strcmp(cmd_lower, "reset") == 0) {
+
         reset_colors();
         printf("\nColors reset to default (white on black)\n");
-    } else if (strncmp(cmd_lower, "color ", 6) == 0) {
+
+    } else if (strcmp(cmd_lower, "color") == 0) {
+
         command_color();
-    } else if (strncmp(cmd_lower, "fg ", 3) == 0) {
+
+    } else if (strcmp(cmd_lower, "fg") == 0) {
+
         command_fg();
-    } else if (strncmp(cmd_lower, "bg ", 3) == 0) {
+
+    } else if (strcmp(cmd_lower, "bg") == 0) {
+
         command_bg();
-    } else if (strcmp_case_insensitive(input_buffer, "echo") == 0) {
-        printf("\nUsage: echo <text>\n");
-    } else if (strcmp(input_buffer, "status") == 0) {
-        command_status();
-    } else if (strcmp(input_buffer, "trap") == 0) {
-        command_trap();
-    } else {
-        // Проверим, не начинается ли команда с "echo "
-        int echo_prefix = 1;
-        for (int i = 0; i < 5; i++) {
-            if (to_lower(input_buffer[i]) != "echo "[i]) {
-                echo_prefix = 0;
-                break;
-            }
-        }
-        
-        if (echo_prefix && input_buffer[4] == ' ') {
-            // Это команда echo с аргументами
-            printf("\n");
-            // Пропускаем "echo " и выводим остальное
-            for (int i = 5; i < input_buffer_index; i++) {
-                put_char(input_buffer[i]);
-            }
-            put_char('\n');
+
+    } else if (strcmp(cmd_lower, "echo") == 0) {
+
+        if (*args == '\0') {
+            printf("\nUsage: echo <text>\n");
         } else {
-            printf("\nUnknown command: %s\n", input_buffer);
-            printf("Type 'help' for available commands.\n");
+            printf("\n%s\n", args);
         }
+
+    } else if (strcmp(cmd_lower, "status") == 0) {
+
+        command_status();
+
+    } else if (strcmp(cmd_lower, "trap") == 0) {
+
+        command_trap();
+
+    } else {
+
+        printf("\nUnknown command: %s\n", input_buffer);
+        printf("Type 'help' for available commands.\n");
     }
-    
-    // Очищаем буфер
+
+    // Очистка буфера
     input_buffer_index = 0;
+    input_buffer[0] = '\0';
 }
 
 void show_prompt(void) {

@@ -17,6 +17,8 @@ void _start(BootInfo* bi) {
     gdt_init();
     idt_init();
 
+    
+
     // Отображаем подробную системную информацию
     display_system_info(bi);
 
