@@ -165,6 +165,13 @@ static unsigned char full_font_data[][8] = {
     {0x00, 0x76, 0xDC, 0x00, 0x00, 0x00, 0x00, 0x00}, /* ~ */
 };
 
+
+static int interrupts_enabled(void) {
+    uint64_t rflags;
+    asm volatile ("pushfq; pop %0" : "=r"(rflags));
+    return (int)((rflags >> 9) & 1ULL);
+}
+
 // Преобразование цвета из RGB в BGR если нужно
 uint32_t convert_color(uint32_t color) {
     // if (pixel_format == 0) {
@@ -699,7 +706,7 @@ void display_system_info(BootInfo* bi) {
     printf("  Console:          READY (256 colors)\n");
     printf("  Keyboard:         READY\n");
     printf("  Memory Manager:   NOT INITIALIZED\n");
-    printf("  Interrupts:       DISABLED\n");
+    printf("  Interrupts:       %s\n", interrupts_enabled() ? "ENABLED" : "DISABLED");
     printf("  Task Manager:     NOT INITIALIZED\n");
     
     // Восстанавливаем цвета

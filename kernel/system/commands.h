@@ -17,5 +17,7 @@ void command_color(void);
 void command_colors(void);
 void command_fg(void);
 void command_bg(void);
+void command_status(void);
+void command_trap(void);
 
 #endif

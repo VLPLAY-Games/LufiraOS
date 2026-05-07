@@ -319,6 +319,10 @@ void execute_command(void) {
         command_bg();
     } else if (strcmp_case_insensitive(input_buffer, "echo") == 0) {
         printf("\nUsage: echo <text>\n");
+    } else if (strcmp(input_buffer, "status") == 0) {
+        command_status();
+    } else if (strcmp(input_buffer, "trap") == 0) {
+        command_trap();
     } else {
         // Проверим, не начинается ли команда с "echo "
         int echo_prefix = 1;
