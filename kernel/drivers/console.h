@@ -16,6 +16,8 @@ typedef struct {
     uint64_t MemoryMapSize; // Размер карты памяти
     void* MemoryMap;        // Указатель на карту памяти
     uint32_t MemoryMapDescriptorSize; // Размер дескриптора
+    uint64_t FATImageBase;   // Адрес образа раздела FAT в памяти
+    uint64_t FATImageSize;   // Размер образа в байтах
 } BootInfo;
 
 // Глобальные переменные состояния консоли

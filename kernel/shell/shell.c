@@ -2,6 +2,9 @@
 #include "../system/commands.h"
 #include "../drivers/console.h"
 #include "../drivers/keyboard.h"
+#include "../fs/fat.h"            // для работы с FAT
+
+extern fat_fs_t fatfs;             // объявлена в kernel.c
 
 // Размер истории команд
 #define HISTORY_SIZE 20
@@ -373,6 +376,54 @@ void execute_command(void) {
 
         command_trap();
 
+    } else if (strcmp(cmd_lower, "ls") == 0) {
+        // Новая команда: список файлов
+        if (!fatfs.image) {
+            printf("\nNo filesystem mounted.\n");
+        } else {
+            char names[128][12];
+            int n = fat_list_root(&fatfs, names, 128);
+            if (n == 0) {
+                printf("\n(empty directory)\n");
+            } else {
+                printf("\n");
+                for (int i = 0; i < n; i++) {
+                    printf("%-12s", names[i]);
+                    if ((i+1) % 6 == 0) printf("\n");
+                }
+                if (n % 6 != 0) printf("\n");
+            }
+        }
+    } else if (strcmp(cmd_lower, "cat") == 0) {
+        // Новая команда: чтение файла
+        if (input_buffer_index <= 4) {
+            printf("\nUsage: cat <filename>\n");
+        } else {
+            const char *fname = input_buffer + 4;
+            while (*fname == ' ') fname++;
+            if (*fname == '\0') {
+                printf("\nUsage: cat <filename>\n");
+            } else {
+                uint32_t fsize;
+                if (fat_open(&fatfs, fname, &fsize) == 0) {
+                    static uint8_t file_buf[4096];
+                    uint32_t to_read = fsize;
+                    if (to_read > sizeof(file_buf)) to_read = sizeof(file_buf);
+                    int br = fat_read_file(&fatfs, fname, file_buf, to_read);
+                    if (br > 0) {
+                        printf("\n--- %s (%u bytes) ---\n", fname, fsize);
+                        for (int i = 0; i < br; i++) {
+                            put_char(file_buf[i]);
+                        }
+                        printf("\n--- end ---\n");
+                    } else {
+                        printf("\nError reading file.\n");
+                    }
+                } else {
+                    printf("\nFile not found: %s\n", fname);
+                }
+            }
+        }
     } else {
 
         printf("\nUnknown command: %s\n", input_buffer);

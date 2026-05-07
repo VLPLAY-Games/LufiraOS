@@ -38,6 +38,8 @@ typedef struct {
     uint64_t KernelSize;
     uint64_t RsdpAddress;     // ACPI RSDP
     uint64_t SmbiosAddress;   // SMBIOS
+    uint64_t FATImageBase;    // NEW: base of FAT image
+    uint64_t FATImageSize;    // NEW: size of FAT image
 } BootInfo;
 
 typedef void (*KernelEntry)(BootInfo*);
@@ -607,6 +609,38 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         SetColor(COLOR_YELLOW, COLOR_BLACK);
         Print(L"Resuming boot process...\n");
         uefi_call_wrapper(gBS->Stall, 1, 2000000); // 2 секунды задержки
+    }
+    
+    // ==================== ЗАГРУЗКА ОБРАЗА ESP ====================
+    // Получаем размер тома через Block I/O
+    EFI_BLOCK_IO_PROTOCOL *BlockIo;
+    EFI_GUID BlockIoGuid = EFI_BLOCK_IO_PROTOCOL_GUID;
+    status = uefi_call_wrapper(gBS->HandleProtocol, 3, LoadedImage->DeviceHandle,
+                               &BlockIoGuid, (VOID**)&BlockIo);
+    if (!EFI_ERROR(status) && BlockIo->Media->BlockSize > 0) {
+        UINT64 VolumeSize = BlockIo->Media->LastBlock * BlockIo->Media->BlockSize + BlockIo->Media->BlockSize;
+        if (VolumeSize == 0) VolumeSize = 32*1024*1024; // fallback
+        UINTN FatPages = (VolumeSize + 4095) / 4096;
+        EFI_PHYSICAL_ADDRESS FATBase;
+        status = uefi_call_wrapper(gBS->AllocatePages, 4, AllocateAnyPages,
+                                   EfiLoaderData, FatPages, &FATBase);
+        if (!EFI_ERROR(status)) {
+            UINTN BlockSize = BlockIo->Media->BlockSize;
+            UINTN NumBlocks = VolumeSize / BlockSize;
+            for (UINTN i = 0; i < NumBlocks; i++) {
+                uefi_call_wrapper(BlockIo->ReadBlocks, 5, BlockIo,
+                                  BlockIo->Media->MediaId, i,
+                                  BlockSize, (VOID*)(FATBase + i * BlockSize));
+            }
+            bi.FATImageBase = FATBase;
+            bi.FATImageSize = VolumeSize;
+        } else {
+            bi.FATImageBase = 0;
+            bi.FATImageSize = 0;
+        }
+    } else {
+        bi.FATImageBase = 0;
+        bi.FATImageSize = 0;
     }
     
     // ==================== ПЕРЕХОД К ЯДРУ ====================

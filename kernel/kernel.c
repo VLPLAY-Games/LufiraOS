@@ -5,7 +5,7 @@
 #include "shell/shell.h"
 #include "system/gdt.h"
 #include "system/idt.h"
-#include "system/irq.h"          // <-- добавлено для irq_init()
+#include "fs/fat.h"               // <-- добавлено
 
 // Базовые функции для портов
 static inline uint8_t inb(uint16_t port) {
@@ -39,11 +39,11 @@ static void pic_remap(void) {
     outb(PIC2_DATA, 0x02);    // tell slave its cascade identity
     outb(PIC1_DATA, 0x01);    // ICW4
     outb(PIC2_DATA, 0x01);    // ICW4
-
-    // Маскируем ВСЕ IRQ – потом irq_init() разрешит нужные
-    outb(PIC1_DATA, 0xFF);
-    outb(PIC2_DATA, 0xFF);
+    outb(PIC1_DATA, 0xFF);    // mask all IRQs on master
+    outb(PIC2_DATA, 0xFF);    // mask all IRQs on slave
 }
+
+fat_fs_t fatfs;   // глобальная файловая система (для shell)
 
 // --- Точка входа ядра ---
 __attribute__((section(".text.prologue")))
@@ -53,8 +53,21 @@ void _start(BootInfo* bi) {
     initialize_console(bi);
     gdt_init();
     idt_init();
-    pic_remap();                // перенастройка PIC (все IRQ пока замаскированы)
-    irq_init();                 // разрешаем IRQ0 и IRQ1
+    pic_remap();                   // маскируем все IRQ от PIC
+
+    // Инициализация FAT, если образ передан
+    if (bi->FATImageBase && bi->FATImageSize) {
+        if (fat_init(&fatfs, (void*)bi->FATImageBase, bi->FATImageSize) == 0) {
+            current_color = convert_color(0x55FF55);
+            printf("\n FAT filesystem mounted.\n");
+        } else {
+            current_color = convert_color(0xFF5555);
+            printf("\n FAT mount failed.\n");
+        }
+    } else {
+        current_color = convert_color(0xFF5555);
+        printf("\n No FAT image provided.\n");
+    }
 
     display_system_info(bi);
     keyboard_init();
@@ -70,10 +83,9 @@ void _start(BootInfo* bi) {
     show_prompt();
     draw_cursor();
 
-    asm volatile ("sti");       // разрешаем маскируемые прерывания
-
-    // Основной idle-цикл – ждём прерывания
     while (1) {
-        asm volatile ("hlt");
+        keyboard_irq_handler();
+        update_cursor();
+        __asm__ volatile ("pause");
     }
 }

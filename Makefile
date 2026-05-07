@@ -17,7 +17,8 @@ KERNEL_DIR := kernel
 
 # Создаем директории
 $(shell mkdir -p $(BUILD_DIR) \
-    $(BUILD_DIR)/kernel/drivers $(BUILD_DIR)/kernel/shell $(BUILD_DIR)/kernel/system)
+    $(BUILD_DIR)/kernel/drivers $(BUILD_DIR)/kernel/shell $(BUILD_DIR)/kernel/system \
+    $(BUILD_DIR)/kernel/fs)
 
 # Флаги для загрузчика
 BOOTLOADER_CFLAGS := -I$(EFI_INC) -I$(EFI_INC_ARCH) \
@@ -48,7 +49,8 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/system/commands.c \
     $(KERNEL_DIR)/system/gdt.c \
     $(KERNEL_DIR)/system/idt.c \
-	$(KERNEL_DIR)/system/irq.c
+	$(KERNEL_DIR)/system/irq.c \
+    $(KERNEL_DIR)/fs/fat.c
 
 KERNEL_ASM_SOURCES := \
     $(KERNEL_DIR)/system/interrupts.S
