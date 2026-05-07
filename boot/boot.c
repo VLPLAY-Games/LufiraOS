@@ -633,24 +633,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
     }
 
-    if (!EFI_ERROR(status) && BlockIo && BlockIo->Media &&
-        BlockIo->Media->BlockSize >= 512) {
+    if (!EFI_ERROR(status) && BlockIo && BlockIo->Media) {
 
         UINTN BlockSize = BlockIo->Media->BlockSize;
         UINT64 VolumeSectors = 0;
         UINT8 BootSector[512];
-
-        // Читаем boot sector
-        if (BlockSize == 512) {
-            status = uefi_call_wrapper(BlockIo->ReadBlocks, 5, BlockIo,
-                BlockIo->Media->MediaId, 0, BlockSize, BootSector);
-        } else {
-            UINT8 AlignedBuf[4096];
-            status = uefi_call_wrapper(BlockIo->ReadBlocks, 5, BlockIo,
-                BlockIo->Media->MediaId, 0, BlockSize, AlignedBuf);
-            if (!EFI_ERROR(status))
-                CopyMem(BootSector, AlignedBuf, 512);
-        }
 
         if (!EFI_ERROR(status)) {
             if (BootSector[510] == 0x55 && BootSector[511] == 0xAA) {
@@ -658,14 +645,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                 UINT32 TotalSectors32 = *(UINT32*)(BootSector + 32);
                 VolumeSectors = TotalSectors16 ? TotalSectors16 : TotalSectors32;
             }
-            if (VolumeSectors == 0) {
-                VolumeSectors = BlockIo->Media->LastBlock + 1;
-            }
+            VolumeSectors = BlockIo->Media->LastBlock + 1;
 
             // Ограничим размер образа (например, весь диск, но не более 256 МБ)
             UINT64 MaxImageSize = 256ULL * 1024 * 1024;
-            UINT64 VolumeSize = VolumeSectors * BlockSize;
-            UINT64 CopySize = (VolumeSize < MaxImageSize) ? VolumeSize : MaxImageSize;
+            UINT64 CopySize = (BlockIo->Media->LastBlock + 1) * BlockSize;
+
+            if (CopySize > MaxImageSize)
+                CopySize = MaxImageSize;
 
             UINTN Pages = (CopySize + 4095) / 4096;
             EFI_PHYSICAL_ADDRESS FATBase = 0;
@@ -675,7 +662,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             if (!EFI_ERROR(status)) {
                 // Быстрое копирование: читаем по 128 блоков (64 КБ) за вызов
                 UINTN MaxBlocksPerTransfer = 1024;
-                UINTN TotalBlocks = (UINTN)(CopySize / BlockSize);
+                UINTN TotalBlocks = (CopySize + BlockSize - 1) / BlockSize;
                 UINT8* Buffer = (UINT8*)FATBase;
 
                 for (UINTN i = 0; i < TotalBlocks; i += MaxBlocksPerTransfer) {
@@ -684,8 +671,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                     status = uefi_call_wrapper(BlockIo->ReadBlocks, 5, BlockIo,
                         BlockIo->Media->MediaId, i,
                         BlocksNow * BlockSize,
-                        Buffer + (i * BlockSize));
+                        Buffer + ((UINT64)i * BlockSize));
                     if (EFI_ERROR(status)) {
+                        bi.FATImageBase = 0;
+                        bi.FATImageSize = 0;
                         break;
                     }
                 }
@@ -708,7 +697,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         } else {
             bi.FATImageBase = 0;
             bi.FATImageSize = 0;
-            PrintColored(L"ERROR: Cannot read boot sector\n", COLOR_RED, COLOR_BLACK);
         }
     } else {
         bi.FATImageBase = 0;
