@@ -1,12 +1,10 @@
 .section .text
-
 .extern isr_common_handler
 
 .global isr_common
 .type isr_common, @function
 isr_common:
     cld
-
     pushq %r15
     pushq %r14
     pushq %r13
@@ -22,10 +20,8 @@ isr_common:
     pushq %rcx
     pushq %rbx
     pushq %rax
-
     movq %rsp, %rdi
     call isr_common_handler
-
     popq %rax
     popq %rbx
     popq %rcx
@@ -41,13 +37,18 @@ isr_common:
     popq %r13
     popq %r14
     popq %r15
-
     addq $16, %rsp
     iretq
 
+// Универсальная заглушка для неиспользуемых прерываний (векторы 32-255)
+.global isr_default
+.type isr_default, @function
+isr_default:
+    iretq
+
 .macro ISR_NOERR num
-.global isr\num
-.type isr\num, @function
+    .global isr\num
+    .type isr\num, @function
 isr\num:
     cli
     pushq $0
@@ -56,15 +57,15 @@ isr\num:
 .endm
 
 .macro ISR_ERR num
-.global isr\num
-.type isr\num, @function
+    .global isr\num
+    .type isr\num, @function
 isr\num:
     cli
     pushq $\num
     jmp isr_common
 .endm
 
-// Exceptions without error code
+// Исключения без кода ошибки
 ISR_NOERR 0
 ISR_NOERR 1
 ISR_NOERR 2
@@ -88,7 +89,7 @@ ISR_NOERR 27
 ISR_NOERR 28
 ISR_NOERR 31
 
-// Exceptions with error code
+// Исключения с кодом ошибки
 ISR_ERR 8
 ISR_ERR 10
 ISR_ERR 11
