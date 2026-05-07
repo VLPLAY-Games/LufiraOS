@@ -40,14 +40,21 @@ KERNEL_CFLAGS := -m64 -ffreestanding -fno-stack-protector -fno-stack-check \
 KERNEL_LDFLAGS := -static -nostdlib -z max-page-size=0x1000 --gc-sections
 
 # Исходные файлы ядра
-KERNEL_SOURCES := \
+KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/kernel.c \
     $(KERNEL_DIR)/drivers/console.c \
     $(KERNEL_DIR)/drivers/keyboard.c \
     $(KERNEL_DIR)/shell/shell.c \
-    $(KERNEL_DIR)/system/commands.c
+    $(KERNEL_DIR)/system/commands.c \
+    $(KERNEL_DIR)/system/gdt.c \
+    $(KERNEL_DIR)/system/idt.c
 
-KERNEL_OBJECTS := $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/kernel/%.o,$(KERNEL_SOURCES))
+KERNEL_ASM_SOURCES := \
+    $(KERNEL_DIR)/system/interrupts.S
+
+KERNEL_C_OBJECTS := $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/kernel/%.o,$(KERNEL_C_SOURCES))
+KERNEL_ASM_OBJECTS := $(patsubst $(KERNEL_DIR)/%.S,$(BUILD_DIR)/kernel/%.o,$(KERNEL_ASM_SOURCES))
+KERNEL_OBJECTS := $(KERNEL_C_OBJECTS) $(KERNEL_ASM_OBJECTS)
 
 # Подключаем правила для загрузчика
 include boot/Makefile.inc
@@ -56,6 +63,10 @@ include boot/Makefile.inc
 $(BUILD_DIR)/kernel/%.o: $(KERNEL_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(KERNEL_CFLAGS) -o $@ $<
+
+$(BUILD_DIR)/kernel/%.o: $(KERNEL_DIR)/%.S
+	@mkdir -p $(dir $@)
+	$(CC) $(KERNEL_CFLAGS) -x assembler-with-cpp -o $@ $<
 
 $(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(KERNEL_DIR)/linker.ld
 	$(LD) $(KERNEL_LDFLAGS) -T $(KERNEL_DIR)/linker.ld -o $@ $(KERNEL_OBJECTS)

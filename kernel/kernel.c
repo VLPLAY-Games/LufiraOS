@@ -3,15 +3,23 @@
 #include "drivers/keyboard.h"
 #include "drivers/console.h"
 #include "shell/shell.h"
+#include "system/gdt.h"
+#include "system/idt.h"
 
 // --- Точка входа ядра ---
 __attribute__((section(".text.prologue")))
 void _start(BootInfo* bi) {
+    asm volatile ("cli");
+
     initialize_console(bi);
-    
+
+    // Базовая CPU-инициализация: GDT и IDT
+    gdt_init();
+    idt_init();
+
     // Отображаем подробную системную информацию
     display_system_info(bi);
-    
+
     // Инициализируем клавиатуру
     keyboard_init();
     
