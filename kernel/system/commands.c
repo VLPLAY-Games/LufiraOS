@@ -73,13 +73,17 @@ void command_help(void) {
 }
 void command_clear(void) { clear_screen(); show_prompt(); }
 void command_reboot(void) {
-    printf("\nRebooting system...\n");
+    printf("\nSyncing filesystem... ");
+    fat_flush(&fatfs);                  // <-- новое
+    printf("done.\nRebooting system...\n");
     __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64));
     __asm__ volatile ("outw %0, %1" : : "a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
     printf("Reboot failed. Please restart manually.\n");
 }
 void command_shutdown(void) {
-    printf("\nShutting down system...\n");
+    printf("\nSyncing filesystem... ");
+    fat_flush(&fatfs);                  // <-- новое
+    printf("done.\nShutting down system...\n");
     __asm__ volatile ("outw %0, %1" : : "a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
     __asm__ volatile ("outw %0, %1" : : "a"((uint16_t)0x3400), "Nd"((uint16_t)0x604));
     __asm__ volatile ("outw %0, %1" : : "a"((uint16_t)0x2000), "Nd"((uint16_t)0xB004));

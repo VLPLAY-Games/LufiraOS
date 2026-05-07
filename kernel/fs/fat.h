@@ -34,7 +34,7 @@ typedef struct {
 } __attribute__((packed)) fat_bpb_t;
 
 typedef struct {
-    uint8_t  name[11];        // <-- изменено с char на uint8_t
+    uint8_t  name[11];
     uint8_t  attr;
     uint8_t  reserved;
     uint8_t  creation_time_tenths;
@@ -58,7 +58,7 @@ typedef struct {
     uint32_t    cluster_size;
     uint32_t    total_sectors;
     uint8_t     fat_type;
-    uint32_t    root_cluster;   // FAT32: first cluster of root dir
+    uint32_t    root_cluster;
 } fat_fs_t;
 
 typedef struct {
@@ -89,5 +89,7 @@ int fat_closedir(fat_dir_t *dir);
 int fat_mkdir(fat_fs_t *fs, uint32_t parent_cluster, const char *name);
 int fat_rm(fat_fs_t *fs, uint32_t parent_cluster, const char *name);
 int fat_create_file(fat_fs_t *fs, uint32_t parent_cluster, const char *name);
+
+void fat_flush(fat_fs_t *fs);   // НОВОЕ
 
 #endif

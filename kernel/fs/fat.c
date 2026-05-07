@@ -1,5 +1,6 @@
 #include "fat.h"
-#include <stddef.h>   // <-- добавлено для NULL
+#include "../system/disk.h"
+#include <stddef.h>
 
 static void* memcpy(void* dest, const void* src, unsigned int n) {
     char* d = (char*)dest;
@@ -597,4 +598,12 @@ int fat_create_file(fat_fs_t *fs, uint32_t parent_cluster, const char *name) {
         next_entry->name[0] = 0x00;
 
     return 0;
+}
+
+void fat_flush(fat_fs_t *fs) {
+    // Ограничение: пишем максимум 255 секторов за раз (но проще посекторно)
+    for (uint32_t lba = 0; lba < fs->total_sectors; lba++) {
+        uint8_t *sector = fs->image + lba * 512;
+        disk_write_sectors(lba, 1, sector);
+    }
 }

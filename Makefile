@@ -54,6 +54,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/system/gdt.c \
     $(KERNEL_DIR)/system/idt.c \
     $(KERNEL_DIR)/system/irq.c \
+	$(KERNEL_DIR)/system/disk.c \
     $(KERNEL_DIR)/fs/fat.c
 
 KERNEL_ASM_SOURCES := \
@@ -137,9 +138,7 @@ run: $(BUILD_DIR)/disk.img
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
 		-m 256M \
 		-net none \
-		-serial stdio \
-		-no-reboot \
-		-no-shutdown
+		-serial stdio
 
 debug: $(BUILD_DIR)/disk.img
 	qemu-system-x86_64 \
