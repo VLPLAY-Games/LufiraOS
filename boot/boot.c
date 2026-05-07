@@ -20,6 +20,12 @@
 #define COLOR_LIGHTYELLOW   0x0E
 #define COLOR_BRIGHTWHITE   0x0F
 
+// Киберпанк-псевдонимы для улучшения читаемости
+#define COLOR_NEON_PINK     COLOR_LIGHTMAGENTA
+#define COLOR_NEON_CYAN     COLOR_LIGHTCYAN
+#define COLOR_NEON_GREEN    COLOR_LIGHTGREEN
+#define COLOR_DARK_RED      COLOR_RED
+
 #define ACPI_10_TABLE_GUID {0xeb9d2d30, 0x2d88, 0x11d3, {0x9a, 0x16, 0x0, 0x90, 0x27, 0x3f, 0xc1, 0x4d}}
 
 // Структура BootInfo для передачи в ядро
@@ -65,7 +71,8 @@ VOID DrawHorizontalLine(UINTN Length, UINTN X, UINTN Y) {
 }
 
 VOID DrawBox(UINTN X, UINTN Y, UINTN Width, UINTN Height, CONST CHAR16 *Title) {
-    SetColor(COLOR_BLUE, COLOR_BLACK);
+    // Киберпанк-стиль: тёмно-красная рамка, неоновый циан для заголовка
+    SetColor(COLOR_DARK_RED, COLOR_BLACK);
     
     // Верхняя граница
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X, Y);
@@ -76,9 +83,9 @@ VOID DrawBox(UINTN X, UINTN Y, UINTN Width, UINTN Height, CONST CHAR16 *Title) {
     // Заголовок
     if (Title != NULL) {
         uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X + 2, Y);
-        SetColor(COLOR_YELLOW, COLOR_BLACK);
+        SetColor(COLOR_NEON_CYAN, COLOR_BLACK);
         Print(L" %s ", Title);
-        SetColor(COLOR_BLUE, COLOR_BLACK);
+        SetColor(COLOR_DARK_RED, COLOR_BLACK);
     }
     
     // Боковые границы
@@ -103,7 +110,8 @@ VOID DrawBox(UINTN X, UINTN Y, UINTN Width, UINTN Height, CONST CHAR16 *Title) {
 VOID PrintInfo(CONST CHAR16 *Label, CONST CHAR16 *Value, BOOLEAN Important, UINTN X, UINTN Y) {
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X, Y);
     
-    SetColor(COLOR_CYAN, COLOR_BLACK);
+    // Метка — неоновый циан
+    SetColor(COLOR_NEON_CYAN, COLOR_BLACK);
     Print(L"  ");
     Print(Label);
     
@@ -114,8 +122,9 @@ VOID PrintInfo(CONST CHAR16 *Label, CONST CHAR16 *Value, BOOLEAN Important, UINT
     
     Print(L": ");
     
+    // Важные значения — неоновый зелёный, обычные — белые
     if (Important) {
-        SetColor(COLOR_YELLOW, COLOR_BLACK);
+        SetColor(COLOR_NEON_GREEN, COLOR_BLACK);
     } else {
         SetColor(COLOR_WHITE, COLOR_BLACK);
     }
@@ -135,7 +144,7 @@ VOID ShowAdvancedInfo(EFI_LOADED_IMAGE *LoadedImage, EFI_FILE_HANDLE KernelFile,
     
     // Заголовок
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 1);
-    SetColor(COLOR_YELLOW, COLOR_BLACK);
+    SetColor(COLOR_NEON_PINK, COLOR_BLACK);
     Print(L"+==========================================================================+\n");
     Print(L"|                  LufiraOS Advanced System Information                |\n");
     Print(L"+==========================================================================+\n\n");
@@ -221,11 +230,11 @@ VOID ShowAdvancedInfo(EFI_LOADED_IMAGE *LoadedImage, EFI_FILE_HANDLE KernelFile,
     
     // Инструкция для возврата
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 35);
-    SetColor(COLOR_YELLOW, COLOR_BLACK);
+    SetColor(COLOR_NEON_PINK, COLOR_BLACK);
     Print(L"\n\nPress ");
-    SetColor(COLOR_CYAN, COLOR_BLACK);
+    SetColor(COLOR_NEON_CYAN, COLOR_BLACK);
     Print(L"ENTER");
-    SetColor(COLOR_YELLOW, COLOR_BLACK);
+    SetColor(COLOR_NEON_PINK, COLOR_BLACK);
     Print(L" to return to main screen...");
     
     // Ждем нажатия ENTER
@@ -254,13 +263,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     // ==================== ЗАГОЛОВОК С ASCII-ART ====================
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 1);
     
-    SetColor(COLOR_BLUE, COLOR_BLACK);
+    // Тёмно-красная рамка
+    SetColor(COLOR_DARK_RED, COLOR_BLACK);
     Print(L"+==========================================================================+\n");
     
-    SetColor(COLOR_CYAN, COLOR_BLACK);
+    // Пустые линии слегка подсвечены тёмно-серым, чтобы не отвлекать
+    SetColor(COLOR_DARKGRAY, COLOR_BLACK);
     Print(L"|                                                                      |\n");
     
-    SetColor(COLOR_YELLOW, COLOR_BLACK);
+    // ASCII-арт в неоновом циане
+    SetColor(COLOR_NEON_CYAN, COLOR_BLACK);
     Print(L"|    ██╗     ██╗   ██╗███████╗██╗██████╗  █████╗     ███████╗███████╗  |\n");
     Print(L"|    ██║     ██║   ██║██╔════╝██║██╔══██╗██╔══██╗    ██═══██╝██╔════╝  |\n");
     Print(L"|    ██║     ██║   ██║█████╗  ██║██████╔╝███████║    ██═══██╗███████╗  |\n");
@@ -268,14 +280,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     Print(L"|    ███████╗╚██████╔╝██║     ██║██║  ██║██║  ██║    ███████║███████║  |\n");
     Print(L"|    ╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝    ╚══════╝╚══════╝  |\n");
     
-    SetColor(COLOR_CYAN, COLOR_BLACK);
+    SetColor(COLOR_DARKGRAY, COLOR_BLACK);
     Print(L"|                                                                      |\n");
     
-    SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
+    // Информация о загрузчике
+    SetColor(COLOR_WHITE, COLOR_BLACK);
     Print(L"|                         UEFI Bootloader v0.1.2                       |\n");
     Print(L"|                       Copyright © 2024 LufiraOS                       |\n");
     
-    SetColor(COLOR_BLUE, COLOR_BLACK);
+    // Завершаем рамку
+    SetColor(COLOR_DARK_RED, COLOR_BLACK);
     Print(L"+==========================================================================+\n\n");
     
     SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
@@ -401,7 +415,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     DrawBox(2, 25, 76, 6, L"Kernel Loading");
     
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 27);
-    PrintColored(L"[1/4] ", COLOR_GREEN, COLOR_BLACK);
+    PrintColored(L"[1/4] ", COLOR_NEON_GREEN, COLOR_BLACK);
     Print(L"Locating boot device... ");
     
     EFI_LOADED_IMAGE *LoadedImage;
@@ -413,10 +427,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     EFI_FILE_HANDLE Root;
     uefi_call_wrapper(FileSystem->OpenVolume, 2, FileSystem, &Root);
     
-    PrintColored(L"OK\n", COLOR_GREEN, COLOR_BLACK);
+    PrintColored(L"OK\n", COLOR_NEON_GREEN, COLOR_BLACK);
     
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 28);
-    PrintColored(L"[2/4] ", COLOR_GREEN, COLOR_BLACK);
+    PrintColored(L"[2/4] ", COLOR_NEON_GREEN, COLOR_BLACK);
     Print(L"Opening kernel file... ");
     
     EFI_FILE_HANDLE KernelFile;
@@ -426,11 +440,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         PrintColored(L"FAILED\n", COLOR_RED, COLOR_BLACK);
         uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 29);
         PrintColored(L"Error: kernel.bin not found on boot device!\n", COLOR_RED, COLOR_BLACK);
-        PrintColored(L"Please ensure kernel.bin is in the root directory.\n", COLOR_YELLOW, COLOR_BLACK);
+        PrintColored(L"Please ensure kernel.bin is in the root directory.\n", COLOR_NEON_PINK, COLOR_BLACK);
         while(1) __asm__ volatile("hlt");
     }
     
-    PrintColored(L"OK\n", COLOR_GREEN, COLOR_BLACK);
+    PrintColored(L"OK\n", COLOR_NEON_GREEN, COLOR_BLACK);
     
     // Получаем размер файла ядра
     EFI_FILE_INFO *KernelFileInfo;
@@ -442,7 +456,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     uefi_call_wrapper(gBS->FreePool, 1, KernelFileInfo);
     
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 29);
-    PrintColored(L"[3/4] ", COLOR_GREEN, COLOR_BLACK);
+    PrintColored(L"[3/4] ", COLOR_NEON_GREEN, COLOR_BLACK);
     Print(L"Allocating kernel memory... ");
     
     // Выделяем память для ядра (выровненную по границе страницы)
@@ -463,10 +477,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     }
     
     bi.KernelBase = KernelBase;
-    PrintColored(L"OK\n", COLOR_GREEN, COLOR_BLACK);
+    PrintColored(L"OK\n", COLOR_NEON_GREEN, COLOR_BLACK);
     
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 30);
-    PrintColored(L"[4/4] ", COLOR_GREEN, COLOR_BLACK);
+    PrintColored(L"[4/4] ", COLOR_NEON_GREEN, COLOR_BLACK);
     Print(L"Loading kernel... ");
     
     // Имитация прогресса загрузки (с реальной загрузкой)
@@ -484,7 +498,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         // Показываем точку каждые 64KB
         if (i % 4 == 0) {
             uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 24 + dotCount, 30);
-            SetColor(COLOR_YELLOW, COLOR_BLACK);
+            SetColor(COLOR_NEON_PINK, COLOR_BLACK);
             Print(L".");
             dotCount++;
             SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
@@ -501,7 +515,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     }
     
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 24, 30);
-    SetColor(COLOR_GREEN, COLOR_BLACK);
+    SetColor(COLOR_NEON_GREEN, COLOR_BLACK);
     Print(L"  COMPLETE");
     
     // Сохраняем информацию о памяти для ядра
@@ -514,22 +528,22 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     DrawBox(2, 33, 76, 5, L"Boot Menu");
     
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 35);
-    SetColor(COLOR_YELLOW, COLOR_BLACK);
+    SetColor(COLOR_NEON_PINK, COLOR_BLACK);
     Print(L"\nStarting LufiraOS in 5 seconds...\n");
     
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 36);
     Print(L"Press ");
-    SetColor(COLOR_CYAN, COLOR_BLACK);
+    SetColor(COLOR_NEON_CYAN, COLOR_BLACK);
     Print(L"ENTER");
-    SetColor(COLOR_YELLOW, COLOR_BLACK);
+    SetColor(COLOR_NEON_PINK, COLOR_BLACK);
     Print(L" to boot now, ");
-    SetColor(COLOR_CYAN, COLOR_BLACK);
+    SetColor(COLOR_NEON_CYAN, COLOR_BLACK);
     Print(L"I");
-    SetColor(COLOR_YELLOW, COLOR_BLACK);
+    SetColor(COLOR_NEON_PINK, COLOR_BLACK);
     Print(L" for info, ");
-    SetColor(COLOR_CYAN, COLOR_BLACK);
+    SetColor(COLOR_NEON_CYAN, COLOR_BLACK);
     Print(L"ESC");
-    SetColor(COLOR_YELLOW, COLOR_BLACK);
+    SetColor(COLOR_NEON_PINK, COLOR_BLACK);
     Print(L" to cancel");
     
     // ==================== ОБРАТНЫЙ ОТСЧЕТ ====================
@@ -539,13 +553,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     
     // Отображаем начальное состояние
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 38);
-    SetColor(COLOR_YELLOW, COLOR_BLACK);
+    SetColor(COLOR_NEON_PINK, COLOR_BLACK);
     Print(L"\n\nStarting LufiraOS in 5 seconds... ");
     
     for (int i = 5; i > 0 && !SkipCountdown; i--) {
         // Обновляем обратный отсчет
         uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 35, 38);
-        SetColor(COLOR_CYAN, COLOR_BLACK);
+        SetColor(COLOR_NEON_CYAN, COLOR_BLACK);
         Print(L"%d sec...", i);
         
         // Ждем 1 секунду, но каждые 100 мс проверяем нажатие клавиши
@@ -565,7 +579,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                     }
                     
                     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 38);
-                    PrintColored(L"Starting kernel immediately...", COLOR_GREEN, COLOR_BLACK);
+                    PrintColored(L"Starting kernel immediately...", COLOR_NEON_GREEN, COLOR_BLACK);
                     break;
                 } else if (Key.UnicodeChar == L'i' || Key.UnicodeChar == L'I') {
                     ShowInfo = TRUE;
@@ -606,7 +620,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         // После показа информации, продолжаем обратный отсчет
         uefi_call_wrapper(gST->ConOut->ClearScreen, 1, gST->ConOut);
         uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 0);
-        SetColor(COLOR_YELLOW, COLOR_BLACK);
+        SetColor(COLOR_NEON_PINK, COLOR_BLACK);
         Print(L"Resuming boot process...\n");
         uefi_call_wrapper(gBS->Stall, 1, 2000000); // 2 секунды задержки
     }
@@ -682,13 +696,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     } else {
         bi.FATImageBase = 0;
         bi.FATImageSize = 0;
-        PrintColored(L"Warning: Block I/O not available\n", COLOR_YELLOW, COLOR_BLACK);
+        PrintColored(L"Warning: Block I/O not available\n", COLOR_NEON_PINK, COLOR_BLACK);
     }
 
     
     // ==================== ПЕРЕХОД К ЯДРУ ====================
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 40);
-    SetColor(COLOR_GREEN, COLOR_BLACK);
+    SetColor(COLOR_NEON_GREEN, COLOR_BLACK);
     Print(L"\n==========================================================================\n");
     Print(L"        Switching to 64-bit mode and starting LufiraOS kernel...\n");
     Print(L"==========================================================================\n");
