@@ -101,7 +101,7 @@ VOID DrawBox(UINTN X, UINTN Y, UINTN Width, UINTN Height, CONST CHAR16 *Title) {
     SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
 }
 
-VOID PrintInfo( CONST CHAR16 *Label, CONST CHAR16 *Value, BOOLEAN Important, UINTN X, UINTN Y) {
+VOID PrintInfo(CONST CHAR16 *Label, CONST CHAR16 *Value, BOOLEAN Important, UINTN X, UINTN Y) {
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, X, Y);
     
     SetColor(COLOR_NEON_CYAN, COLOR_BLACK);
@@ -119,6 +119,150 @@ VOID PrintInfo( CONST CHAR16 *Label, CONST CHAR16 *Value, BOOLEAN Important, UIN
     }
     Print(Value);
     SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
+}
+
+// ==================== ФУНКЦИЯ ДЕТАЛЬНОГО ДАМПА (ТОЛЬКО DEBUG) ====================
+VOID DebugDeepDump(BootInfo *bi, EFI_MEMORY_DESCRIPTOR *MemoryMap, UINTN MemoryMapSize, UINTN DescriptorSize) {
+    // Очищаем экран для дампа
+    SetColor(COLOR_BLACK, COLOR_BLACK);
+    uefi_call_wrapper(gST->ConOut->ClearScreen, 1, gST->ConOut);
+    SetColor(COLOR_NEON_PINK, COLOR_BLACK);
+    Print(L"+==========================================================================+\n");
+    Print(L"|                     LUFIRAOS DEEP DEBUG DUMP                           |\n");
+    Print(L"+==========================================================================+\n\n");
+    SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
+
+    // --- Секция 1: Информация о ядре ---
+    DrawBox(2, 4, 76, 6, L"Kernel Image");
+    CHAR16 str[64];
+    SPrint(str, sizeof(str), L"0x%lx", bi->KernelBase);
+    PrintInfo(L"Kernel Base", str, FALSE, 4, 6);
+    SPrint(str, sizeof(str), L"0x%lx", bi->KernelBase + bi->KernelSize);
+    PrintInfo(L"Kernel End", str, FALSE, 4, 7);
+    SPrint(str, sizeof(str), L"%ld KB", bi->KernelSize / 1024);
+    PrintInfo(L"Kernel Size", str, TRUE, 4, 8);
+    
+    // Небольшая пауза
+    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 10);
+    SetColor(COLOR_DIM_GRAY, COLOR_BLACK);
+    Print(L"Press any key for next page...");
+    EFI_INPUT_KEY Key;
+    while (uefi_call_wrapper(gST->ConIn->ReadKeyStroke, 2, gST->ConIn, &Key) != EFI_SUCCESS);
+
+    // --- Секция 2: Полная карта памяти ---
+    uefi_call_wrapper(gST->ConOut->ClearScreen, 1, gST->ConOut);
+    SetColor(COLOR_NEON_PINK, COLOR_BLACK);
+    Print(L"+==========================================================================+\n");
+    Print(L"|                      COMPLETE MEMORY MAP DUMP                          |\n");
+    Print(L"+==========================================================================+\n\n");
+
+    UINTN descCount = MemoryMapSize / DescriptorSize;
+    SPrint(str, sizeof(str), L"%d descriptors", descCount);
+    PrintInfo(L"Total Descriptors", str, FALSE, 2, 4);
+    SPrint(str, sizeof(str), L"%d bytes each", DescriptorSize);
+    PrintInfo(L"Descriptor Size", str, FALSE, 2, 5);
+    Print(L"\n");
+
+    SetColor(COLOR_NEON_CYAN, COLOR_BLACK);
+    Print(L"  Type                                   Physical Start   Pages          Attributes\n");
+    SetColor(COLOR_DARK_RED, COLOR_BLACK);
+    Print(L"  -------------------------------------- ---------------- -------------- ----------------\n");
+
+    for (UINTN i = 0; i < descCount; i++) {
+        EFI_MEMORY_DESCRIPTOR *d = (EFI_MEMORY_DESCRIPTOR*)((UINT8*)MemoryMap + (i * DescriptorSize));
+        CONST CHAR16 *typeStr;
+        switch (d->Type) {
+            case EfiReservedMemoryType:   typeStr = L"Reserved"; break;
+            case EfiLoaderCode:           typeStr = L"LoaderCode"; break;
+            case EfiLoaderData:           typeStr = L"LoaderData"; break;
+            case EfiBootServicesCode:     typeStr = L"BS Code"; break;
+            case EfiBootServicesData:     typeStr = L"BS Data"; break;
+            case EfiRuntimeServicesCode:  typeStr = L"RT Code"; break;
+            case EfiRuntimeServicesData:  typeStr = L"RT Data"; break;
+            case EfiConventionalMemory:   typeStr = L"Free"; break;
+            case EfiUnusableMemory:       typeStr = L"Unusable"; break;
+            case EfiACPIReclaimMemory:    typeStr = L"ACPI Reclaim"; break;
+            case EfiACPIMemoryNVS:        typeStr = L"ACPI NVS"; break;
+            case EfiMemoryMappedIO:       typeStr = L"MMIO"; break;
+            case EfiMemoryMappedIOPortSpace: typeStr = L"MMIO Port"; break;
+            case EfiPalCode:              typeStr = L"PAL Code"; break;
+            default:                      typeStr = L"Unknown"; break;
+        }
+        SetColor(COLOR_WHITE, COLOR_BLACK);
+        Print(L"  %-38s %016lx %14ld %016lx\n",
+              typeStr, d->PhysicalStart, d->NumberOfPages, d->Attribute);
+    }
+
+    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 6 + descCount + 2);
+    SetColor(COLOR_DIM_GRAY, COLOR_BLACK);
+    Print(L"Press any key for next page...");
+    while (uefi_call_wrapper(gST->ConIn->ReadKeyStroke, 2, gST->ConIn, &Key) != EFI_SUCCESS);
+
+    // --- Секция 3: Все конфигурационные таблицы ---
+    uefi_call_wrapper(gST->ConOut->ClearScreen, 1, gST->ConOut);
+    SetColor(COLOR_NEON_PINK, COLOR_BLACK);
+    Print(L"+==========================================================================+\n");
+    Print(L"|                  CONFIGURATION TABLES COMPLETE LIST                    |\n");
+    Print(L"+==========================================================================+\n\n");
+
+    SPrint(str, sizeof(str), L"%d tables", gST->NumberOfTableEntries);
+    PrintInfo(L"Number of Tables", str, FALSE, 2, 4);
+    Print(L"\n");
+
+    SetColor(COLOR_NEON_CYAN, COLOR_BLACK);
+    Print(L"  #  GUID                                  Address\n");
+    SetColor(COLOR_DARK_RED, COLOR_BLACK);
+    Print(L"  -- ------------------------------------- ----------------\n");
+
+    for (UINTN i = 0; i < gST->NumberOfTableEntries; i++) {
+        CHAR16 guidStr[40];
+        GuidToString(guidStr, &gST->ConfigurationTable[i].VendorGuid);
+        SetColor(COLOR_WHITE, COLOR_BLACK);
+        Print(L"  %2d %-37s %016lx\n", i, guidStr, gST->ConfigurationTable[i].VendorTable);
+    }
+
+    // --- Секция 4: Графический вывод ---
+    Print(L"\n");
+    SetColor(COLOR_NEON_PINK, COLOR_BLACK);
+    Print(L"+==========================================================================+\n");
+    Print(L"|                      GRAPHICS OUTPUT PROTOCOL                          |\n");
+    Print(L"+==========================================================================+\n\n");
+    SPrint(str, sizeof(str), L"0x%lx", bi->FrameBufferBase);
+    PrintInfo(L"FrameBufferBase", str, FALSE, 2, gST->ConOut->Mode->CursorRow + 1);
+    SPrint(str, sizeof(str), L"%ld MB", bi->FrameBufferSize / 1024 / 1024);
+    PrintInfo(L"FrameBufferSize", str, TRUE, 2, gST->ConOut->Mode->CursorRow + 1);
+    SPrint(str, sizeof(str), L"%d x %d", bi->HorizontalResolution, bi->VerticalResolution);
+    PrintInfo(L"Resolution", str, FALSE, 2, gST->ConOut->Mode->CursorRow + 1);
+    SPrint(str, sizeof(str), L"%d", bi->PixelsPerScanLine);
+    PrintInfo(L"PixelsPerScanLine", str, FALSE, 2, gST->ConOut->Mode->CursorRow + 1);
+    PrintInfo(L"PixelFormat", bi->PixelFormat == 1 ? L"BGR" : L"RGB", TRUE, 2, gST->ConOut->Mode->CursorRow + 1);
+
+    // --- Секция 5: Прочие адреса ---
+    Print(L"\n");
+    SetColor(COLOR_NEON_PINK, COLOR_BLACK);
+    Print(L"+==========================================================================+\n");
+    Print(L"|                        SYSTEM TABLE POINTERS                           |\n");
+    Print(L"+==========================================================================+\n\n");
+    SPrint(str, sizeof(str), L"0x%lx", bi->RsdpAddress);
+    PrintInfo(L"RSDP", bi->RsdpAddress ? str : L"Not Found", bi->RsdpAddress != 0, 2, gST->ConOut->Mode->CursorRow + 1);
+    SPrint(str, sizeof(str), L"0x%lx", bi->SmbiosAddress);
+    PrintInfo(L"SMBIOS", bi->SmbiosAddress ? str : L"Not Found", bi->SmbiosAddress != 0, 2, gST->ConOut->Mode->CursorRow + 1);
+    if (bi->FATImageBase) {
+        SPrint(str, sizeof(str), L"0x%lx (%ld MB)", bi->FATImageBase, bi->FATImageSize / 1024 / 1024);
+        PrintInfo(L"FAT Image", str, TRUE, 2, gST->ConOut->Mode->CursorRow + 1);
+    } else {
+        PrintInfo(L"FAT Image", L"Not loaded", FALSE, 2, gST->ConOut->Mode->CursorRow + 1);
+    }
+
+    // Ожидание перед продолжением
+    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 2, gST->ConOut->Mode->CursorRow + 2);
+    SetColor(COLOR_NEON_PINK, COLOR_BLACK);
+    Print(L"Press ENTER to continue boot process...");
+    while (1) {
+        while (uefi_call_wrapper(gST->ConIn->ReadKeyStroke, 2, gST->ConIn, &Key) != EFI_SUCCESS);
+        if (Key.UnicodeChar == L'\r' || Key.UnicodeChar == L'\n')
+            break;
+    }
 }
 
 // ==================== РЕЖИМ ДОПОЛНИТЕЛЬНОЙ ИНФОРМАЦИИ (I) ====================
@@ -208,6 +352,13 @@ VOID ShowAdvancedInfo(EFI_LOADED_IMAGE *LoadedImage, EFI_FILE_HANDLE KernelFile,
 
 // ==================== БЫСТРАЯ ЗАГРУЗКА (FAST MODE) ====================
 VOID FastBoot(BootInfo *bi, EFI_HANDLE ImageHandle) {
+    // Очищаем экран и выводим сообщение в стиле киберпанк
+    uefi_call_wrapper(gST->ConOut->ClearScreen, 1, gST->ConOut);
+    SetColor(COLOR_DARK_RED, COLOR_BLACK);
+    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 0);
+    Print(L"Loading LufiraOS...\n");
+    uefi_call_wrapper(gBS->Stall, 1, 500000); // 0.5 сек для эффекта
+    
     // 1. Получить LoadedImage и FS
     EFI_LOADED_IMAGE *LoadedImage;
     EFI_STATUS status = uefi_call_wrapper(gBS->HandleProtocol, 3, ImageHandle, &LoadedImageProtocol, (VOID**)&LoadedImage);
@@ -389,7 +540,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         } else if (Key.UnicodeChar == L'd' || Key.UnicodeChar == L'D') {
             mode = MODE_DEBUG; break;
         } else if (Key.UnicodeChar == L'\r' || Key.UnicodeChar == L'\n') {
-            mode = MODE_NORMAL; break;  // Enter = Normal по умолчанию
+            mode = MODE_NORMAL; break;
         }
     }
     
@@ -502,12 +653,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         bi.PixelsPerScanLine = gop->Mode->Info->PixelsPerScanLine;
         bi.PixelFormat = (gop->Mode->Info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor) ? 1 : 0;
         PrintInfo(L"Pixel Format", bi.PixelFormat == 1 ? L"BGR" : L"RGB", FALSE, 4, 22);
-        
-        if (debug) {
-            uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 23);
-            SetColor(COLOR_NEON_CYAN, COLOR_BLACK);
-            Print(L"  FrameBufferBase: 0x%lx, Size: %ld MB", bi.FrameBufferBase, bi.FrameBufferSize / 1024 / 1024);
-        }
     } else {
         PrintInfo(L"Video Mode", L"Not Available", FALSE, 4, 21);
     }
@@ -526,20 +671,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         if (CompareGuid(&gST->ConfigurationTable[i].VendorGuid, &SmbiosGuid) == 0 ||
             CompareGuid(&gST->ConfigurationTable[i].VendorGuid, &Smbios3Guid) == 0)
             bi.SmbiosAddress = (uint64_t)gST->ConfigurationTable[i].VendorTable;
-    }
-    
-    if (debug) {
-        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 25);
-        SetColor(COLOR_NEON_PINK, COLOR_BLACK);
-        Print(L"  --- Configuration Tables Dump ---");
-        for (UINTN i = 0; i < gST->NumberOfTableEntries; i++) {
-            CHAR16 GuidStr[40];
-            GuidToString(GuidStr, &gST->ConfigurationTable[i].VendorGuid);
-            uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 26 + i);
-            Print(L"  %s -> 0x%lx", GuidStr, gST->ConfigurationTable[i].VendorTable);
-        }
-        // Передвигаем оставшийся UI ниже, но лучше просто зарезервировать место; в этом примере мы динамически не смещаем, так как BOX рисовались выше.
-        // При debug выводе будет наложение, но для простоты оставим так.
     }
     
     // ==================== ЗАГРУЗКА ЯДРА ====================
@@ -627,7 +758,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
         }
         if (debug) {
-            // Дополнительно печатаем прогресс в процентах в конце строки
             uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 60, 32);
             SetColor(COLOR_DIM_GRAY, COLOR_BLACK);
             Print(L"%d%%", (TotalLoaded * 100) / bi.KernelSize);
@@ -701,11 +831,19 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
     }
     
+    // ==================== В DEBUG РЕЖИМЕ - ДЕТАЛЬНЫЙ ДАМП ====================
+    if (debug) {
+        DebugDeepDump(&bi, MemoryMap, MemoryMapSize, DescriptorSize);
+        // После дампа очищаем экран для меню загрузки
+        uefi_call_wrapper(gST->ConOut->ClearScreen, 1, gST->ConOut);
+        SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
+    }
+    
     // ==================== ПАНЕЛЬ ЗАПУСКА ====================
     if (debug) {
         // В debug-режиме ждём ENTER или ESC без таймера
-        DrawBox(2, 35, 76, 5, L"Boot Control");
-        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 37);
+        DrawBox(2, 4, 76, 5, L"Boot Control");
+        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 4, 6);
         SetColor(COLOR_NEON_PINK, COLOR_BLACK);
         Print(L"Press ");
         SetColor(COLOR_NEON_CYAN, COLOR_BLACK);
@@ -725,7 +863,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                 PrintColored(L"\nBoot cancelled by user", COLOR_RED, COLOR_BLACK);
                 while(1) __asm__ volatile("hlt");
             }
-            // Можно добавить I для повтора AdvancedInfo, но упростим
         }
     } else {
         // Normal: таймер 5 сек
