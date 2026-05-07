@@ -11,13 +11,17 @@ typedef struct {
     uint32_t HorizontalResolution;
     uint32_t VerticalResolution;
     uint32_t PixelsPerScanLine;
-    uint32_t PixelFormat;  // 0 = RGB, 1 = BGR
-    uint64_t TotalMemory;   // Общая память в байтах
-    uint64_t MemoryMapSize; // Размер карты памяти
-    void* MemoryMap;        // Указатель на карту памяти
-    uint32_t MemoryMapDescriptorSize; // Размер дескриптора
-    uint64_t FATImageBase;   // Адрес образа раздела FAT в памяти
-    uint64_t FATImageSize;   // Размер образа в байтах
+    uint32_t PixelFormat;
+    uint64_t TotalMemory;
+    uint64_t MemoryMapSize;
+    void* MemoryMap;
+    uint32_t MemoryMapDescriptorSize;
+    uint64_t KernelBase;
+    uint64_t KernelSize;
+    uint64_t RsdpAddress;     // ACPI RSDP
+    uint64_t SmbiosAddress;   // SMBIOS
+    uint64_t FATImageBase;    // NEW: base of FAT image
+    uint64_t FATImageSize;    // NEW: size of FAT image
 } BootInfo;
 
 // Глобальные переменные состояния консоли
