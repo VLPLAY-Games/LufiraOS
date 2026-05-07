@@ -253,7 +253,7 @@ void command_trap(void) {
     } else if (token_equals(args, "sti")) {
         asm volatile ("sti");
         printf("\nInterrupt Flag set.\n");
-        printf("(All IRQs are masked by PIC – no external interrupts will be received.)\n");
+        printf("(All IRQs are masked by PIC - no external interrupts will be received.)\n");
     } else if (token_equals(args, "hlt")) {
         printf("\nHalting CPU. (IRQs are masked, so only a reset/NMI can wake it.)\n");
         asm volatile ("hlt");
