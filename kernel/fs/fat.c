@@ -252,7 +252,7 @@ static fat_dir_entry_t* find_entry_in_dir(fat_fs_t *fs, uint32_t dir_cluster,
         }
     } else {
         uint32_t cluster = dir_cluster;
-        while (cluster >= 2 && !is_eoc(fs, cluster)) {
+        while (cluster >= 2) {
             uint8_t *data = (uint8_t*)cluster_to_sector(fs, cluster);
             if (!data) break;
             uint32_t entries_per_cluster = (fs->cluster_size * 512) / 32;
@@ -431,7 +431,7 @@ static uint32_t find_free_cluster(fat_fs_t *fs) {
 }
 
 static void free_cluster_chain(fat_fs_t *fs, uint32_t start) {
-    while (start >= 2 && !is_eoc(fs, start)) {
+    while (start >= 2) {
         uint32_t next = get_fat_entry(fs, start);
         set_fat_entry(fs, start, 0);
         if (is_eoc(fs, next)) break;
@@ -479,7 +479,7 @@ static fat_dir_entry_t* find_free_dir_entry(fat_fs_t *fs, uint32_t parent_cluste
                         *next_entry_ptr = (fat_dir_entry_t*)(data + (i+1)*32);
                     else {
                         uint32_t next = get_fat_entry(fs, cluster);
-                        if (next >= 2 && next < 0xFFF8)
+                        if (next >= 2 && !is_eoc(fs, next))
                             *next_entry_ptr = (fat_dir_entry_t*)cluster_to_sector(fs, next);
                         else if (e->name[0] == 0x00)
                             continue;   /* no terminator space, skip this 0x00 */
