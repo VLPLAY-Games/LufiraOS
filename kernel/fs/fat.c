@@ -125,33 +125,90 @@ static uint32_t get_fat_entry(fat_fs_t *fs, uint32_t cluster) {
     return entry;
 }
 
-static void set_fat_entry(fat_fs_t *fs, uint32_t cluster, uint32_t value) {
-    if (cluster < 2) return;
-    uint8_t *fat = fs->image + fs->fat_start * 512;
-    uint32_t offset;
-    switch (fs->fat_type) {
-        case 12:
-            offset = cluster + (cluster >> 1);
-            if (cluster & 1) {
-                fat[offset] = (fat[offset] & 0x0F) | ((value & 0xF) << 4);
-                fat[offset+1] = (value >> 4) & 0xFF;
-            } else {
+static int is_eoc(fat_fs_t *fs, uint32_t cluster) {
+
+    if (fs->fat_type == 12)
+        return cluster >= 0xFF8;
+
+    if (fs->fat_type == 16)
+        return cluster >= 0xFFF8;
+
+    return cluster >= 0x0FFFFFF8;
+}
+
+static void set_fat_entry(fat_fs_t *fs,
+                          uint32_t cluster,
+                          uint32_t value)
+{
+    if (cluster < 2)
+        return;
+
+    uint32_t sectors_per_fat =
+        (fs->fat_type == 32)
+            ? read_le32((uint8_t*)&fs->bpb.sectors_per_fat_32)
+            : fs->bpb.sectors_per_fat_16;
+
+    for (uint32_t fat_index = 0;
+         fat_index < fs->bpb.num_fats;
+         fat_index++)
+    {
+        uint8_t *fat =
+            fs->image +
+            (fs->fat_start +
+             fat_index * sectors_per_fat) * 512;
+
+        uint32_t offset;
+
+        switch (fs->fat_type) {
+
+            case 12:
+
+                offset = cluster + (cluster >> 1);
+
+                if (cluster & 1) {
+
+                    fat[offset] =
+                        (fat[offset] & 0x0F) |
+                        ((value & 0xF) << 4);
+
+                    fat[offset + 1] =
+                        (value >> 4) & 0xFF;
+
+                } else {
+
+                    fat[offset] = value & 0xFF;
+
+                    fat[offset + 1] =
+                        (fat[offset + 1] & 0xF0) |
+                        ((value >> 8) & 0x0F);
+                }
+
+                break;
+
+            case 16:
+
+                offset = cluster * 2;
+
                 fat[offset] = value & 0xFF;
-                fat[offset+1] = (fat[offset+1] & 0xF0) | ((value >> 8) & 0x0F);
-            }
-            break;
-        case 16:
-            offset = cluster * 2;
-            fat[offset] = value & 0xFF;
-            fat[offset+1] = (value >> 8) & 0xFF;
-            break;
-        case 32:
-            offset = cluster * 4;
-            fat[offset] = value & 0xFF;
-            fat[offset+1] = (value >> 8) & 0xFF;
-            fat[offset+2] = (value >> 16) & 0xFF;
-            fat[offset+3] = (value >> 24) & 0xFF;
-            break;
+                fat[offset + 1] =
+                    (value >> 8) & 0xFF;
+
+                break;
+
+            case 32:
+
+                offset = cluster * 4;
+
+                fat[offset] = value & 0xFF;
+                fat[offset + 1] =
+                    (value >> 8) & 0xFF;
+                fat[offset + 2] =
+                    (value >> 16) & 0xFF;
+                fat[offset + 3] =
+                    (value >> 24) & 0xFF;
+
+                break;
+        }
     }
 }
 
@@ -195,7 +252,7 @@ static fat_dir_entry_t* find_entry_in_dir(fat_fs_t *fs, uint32_t dir_cluster,
         }
     } else {
         uint32_t cluster = dir_cluster;
-        while (cluster >= 2 && cluster < 0xFFF8) {
+        while (cluster >= 2 && !is_eoc(fs, cluster)) {
             uint8_t *data = (uint8_t*)cluster_to_sector(fs, cluster);
             if (!data) break;
             uint32_t entries_per_cluster = (fs->cluster_size * 512) / 32;
@@ -272,7 +329,7 @@ int fat_read_file(fat_fs_t *fs, const char *filename, void *buffer, uint32_t siz
         remaining -= to_copy;
         if (remaining == 0) break;
         cluster = get_fat_entry(fs, cluster);
-        if (cluster >= 0xFFF8) break;
+        if (is_eoc(fs, cluster)) break;
     }
     return size - remaining;
 }
@@ -343,7 +400,7 @@ int fat_readdir(fat_dir_t *dir, fat_dir_entry_t *entry) {
         } else {
             if (dir->entries_left_in_dir == 0) {
                 uint32_t next = get_fat_entry(dir->fs, dir->current_cluster);
-                if (next >= 0xFFF8) return 0;
+                if (is_eoc(dir->fs, next)) return 0;
                 dir->current_cluster = next;
                 dir->entry_index_in_cluster = 0;
                 dir->entries_left_in_dir = dir->entries_per_cluster;
@@ -374,10 +431,10 @@ static uint32_t find_free_cluster(fat_fs_t *fs) {
 }
 
 static void free_cluster_chain(fat_fs_t *fs, uint32_t start) {
-    while (start >= 2 && start < 0xFFF8) {
+    while (start >= 2 && !is_eoc(fs, start)) {
         uint32_t next = get_fat_entry(fs, start);
         set_fat_entry(fs, start, 0);
-        if (next >= 0xFFF8) break;
+        if (is_eoc(fs, next)) break;
         start = next;
     }
 }
@@ -431,7 +488,7 @@ static fat_dir_entry_t* find_free_dir_entry(fat_fs_t *fs, uint32_t parent_cluste
                 }
             }
             uint32_t next = get_fat_entry(fs, cluster);
-            if (next >= 0xFFF8) break;
+            if (is_eoc(fs, next))break;
             cluster = next;
         }
         return NULL;
@@ -456,7 +513,10 @@ int fat_mkdir(fat_fs_t *fs, uint32_t parent_cluster, const char *name) {
     uint32_t new_cluster = find_free_cluster(fs);
     if (!new_cluster) return -4;
 
-    set_fat_entry(fs, new_cluster, 0xFFFF);
+    if (fs->fat_type == 32)
+        set_fat_entry(fs, new_cluster, 0x0FFFFFFF);
+    else
+        set_fat_entry(fs, new_cluster, 0xFFFF);
     uint8_t *data = (uint8_t*)cluster_to_sector(fs, new_cluster);
     memset(data, 0, 512 * fs->cluster_size);
 
