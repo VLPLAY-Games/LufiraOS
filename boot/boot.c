@@ -634,69 +634,50 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     }
 
     if (!EFI_ERROR(status) && BlockIo && BlockIo->Media) {
-
         UINTN BlockSize = BlockIo->Media->BlockSize;
-        UINT64 VolumeSectors = 0;
-        UINT8 BootSector[512];
+        UINT64 MaxImageSize = 256ULL * 1024 * 1024;
+        UINT64 CopySize = (BlockIo->Media->LastBlock + 1) * BlockSize;
+        if (CopySize > MaxImageSize)
+            CopySize = MaxImageSize;
+
+        UINTN Pages = (UINTN)((CopySize + 4095) / 4096);
+        EFI_PHYSICAL_ADDRESS FATBase = 0;
+        status = uefi_call_wrapper(gBS->AllocatePages, 4,
+            AllocateAnyPages, EfiLoaderData, Pages, &FATBase);
 
         if (!EFI_ERROR(status)) {
-            if (BootSector[510] == 0x55 && BootSector[511] == 0xAA) {
-                UINT16 TotalSectors16 = *(UINT16*)(BootSector + 19);
-                UINT32 TotalSectors32 = *(UINT32*)(BootSector + 32);
-                VolumeSectors = TotalSectors16 ? TotalSectors16 : TotalSectors32;
-            }
-            VolumeSectors = BlockIo->Media->LastBlock + 1;
+            UINTN MaxBlocksPerTransfer = 1024;
+            UINTN TotalBlocks = (UINTN)((CopySize + BlockSize - 1) / BlockSize);
+            UINT8* Buffer = (UINT8*)FATBase;
 
-            // Ограничим размер образа (например, весь диск, но не более 256 МБ)
-            UINT64 MaxImageSize = 256ULL * 1024 * 1024;
-            UINT64 CopySize = (BlockIo->Media->LastBlock + 1) * BlockSize;
-
-            if (CopySize > MaxImageSize)
-                CopySize = MaxImageSize;
-
-            UINTN Pages = (CopySize + 4095) / 4096;
-            EFI_PHYSICAL_ADDRESS FATBase = 0;
-            status = uefi_call_wrapper(gBS->AllocatePages, 4,
-                AllocateAnyPages, EfiLoaderData, Pages, &FATBase);
-
-            if (!EFI_ERROR(status)) {
-                // Быстрое копирование: читаем по 128 блоков (64 КБ) за вызов
-                UINTN MaxBlocksPerTransfer = 1024;
-                UINTN TotalBlocks = (CopySize + BlockSize - 1) / BlockSize;
-                UINT8* Buffer = (UINT8*)FATBase;
-
-                for (UINTN i = 0; i < TotalBlocks; i += MaxBlocksPerTransfer) {
-                    UINTN BlocksNow = (TotalBlocks - i) > MaxBlocksPerTransfer ?
-                                     MaxBlocksPerTransfer : (TotalBlocks - i);
-                    status = uefi_call_wrapper(BlockIo->ReadBlocks, 5, BlockIo,
-                        BlockIo->Media->MediaId, i,
-                        BlocksNow * BlockSize,
-                        Buffer + ((UINT64)i * BlockSize));
-                    if (EFI_ERROR(status)) {
-                        bi.FATImageBase = 0;
-                        bi.FATImageSize = 0;
-                        break;
-                    }
-                }
-
-                if (!EFI_ERROR(status)) {
-                    bi.FATImageBase = FATBase;
-                    bi.FATImageSize = CopySize;
-                } else {
+            for (UINTN i = 0; i < TotalBlocks; i += MaxBlocksPerTransfer) {
+                UINTN BlocksNow = (TotalBlocks - i) > MaxBlocksPerTransfer ?
+                                MaxBlocksPerTransfer : (TotalBlocks - i);
+                status = uefi_call_wrapper(BlockIo->ReadBlocks, 5, BlockIo,
+                    BlockIo->Media->MediaId, i,
+                    BlocksNow * BlockSize,
+                    Buffer + ((UINT64)i * BlockSize));
+                if (EFI_ERROR(status)) {
                     bi.FATImageBase = 0;
                     bi.FATImageSize = 0;
-                    PrintColored(L"ERROR: Failed to read full FAT image\n",
-                                 COLOR_RED, COLOR_BLACK);
+                    break;
                 }
+            }
+
+            if (!EFI_ERROR(status)) {
+                bi.FATImageBase = FATBase;
+                bi.FATImageSize = CopySize;
             } else {
                 bi.FATImageBase = 0;
                 bi.FATImageSize = 0;
-                PrintColored(L"ERROR: Cannot allocate memory for FAT image\n",
-                             COLOR_RED, COLOR_BLACK);
+                PrintColored(L"ERROR: Failed to read full FAT image\n",
+                            COLOR_RED, COLOR_BLACK);
             }
         } else {
             bi.FATImageBase = 0;
             bi.FATImageSize = 0;
+            PrintColored(L"ERROR: Cannot allocate memory for FAT image\n",
+                        COLOR_RED, COLOR_BLACK);
         }
     } else {
         bi.FATImageBase = 0;
