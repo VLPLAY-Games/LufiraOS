@@ -168,9 +168,10 @@ void process_keypress(int key) {
 // ============ НОВЫЙ ОБРАБОТЧИК ПРЕРЫВАНИЯ IRQ1 ============
 void keyboard_irq_handler(void) {
     uint8_t status = inb(KEYBOARD_STATUS_PORT);
-    if (status & 1) {                           // есть данные
-        uint8_t scancode = keyboard_read_scancode();
-        int key = keyboard_scancode_to_key(scancode);
-        process_keypress(key);
-    }
+    if (!(status & 1))
+        return;
+
+    uint8_t scancode = keyboard_read_scancode();
+    int key = keyboard_scancode_to_key(scancode);
+    process_keypress(key);
 }

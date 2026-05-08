@@ -187,27 +187,14 @@ void mouse_irq_handler(void) {
     int dx = packet[1];
     int dy = packet[2];
 
-    if (packet[0] & 0x10)
-        dx |= 0xFFFFFF00;
-
-    if (packet[0] & 0x20)
-        dy |= 0xFFFFFF00;
+    if (packet[0] & 0x10) dx |= 0xFFFFFF00;
+    if (packet[0] & 0x20) dy |= 0xFFFFFF00;
 
     mouse_x += dx;
     mouse_y -= dy;
 
-    if (mouse_x < 0)
-        mouse_x = 0;
-    if (mouse_y < 0)
-        mouse_y = 0;
+    if (mouse_x < 0) mouse_x = 0;
+    if (mouse_y < 0) mouse_y = 0;
 
     mouse_buttons = packet[0] & 0x07;
-
-    current_color = convert_color(0xAAAAAA);
-    printf("[Mouse] X=%4d Y=%4d Buttons=%d%d%d\r",
-           mouse_x, mouse_y,
-           (mouse_buttons & 1) ? 1 : 0,
-           (mouse_buttons & 2) ? 1 : 0,
-           (mouse_buttons & 4) ? 1 : 0);
-    current_color = convert_color(0xFFFFFF);
 }

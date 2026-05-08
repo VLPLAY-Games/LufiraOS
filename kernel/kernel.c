@@ -18,6 +18,19 @@ static inline void outb(uint16_t port, uint8_t val) {
     asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 
+void ps2_poll(void) {
+    uint8_t status = inb(0x64);
+
+    if (!(status & 1))
+        return;                 // данных нет
+
+    if (status & 0x20) {
+        mouse_irq_handler();    // байт от мыши
+    } else {
+        keyboard_irq_handler(); // байт от клавиатуры
+    }
+}
+
 // PIC
 #define PIC1         0x20
 #define PIC2         0xA0
@@ -87,7 +100,7 @@ void _start(BootInfo* bi) {
     draw_cursor();
 
     while (1) {
-        keyboard_irq_handler();
+        ps2_poll();
         update_cursor();
         __asm__ volatile ("pause");
     }
