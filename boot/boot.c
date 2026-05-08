@@ -152,19 +152,6 @@ VOID ShowSplash(BootMode mode) {
     
     // Рамка из символов псевдографики
     SetColor(COLOR_DARK_RED, COLOR_BLACK);
-    // Верхняя рамка
-    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 0);
-    for (UINTN i = 0; i < cols; i++) Print(L"─");
-    // Нижняя рамка
-    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, rows-1);
-    for (UINTN i = 0; i < cols; i++) Print(L"─");
-    // Боковые рамки
-    for (UINTN r = 1; r < rows-1; r++) {
-        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, r);
-        Print(L"│");
-        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, cols-1, r);
-        Print(L"│");
-    }
 
     // Логотип (6 строк)
     CHAR16 *logo[] = {
@@ -196,6 +183,19 @@ VOID ShowSplash(BootMode mode) {
     
     // Строка загрузки
     PrintCentered(L"LufiraOS is loading...", startRow + 9, COLOR_DIM_GRAY);
+    // --- Анимация загрузки (спиннер) ---
+    UINTN spinnerRow = startRow + 10;          // строка под «loading...»
+    UINTN spinnerCol = cols / 2;               // центр
+    CHAR16 spin[] = L"|/-\\";
+    for (int i = 0; i < 20; i++) {             // 20 * 100 мс = 2 секунды
+        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, spinnerCol, spinnerRow);
+        SetColor(COLOR_NEON_CYAN, COLOR_BLACK);
+        Print(L"%c", spin[i % 4]);
+        uefi_call_wrapper(gBS->Stall, 1, 100000);
+    }
+    // Стираем спиннер
+    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, spinnerCol, spinnerRow);
+    Print(L" ");
 }
 
 
@@ -717,7 +717,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     
     // Показываем заставку с большим логотипом
     ShowSplash(mode);
-    uefi_call_wrapper(gBS->Stall, 1, 2000000);  // 2 секунды заставка
     
     // Очищаем экран для Normal/Debug
     SetColor(COLOR_BLACK, COLOR_BLACK);
