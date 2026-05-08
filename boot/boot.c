@@ -60,7 +60,7 @@ VOID SetColor(UINTN Foreground, UINTN Background) {
 VOID PrintColored(CONST CHAR16 *String, UINTN Foreground, UINTN Background) {
     SetColor(Foreground, Background);
     Print(String);
-    SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
+    SetColor(COLOR_WHITE, COLOR_BLACK);  // основной текст теперь ярче
 }
 
 VOID GetConsoleSize(UINTN *Cols, UINTN *Rows) {
@@ -103,11 +103,11 @@ VOID ShowSplash(BootMode mode) {
     if (mode == MODE_DEBUG) {
         PrintCentered(L"[ DEBUG MODE ]", startRow + 7, COLOR_NEON_PINK);
     }
-    PrintCentered(L"LufiraOS is loading...", startRow + 9, COLOR_DIM_GRAY);
+    // надпись "LufiraOS is loading..." убрана
     
     CHAR16 spin[] = L"|/-\\";
     UINTN spinnerCol = cols / 2;
-    UINTN spinnerRow = startRow + 10;
+    UINTN spinnerRow = startRow + 9;   // спиннер под логотипом
     
     for (int i = 0; i < 20; i++) {
         uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, spinnerCol, spinnerRow);
@@ -170,18 +170,31 @@ VOID QuickBoot(BootInfo *bi, EFI_HANDLE ImageHandle, BootMode mode, BOOLEAN keep
     UINTN cols, rows;
     GetConsoleSize(&cols, &rows);
     UINTN statusRow, spinnerRow;
+    
     if (keepLogo) {
-        statusRow = (rows - 6) / 2 + 12;   // под спиннером заставки
-        spinnerRow = statusRow + 1;
+        // подгоняем строки под положение спиннера после логотипа
+        UINTN logoStart = (rows - 6) / 2;
+        spinnerRow = logoStart + 9;
+        statusRow = logoStart + 11;
     } else {
         uefi_call_wrapper(gST->ConOut->ClearScreen, 1, gST->ConOut);
         if (mode == MODE_SAFE) {
-            PrintCentered(L"[Safe Mode] Loading LufiraOS...", 2, COLOR_DARK_RED);
+            // Safe Mode: просто две строки слева сверху
+            uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 0);
+            SetColor(COLOR_DARK_RED, COLOR_BLACK);
+            Print(L"[Safe mode]");
+            uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 1);
+            Print(L"LufiraOS Loading");
+            statusRow = 3;
+            spinnerRow = 4;
         } else {
-            PrintCentered(L"Loading LufiraOS...", 2, COLOR_DARK_RED);
+            // на случай, если Safe не активирован (не должно случиться)
+            uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 0);
+            SetColor(COLOR_DARK_RED, COLOR_BLACK);
+            Print(L"LufiraOS Loading");
+            statusRow = 2;
+            spinnerRow = 3;
         }
-        statusRow = 4;
-        spinnerRow = 5;
     }
     
     CHAR16 spin[] = L"|/-\\";
@@ -199,21 +212,38 @@ VOID QuickBoot(BootInfo *bi, EFI_HANDLE ImageHandle, BootMode mode, BOOLEAN keep
         } \
     } while(0)
     
+    // Макрос для фатальной ошибки – выводится в левом верхнем углу, спиннер продолжает вращаться
+    #define FATAL_ERROR(msg) do { \
+        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 0); \
+        SetColor(COLOR_RED, COLOR_BLACK); \
+        Print(L"[FATAL] %s", msg); \
+        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 1); \
+        Print(L"System halted. Press any key."); \
+        while(1) { \
+            spinIdx = (spinIdx + 1) % 4; \
+            uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, cols / 2, spinnerRow); \
+            SetColor(COLOR_NEON_CYAN, COLOR_BLACK); \
+            Print(L"%c", spin[spinIdx]); \
+            uefi_call_wrapper(gBS->Stall, 1, 200000); \
+            EFI_INPUT_KEY _key; \
+            if (uefi_call_wrapper(gST->ConIn->ReadKeyStroke, 2, gST->ConIn, &_key) == EFI_SUCCESS) break; \
+        } \
+        while(1) __asm__ volatile("hlt"); \
+    } while(0)
+    
     UPDATE_STATUS(L"Initializing...");
     uefi_call_wrapper(gBS->Stall, 1, 500000);
     
     EFI_LOADED_IMAGE *LoadedImage;
     EFI_STATUS status = uefi_call_wrapper(gBS->HandleProtocol, 3, ImageHandle, &LoadedImageProtocol, (VOID**)&LoadedImage);
     if (EFI_ERROR(status)) {
-        UPDATE_STATUS(L"FATAL: No LoadedImage");
-        while(1) __asm__ volatile("hlt");
+        FATAL_ERROR(L"No LoadedImage");
     }
     
     EFI_FILE_IO_INTERFACE *FileSystem;
     status = uefi_call_wrapper(gBS->HandleProtocol, 3, LoadedImage->DeviceHandle, &FileSystemProtocol, (VOID**)&FileSystem);
     if (EFI_ERROR(status)) {
-        UPDATE_STATUS(L"FATAL: No FileSystem");
-        while(1) __asm__ volatile("hlt");
+        FATAL_ERROR(L"No FileSystem");
     }
     
     EFI_FILE_HANDLE Root;
@@ -223,8 +253,7 @@ VOID QuickBoot(BootInfo *bi, EFI_HANDLE ImageHandle, BootMode mode, BOOLEAN keep
     EFI_FILE_HANDLE KernelFile;
     status = uefi_call_wrapper(Root->Open, 5, Root, &KernelFile, L"kernel.bin", EFI_FILE_MODE_READ, 0);
     if (EFI_ERROR(status)) {
-        UPDATE_STATUS(L"FATAL: kernel.bin not found");
-        while(1) __asm__ volatile("hlt");
+        FATAL_ERROR(L"kernel.bin not found");
     }
     
     EFI_FILE_INFO *KernelFileInfo;
@@ -241,8 +270,7 @@ VOID QuickBoot(BootInfo *bi, EFI_HANDLE ImageHandle, BootMode mode, BOOLEAN keep
     if (EFI_ERROR(status))
         uefi_call_wrapper(gBS->AllocatePages, 4, AllocateAnyPages, EfiLoaderData, Pages, &KernelBase);
     if (EFI_ERROR(status)) {
-        UPDATE_STATUS(L"FATAL: Cannot allocate kernel memory");
-        while(1) __asm__ volatile("hlt");
+        FATAL_ERROR(L"Cannot allocate kernel memory");
     }
     bi->KernelBase = KernelBase;
     
@@ -327,7 +355,7 @@ VOID QuickBoot(BootInfo *bi, EFI_HANDLE ImageHandle, BootMode mode, BOOLEAN keep
     UPDATE_STATUS(L"Starting kernel...");
     uefi_call_wrapper(gBS->Stall, 1, 1000000);
     
-    // Очистка статуса перед переходом
+    // Очистка статуса перед передачей управления
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, statusRow);
     SetColor(COLOR_BLACK, COLOR_BLACK);
     for (UINTN i = 0; i < cols; i++) Print(L" ");
@@ -346,23 +374,23 @@ VOID QuickBoot(BootInfo *bi, EFI_HANDLE ImageHandle, BootMode mode, BOOLEAN keep
 VOID DebugBoot(BootInfo *bi, EFI_HANDLE ImageHandle) {
     uefi_call_wrapper(gST->ConOut->ClearScreen, 1, gST->ConOut);
     SetColor(COLOR_WHITE, COLOR_BLACK);
-    Print(L"LufiraOS Debug Mode - Linux-style boot\n\n");
+    Print(L"LufiraOS Debug Mode\n\n");
     
     #define LOG_OK(fmt, ...) do { \
         SetColor(COLOR_NEON_GREEN, COLOR_BLACK); Print(L"[  OK  ] "); \
-        SetColor(COLOR_LIGHTGRAY, COLOR_BLACK); Print(fmt, ##__VA_ARGS__); Print(L"\n"); \
+        SetColor(COLOR_WHITE, COLOR_BLACK); Print(fmt, ##__VA_ARGS__); Print(L"\n"); \
     } while(0)
     #define LOG_FAIL(fmt, ...) do { \
         SetColor(COLOR_RED, COLOR_BLACK); Print(L"[FAILED] "); \
-        SetColor(COLOR_LIGHTGRAY, COLOR_BLACK); Print(fmt, ##__VA_ARGS__); Print(L"\n"); \
+        SetColor(COLOR_WHITE, COLOR_BLACK); Print(fmt, ##__VA_ARGS__); Print(L"\n"); \
     } while(0)
     #define LOG_WARN(fmt, ...) do { \
         SetColor(COLOR_YELLOW, COLOR_BLACK); Print(L"[ WARN ] "); \
-        SetColor(COLOR_LIGHTGRAY, COLOR_BLACK); Print(fmt, ##__VA_ARGS__); Print(L"\n"); \
+        SetColor(COLOR_WHITE, COLOR_BLACK); Print(fmt, ##__VA_ARGS__); Print(L"\n"); \
     } while(0)
     #define LOG_INFO(fmt, ...) do { \
         SetColor(COLOR_NEON_CYAN, COLOR_BLACK); Print(L"  "); \
-        SetColor(COLOR_LIGHTGRAY, COLOR_BLACK); Print(fmt, ##__VA_ARGS__); Print(L"\n"); \
+        SetColor(COLOR_WHITE, COLOR_BLACK); Print(fmt, ##__VA_ARGS__); Print(L"\n"); \
     } while(0)
     
     // === Сбор информации ===
@@ -482,6 +510,7 @@ VOID DebugBoot(BootInfo *bi, EFI_HANDLE ImageHandle) {
     bi->MemoryMapDescriptorSize = DescriptorSize;
     
     // FAT
+    LOG_INFO(L"Loading FAT image...");
     EFI_BLOCK_IO_PROTOCOL *BlockIo = NULL;
     EFI_GUID BlockIoGuid = EFI_BLOCK_IO_PROTOCOL_GUID;
     status = uefi_call_wrapper(gBS->HandleProtocol, 3, LoadedImage->DeviceHandle, &BlockIoGuid, (VOID**)&BlockIo);
@@ -540,7 +569,7 @@ VOID DebugBoot(BootInfo *bi, EFI_HANDLE ImageHandle) {
             case EfiPalCode:              typeStr = L"PAL Code"; break;
             default:                      typeStr = L"Unknown"; break;
         }
-        SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
+        SetColor(COLOR_WHITE, COLOR_BLACK);
         Print(L"%-38s %016lx %14ld %016lx\n", typeStr, d->PhysicalStart, d->NumberOfPages, d->Attribute);
     }
     
@@ -557,7 +586,7 @@ VOID DebugBoot(BootInfo *bi, EFI_HANDLE ImageHandle) {
     for (UINTN i = 0; i < gST->NumberOfTableEntries; i++) {
         CHAR16 guidStr[40];
         GuidToString(guidStr, &gST->ConfigurationTable[i].VendorGuid);
-        SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
+        SetColor(COLOR_WHITE, COLOR_BLACK);
         Print(L"  %2d %-37s %016lx\n", i, guidStr, gST->ConfigurationTable[i].VendorTable);
     }
     
@@ -611,7 +640,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     
     SetColor(COLOR_BLACK, COLOR_BLACK);
     uefi_call_wrapper(gST->ConOut->ClearScreen, 1, gST->ConOut);
-    SetColor(COLOR_LIGHTGRAY, COLOR_BLACK);
+    SetColor(COLOR_WHITE, COLOR_BLACK);
     
     uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 2);
     SetColor(COLOR_NEON_PINK, COLOR_BLACK);
@@ -653,7 +682,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     if (mode == MODE_NORMAL) {
         BootInfo bi = {0};
         ShowSplash(MODE_NORMAL);
-        QuickBoot(&bi, ImageHandle, MODE_NORMAL, TRUE, TRUE);   // keepLogo=TRUE, animateSpinner=TRUE
+        QuickBoot(&bi, ImageHandle, MODE_NORMAL, TRUE, TRUE);
     } else if (mode == MODE_SAFE) {
         BootInfo bi = {0};
         QuickBoot(&bi, ImageHandle, MODE_SAFE, FALSE, TRUE);
