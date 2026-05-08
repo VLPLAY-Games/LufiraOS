@@ -9,6 +9,7 @@
 static uint8_t *bitmap = NULL;
 static uint64_t total_pages = 0;
 static uint64_t used_pages = 0;
+static uint64_t next_free_page = 256;
 
 // Внутренние функции работы с bitmap (очень простые)
 static inline void bitmap_set(uint64_t page) {
@@ -21,20 +22,6 @@ static inline void bitmap_clear(uint64_t page) {
 
 static inline int bitmap_test(uint64_t page) {
     return (bitmap[page / BITMAP_ENTRY_SIZE] & (1 << (page % BITMAP_ENTRY_SIZE))) != 0;
-}
-
-static uint64_t find_first_free_pages(uint64_t num) {
-    uint64_t start = 0, count = 0;
-    for (uint64_t i = 0; i < total_pages; i++) {
-        if (!bitmap_test(i)) {
-            if (count == 0) start = i;
-            count++;
-            if (count == num) return start;
-        } else {
-            count = 0;
-        }
-    }
-    return (uint64_t)-1;
 }
 
 // Первый проход: подсчёт максимального числа страниц и выбор места для bitmap
@@ -172,11 +159,20 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
 }
 
 uint64_t pmm_alloc_page(void) {
-    uint64_t page = find_first_free_pages(1);
-    if (page == (uint64_t)-1) return 0;
-    bitmap_set(page);
-    used_pages++;
-    return page * PAGE_SIZE;
+    for (uint64_t i = next_free_page; i < total_pages; i++) {
+
+        if (!bitmap_test(i)) {
+
+            bitmap_set(i);
+            used_pages++;
+
+            next_free_page = i + 1;
+
+            return i * PAGE_SIZE;
+        }
+    }
+
+    return 0;
 }
 
 void pmm_free_page(uint64_t phys) {
