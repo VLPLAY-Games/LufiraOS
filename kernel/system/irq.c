@@ -34,6 +34,9 @@ void irq_handler(uint64_t vector) {
         case 1:                     // клавиатура
             keyboard_irq_handler();
             break;
+        case 12:                    // мышь PS/2
+            mouse_irq_handler();
+            break;
         default:
             break;
     }
@@ -75,4 +78,5 @@ void irq_disable(uint8_t irq) {
 void irq_init(void) {
     irq_enable(0);   // таймер
     irq_enable(1);   // клавиатура
+    irq_enable(12);   // mouse
 }

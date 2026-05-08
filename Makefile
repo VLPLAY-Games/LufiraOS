@@ -49,6 +49,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/kernel.c \
     $(KERNEL_DIR)/drivers/console.c \
     $(KERNEL_DIR)/drivers/keyboard.c \
+	$(KERNEL_DIR)/drivers/mouse.c \
     $(KERNEL_DIR)/shell/shell.c \
     $(KERNEL_DIR)/system/commands.c \
     $(KERNEL_DIR)/system/gdt.c \

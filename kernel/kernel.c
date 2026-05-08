@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include "drivers/keyboard.h"
+#include "drivers/mouse.h"
 #include "drivers/console.h"
 #include "shell/shell.h"
 #include "system/gdt.h"
@@ -71,9 +72,11 @@ void _start(BootInfo* bi) {
 
     display_system_info(bi);
     keyboard_init();
+    mouse_init();
 
     current_color = convert_color(0x55FF55);
     printf("\n Keyboard: READY\n");
+    printf(" Mouse: READY\n");
     current_color = convert_color(0x00AAFF);
     printf("\n================================================\n");
     printf(" Type 'help' for available commands\n");
