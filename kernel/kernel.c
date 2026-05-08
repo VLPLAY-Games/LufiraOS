@@ -1,12 +1,15 @@
 #include <stdint.h>
 #include <stdarg.h>
+#include "system/pmm.h"
+#include "system/paging.h"
+#include "system/heap.h"
 #include "drivers/keyboard.h"
 #include "drivers/mouse.h"
 #include "drivers/console.h"
 #include "shell/shell.h"
 #include "system/gdt.h"
 #include "system/idt.h"
-#include "fs/fat.h"               // <-- добавлено
+#include "fs/fat.h"
 
 // Базовые функции для портов
 static inline uint8_t inb(uint16_t port) {
@@ -68,6 +71,16 @@ void _start(BootInfo* bi) {
     gdt_init();
     idt_init();
     pic_remap();                   // маскируем все IRQ от PIC
+
+    printf("A\n");
+    pmm_init(bi->MemoryMap, bi->MemoryMapSize, bi->MemoryMapDescriptorSize,
+                bi->KernelBase, bi->KernelSize);
+    printf("B\n");
+    paging_init();
+    printf("C\n");
+    heap_init();
+    printf("D\n");
+
 
     // Инициализация FAT, если образ передан
     if (bi->FATImageBase && bi->FATImageSize) {

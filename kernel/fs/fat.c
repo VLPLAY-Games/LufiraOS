@@ -1,5 +1,6 @@
 #include "fat.h"
 #include "../system/disk.h"
+#include "../system/heap.h"
 #include <stddef.h>
 
 static void* memcpy(void* dest, const void* src, unsigned int n) {
@@ -71,9 +72,6 @@ static void mark_fat_sector_dirty(fat_fs_t *fs, uint32_t cluster) {
 }
 
 /* ======== Инициализация FAT с выделением dirty‑map ======== */
-#define MAX_DIRTY_MAP_BYTES 32768   // хватит на образ до 256 МБ
-
-static uint8_t dirty_map_storage[MAX_DIRTY_MAP_BYTES];
 
 int fat_init(fat_fs_t *fs, void *image, uint32_t image_size) {
     if (!image || image_size < 512) return -1;
@@ -132,8 +130,8 @@ int fat_init(fat_fs_t *fs, void *image, uint32_t image_size) {
 
     /* Инициализация dirty‑карты */
     uint32_t map_size = (total_sec + 7) / 8;
-    if (map_size > MAX_DIRTY_MAP_BYTES) return -3;
-    fs->dirty_map = dirty_map_storage;
+    fs->dirty_map = (uint8_t*)kmalloc(map_size);
+    if (!fs->dirty_map) return -3;       // не удалось выделить память
     fs->dirty_map_size = map_size;
     memset(fs->dirty_map, 0, map_size);
 

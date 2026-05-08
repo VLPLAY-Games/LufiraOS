@@ -56,7 +56,10 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/system/idt.c \
     $(KERNEL_DIR)/system/irq.c \
 	$(KERNEL_DIR)/system/disk.c \
-    $(KERNEL_DIR)/fs/fat.c
+    $(KERNEL_DIR)/fs/fat.c \
+	$(KERNEL_DIR)/system/pmm.c \
+    $(KERNEL_DIR)/system/paging.c \
+    $(KERNEL_DIR)/system/heap.c
 
 KERNEL_ASM_SOURCES := \
     $(KERNEL_DIR)/system/interrupts.S
