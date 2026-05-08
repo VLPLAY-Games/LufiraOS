@@ -10,6 +10,7 @@
 #include "system/gdt.h"
 #include "system/idt.h"
 #include "fs/fat.h"
+#include "system/irq.h"
 
 // Базовые функции для портов
 static inline uint8_t inb(uint16_t port) {
@@ -19,19 +20,6 @@ static inline uint8_t inb(uint16_t port) {
 }
 static inline void outb(uint16_t port, uint8_t val) {
     asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
-}
-
-void ps2_poll(void) {
-    uint8_t status = inb(0x64);
-
-    if (!(status & 1))
-        return;                 // данных нет
-
-    if (status & 0x20) {
-        mouse_irq_handler();    // байт от мыши
-    } else {
-        keyboard_irq_handler(); // байт от клавиатуры
-    }
 }
 
 // PIC
@@ -72,14 +60,10 @@ void _start(BootInfo* bi) {
     idt_init();
     pic_remap();                   // маскируем все IRQ от PIC
 
-    printf("A\n");
     pmm_init(bi->MemoryMap, bi->MemoryMapSize, bi->MemoryMapDescriptorSize,
                 bi->KernelBase, bi->KernelSize);
-    printf("B\n");
     paging_init();
-    printf("C\n");
     heap_init();
-    printf("D\n");
 
 
     // Инициализация FAT, если образ передан
@@ -99,6 +83,8 @@ void _start(BootInfo* bi) {
     display_system_info(bi);
     keyboard_init();
     mouse_init();
+    irq_init();
+    asm volatile("sti");
 
     current_color = convert_color(0x55FF55);
     printf("\n Keyboard: READY\n");
@@ -113,8 +99,6 @@ void _start(BootInfo* bi) {
     draw_cursor();
 
     while (1) {
-        ps2_poll();
-        update_cursor();
-        __asm__ volatile ("pause");
+        asm volatile("hlt");
     }
 }
