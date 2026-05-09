@@ -318,10 +318,21 @@ void put_char(char c) {
     if (c == '\n') {
         current_x = 0;
         current_y++;
+    } else if (c == '\r') { // Carriage return - возврат в начало строки
+        current_x = 0;
     } else if (c == '\b') { // Backspace
         if (current_x > 0) {
             current_x--;
             put_char_graphic(' ', current_x, current_y, current_color, current_bg_color);
+        }
+    } else if (c == '\t') { // Tab - 4 пробела
+        for (int i = 0; i < 4; i++) {
+            put_char_graphic(' ', current_x, current_y, current_color, current_bg_color);
+            current_x++;
+            if (current_x >= screen_width_chars) {
+                current_x = 0;
+                current_y++;
+            }
         }
     } else {
         put_char_graphic(c, current_x, current_y, current_color, current_bg_color);

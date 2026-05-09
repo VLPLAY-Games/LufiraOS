@@ -11,6 +11,8 @@
 #include "system/idt.h"
 #include "fs/fat.h"
 #include "system/irq.h"
+#include "system/log.h"
+
 
 // Базовые функции для портов
 static inline uint8_t inb(uint16_t port) {
@@ -56,56 +58,108 @@ void _start(BootInfo* bi) {
     asm volatile ("cli");
 
     initialize_console(bi);
+    
+    // ========== РАННЯЯ ИНИЦИАЛИЗАЦИЯ ==========
+    LOG_PENDING("Initializing GDT...");
     gdt_init();
+    LOG_DONE_OK("GDT initialized");
+    
+    LOG_PENDING("Initializing IDT...");
     idt_init();
-    pic_remap();                   // маскируем все IRQ от PIC
+    LOG_DONE_OK("IDT initialized");
+    
+    LOG_PENDING("Remapping PIC...");
+    pic_remap();
+    LOG_DONE_OK("PIC remapped");
 
+    // ========== МЕНЕДЖЕРЫ ПАМЯТИ (со своим выводом) ==========
     pmm_init(bi->MemoryMap, bi->MemoryMapSize, bi->MemoryMapDescriptorSize,
                 bi->KernelBase, bi->KernelSize);
     paging_init(bi);
     heap_init();
 
-
-    // Инициализация FAT, если образ передан
+    // ========== ФАЙЛОВАЯ СИСТЕМА ==========
     if (bi->FATImageBase && bi->FATImageSize) {
+        LOG_PENDING("Mounting FAT filesystem...");
         if (fat_init(&fatfs, (void*)bi->FATImageBase, bi->FATImageSize) == 0) {
-            current_color = convert_color(0x55FF55);
-            printf("\n FAT filesystem mounted.\n");
+            LOG_DONE_OK("FAT filesystem mounted");
         } else {
-            current_color = convert_color(0xFF5555);
-            printf("\n FAT mount failed.\n");
+            LOG_DONE_FAIL("FAT mount failed");
         }
     } else {
-        current_color = convert_color(0xFF5555);
-        printf("\n No FAT image provided.\n");
+        LOG_FAIL("No FAT image provided");
     }
 
-    display_system_info(bi);
-    keyboard_init();
-    mouse_init();
-    irq_init();
-    asm volatile("sti");
+    // ========== ИНФОРМАЦИЯ О ЗАГРУЗКЕ ==========
+    LOG_SECTION("Boot Information");
+    LOG_KV("Kernel base", "0x%lx", bi->KernelBase);
+    LOG_KV("Kernel size", "%u KB", (uint32_t)(bi->KernelSize / 1024));
+    LOG_KV("Total memory", "%u MB", (uint32_t)(bi->TotalMemory / (1024 * 1024)));
+    LOG_KV("Memory map size", "%u bytes", (uint32_t)bi->MemoryMapSize);
+    LOG_KV("Descriptor size", "%u bytes", bi->MemoryMapDescriptorSize);
+    if (bi->RsdpAddress)
+        LOG_KV("RSDP", "0x%lx", bi->RsdpAddress);
+    if (bi->SmbiosAddress)
+        LOG_KV("SMBIOS", "0x%lx", bi->SmbiosAddress);
 
+    // ========== ИНФОРМАЦИЯ О ДИСПЛЕЕ ==========
+    LOG_SECTION("Display Information");
+    LOG_KV("Resolution", "%d x %d", bi->HorizontalResolution, bi->VerticalResolution);
+    LOG_KV("Pixel format", "%s", (bi->PixelFormat == 0) ? "RGB" : "BGR");
+    LOG_KV("Pixels per line", "%d", bi->PixelsPerScanLine);
+    LOG_KV("Console grid", "%d x %d chars", screen_width_chars, screen_height_chars);
+
+    // ========== ЗАГОЛОВОК ЯДРА ==========
+    printf("\n");
+    set_foreground_color(LOG_COLOR_HEADER);
+    printf("================================================\n");
+    printf("             LufiraOS Kernel v0.2               \n");
+    printf("================================================\n");
+    set_foreground_color(LOG_COLOR_INFO);
+    
+    LOG_SECTION("System Information");
+    LOG_KV("Architecture", "x86_64");
+    LOG_KV("Build date", "%s", __DATE__);
+    LOG_KV("Build time", "%s", __TIME__);
+
+    // ========== ИНИЦИАЛИЗАЦИЯ УСТРОЙСТВ ==========
+    LOG_PENDING("Initializing keyboard...");
+    keyboard_init();
     if (keyboard_is_initialized()) {
-        current_color = convert_color(0x55FF55);
-        printf("\n Keyboard: READY\n");
+        LOG_DONE_OK("Keyboard initialized");
     } else {
-        current_color = convert_color(0xFF5555);
-        printf("\n Keyboard: NOT DETECTED\n");
+        LOG_DONE_FAIL("Keyboard not detected");
     }
     
+    LOG_PENDING("Initializing mouse...");
+    mouse_init();
     if (mouse_is_initialized()) {
-        current_color = convert_color(0x55FF55);
-        printf(" Mouse: READY\n");
+        LOG_DONE_OK("Mouse initialized");
     } else {
-        current_color = convert_color(0xFF5555);
-        printf(" Mouse: NOT DETECTED\n");
+        LOG_DONE_WARN("Mouse not detected");
     }
-    current_color = convert_color(0x00AAFF);
+    
+    LOG_PENDING("Enabling interrupts...");
+    irq_init();
+    LOG_DONE_OK("Interrupts enabled");
+    
+    asm volatile("sti");
+
+    // ========== СТАТУС СИСТЕМЫ ==========
+    LOG_SECTION("System Status");
+    LOG_KV("Console", "READY (256 colors)");
+    LOG_KV("Keyboard", "%s", keyboard_is_initialized() ? "READY" : "NOT DETECTED");
+    LOG_KV("Mouse", "%s", mouse_is_initialized() ? "READY" : "NOT DETECTED");
+    LOG_KV("Memory manager", "INITIALIZED");
+    LOG_KV("Interrupts", "ENABLED");
+    LOG_KV("Heap", "0x%lx", KERNEL_HEAP_START);
+
+    // ========== ПРИГЛАШЕНИЕ ==========
+    set_foreground_color(LOG_COLOR_HEADER);
     printf("\n================================================\n");
     printf(" Type 'help' for available commands\n");
     printf("================================================\n\n");
-    current_color = convert_color(0xFFFFFF);
+    set_foreground_color(LOG_COLOR_INFO);
 
     show_prompt();
     draw_cursor();

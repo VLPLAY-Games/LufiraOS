@@ -91,8 +91,7 @@ static int mouse_send_command(uint8_t cmd) {
 }
 
 void mouse_init(void) {
-    printf("\nInitializing PS/2 mouse...\n");
-
+    // Все отладочные printf убраны - статус выводится в kernel.c
     mouse_initialized = 0;
     packet_index = 0;
     mouse_x = 0;
@@ -124,41 +123,35 @@ void mouse_init(void) {
 
     uint8_t ack = ps2_read_mouse_data();
     if (ack != MOUSE_ACK) {
-        printf("Mouse reset ACK failed (got 0x%x)\n", ack);
         return;
     }
 
     uint8_t reset_ok = ps2_read_mouse_data();
     if (reset_ok != MOUSE_RESET_OK) {
-        printf("Mouse reset failed (got 0x%x)\n", reset_ok);
         return;
     }
 
+    // ID байт всё равно нужно прочитать
     uint8_t id_byte = ps2_read_mouse_data();
-    printf("Mouse reset OK, ID=0x%x\n", id_byte);
+    (void)id_byte;
 
     if (mouse_send_command(MOUSE_CMD_SET_DEFAULTS) != 0) {
-        printf("Failed to set mouse defaults\n");
         return;
     }
 
     if (mouse_send_command(MOUSE_CMD_SET_SAMPLE) != 0) {
-        printf("Failed to set sample command\n");
         return;
     }
 
     if (mouse_send_command(100) != 0) {
-        printf("Failed to set sample rate\n");
         return;
     }
 
     if (mouse_send_command(MOUSE_CMD_ENABLE) != 0) {
-        printf("Failed to enable mouse streaming\n");
         return;
     }
 
     mouse_initialized = 1;
-    printf("PS/2 mouse initialized successfully.\n");
 }
 
 void mouse_irq_handler(void) {
