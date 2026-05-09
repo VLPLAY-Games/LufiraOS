@@ -118,7 +118,7 @@ VOID DebugBoot(BootInfo *bi, EFI_HANDLE ImageHandle) {
     if (BlockIo && BlockIo->Media) {
         LoadFATImage(BlockIo, bi, FALSE);
         if (bi->FATImageBase)
-            LOG_OK(L"FAT image loaded (%ld MB)", bi->FATImageSize / (1024 * 1024));
+            LOG_OK(L"FAT image loaded (%ld KB)", bi->FATImageSize / 1024);
         else if (bi->FATImageSize == 0 && bi->FATImageBase == 0)
             LOG_FAIL(L"FAT image not loaded - read error or allocation failed");
         else

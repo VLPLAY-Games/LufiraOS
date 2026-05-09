@@ -114,9 +114,9 @@ $(BUILD_DIR)/kernel.bin: $(BUILD_DIR)/kernel.elf
 $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin
 	@echo "=== Creating disk image ==="
 	@rm -f $@
-	dd if=/dev/zero of=$@ bs=1M count=16 status=none
-	@echo "  Formatting as FAT16..."
-	mkfs.fat -F 16 -S 512 $@
+	dd if=/dev/zero of=$@ bs=1024 count=512 status=none
+	@echo "  Formatting as FAT12..."
+	mkfs.fat -F 12 -S 512 $@
 	@echo "  Creating EFI/BOOT directory..."
 	mmd -i $@ ::/EFI
 	mmd -i $@ ::/EFI/BOOT
@@ -144,7 +144,7 @@ run: $(BUILD_DIR)/disk.img
 	qemu-system-x86_64 \
 		-bios /usr/share/ovmf/OVMF.fd \
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
-		-m 96M \
+		-m 64M \
 		-net none \
 		-serial stdio
 
