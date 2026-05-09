@@ -2,6 +2,7 @@
 #include "../drivers/console.h"   // для printf
 #include <stddef.h>
 #include <stdint.h>
+#include "system/log.h"
 
 #define PAGE_SIZE 4096
 #define BITMAP_ENTRY_SIZE 8
@@ -31,6 +32,7 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
 {
     uint8_t *map = (uint8_t*)memory_map;
     uint64_t desc_count = map_size / desc_size;
+    LOG_PENDING("Initializing PMM...");
 
     // =====================================================
     // НАХОДИМ МАКСИМАЛЬНЫЙ ФИЗИЧЕСКИЙ АДРЕС
@@ -105,7 +107,7 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
     }
 
     if (!bitmap_phys) {
-        printf("FATAL: Cannot find memory for PMM bitmap!\n");
+        LOG_DONE_FAIL("PMM: Cannot find memory for bitmap");
         while (1) __asm__("hlt");
     }
 
@@ -207,7 +209,7 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
     next_free_page = 512;
 
     uint64_t free_pages = total_pages - used_pages;
-    printf("PMM: %u MB total, %u MB used, %u MB free (%u pages)\n",
+    LOG_DONE_OK("PMM: %u MB total, %u MB used, %u MB free",
         (uint32_t)(total_pages * 4 / 1024),
         (uint32_t)(used_pages * 4 / 1024),
         (uint32_t)(free_pages * 4 / 1024),

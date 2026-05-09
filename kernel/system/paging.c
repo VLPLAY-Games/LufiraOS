@@ -3,6 +3,7 @@
 #include "../drivers/console.h"
 #include <stddef.h>
 #include <stdint.h>
+#include "system/log.h"
 
 typedef uint64_t pt_entry_t;
 // Указатели на таблицы страниц (все в identity-mapped памяти)
@@ -42,6 +43,8 @@ static pt_entry_t* get_or_create_table(pt_entry_t *parent, uint64_t index, int c
 
 // Инициализация: identity mapping всей физической памяти 2-МБ страницами
 void paging_init(BootInfo* bi) {
+    LOG_PENDING("Initializing paging...");
+
     // PML4 и PDPT размещаем статически
     static pt_entry_t pml4_table[512] __attribute__((aligned(4096)));
     static pt_entry_t pdpt_table[512] __attribute__((aligned(4096)));
@@ -74,7 +77,7 @@ void paging_init(BootInfo* bi) {
     for (uint64_t gb = 0; gb < mem_gb; gb++) {
         uint64_t pd_phys = pmm_alloc_page();
         if (!pd_phys) {
-            printf("FATAL: cannot allocate PD\n");
+            LOG_DONE_FAIL("Paging: cannot allocate PD");
             while(1) __asm__("hlt");
         }
 
@@ -92,7 +95,7 @@ void paging_init(BootInfo* bi) {
     // Загружаем новый CR3
     asm volatile ("mov %0, %%cr3" : : "r" ((uint64_t)pml4_table) : "memory");
 
-    printf("Paging: identity mapped up to 0x%llx\n", max_phys);
+    LOG_DONE_OK("Paging: identity mapped up to 0x%lx", max_phys);
 }
 
 static pt_entry_t* ensure_table(pt_entry_t *table, uint64_t index) {

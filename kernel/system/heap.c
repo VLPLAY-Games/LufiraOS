@@ -3,6 +3,7 @@
 #include "pmm.h"
 #include "../drivers/console.h"
 #include <stdint.h>
+#include "system/log.h"
 
 #define KERNEL_HEAP_START   0xFFFF900000000000ULL
 #define KERNEL_HEAP_INITIAL_SIZE   (4 * 1024 * 1024)   // 4 MB
@@ -71,17 +72,18 @@ static block_header_t *request_space(block_header_t *last, size_t size) {
 }
 
 void heap_init(void) {
+    LOG_PENDING("Initializing heap...");
+
     heap_start = NULL;
     heap_end = NULL;
     heap_current_top = KERNEL_HEAP_START;
 
-    // Не вызываем printf здесь — сначала нужно стабильно поднять кучу
     if (!request_space(NULL, 4 * 1024)) {
-        printf("FATAL: heap_init failed\n");
+        LOG_DONE_FAIL("Heap initialization failed");
         while (1) __asm__("hlt");
     }
 
-    printf("Heap initialized at 0x%lx\n", KERNEL_HEAP_START);
+    LOG_DONE_OK("Heap initialized at 0x%lx", KERNEL_HEAP_START);
 }
 
 static void split_block(block_header_t *block, size_t size) {

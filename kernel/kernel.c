@@ -72,7 +72,7 @@ void _start(BootInfo* bi) {
     pic_remap();
     LOG_DONE_OK("PIC remapped");
 
-    // ========== МЕНЕДЖЕРЫ ПАМЯТИ (со своим выводом) ==========
+    // ========== МЕНЕДЖЕРЫ ПАМЯТИ ==========
     pmm_init(bi->MemoryMap, bi->MemoryMapSize, bi->MemoryMapDescriptorSize,
                 bi->KernelBase, bi->KernelSize);
     paging_init(bi);
@@ -91,26 +91,27 @@ void _start(BootInfo* bi) {
     }
 
     // ========== ИНФОРМАЦИЯ О ЗАГРУЗКЕ ==========
-    LOG_SECTION("Boot Information");
-    LOG_KV("Kernel base", "0x%lx", bi->KernelBase);
-    LOG_KV("Kernel size", "%u KB", (uint32_t)(bi->KernelSize / 1024));
-    LOG_KV("Total memory", "%u MB", (uint32_t)(bi->TotalMemory / (1024 * 1024)));
-    LOG_KV("Memory map size", "%u bytes", (uint32_t)bi->MemoryMapSize);
-    LOG_KV("Descriptor size", "%u bytes", bi->MemoryMapDescriptorSize);
+    LOG_INFO_LINE("");
+    LOG_INFO_LINE("Boot Information");
+    LOG_INFO_LINE("Kernel base: 0x%lx", bi->KernelBase);
+    LOG_INFO_LINE("Kernel size: %u KB", (uint32_t)(bi->KernelSize / 1024));
+    LOG_INFO_LINE("Total memory: %u MB", (uint32_t)(bi->TotalMemory / (1024 * 1024)));
+    LOG_INFO_LINE("Memory map size: %u bytes", (uint32_t)bi->MemoryMapSize);
+    LOG_INFO_LINE("Descriptor size: %u bytes", bi->MemoryMapDescriptorSize);
     if (bi->RsdpAddress)
-        LOG_KV("RSDP", "0x%lx", bi->RsdpAddress);
+        LOG_INFO_LINE("RSDP: 0x%lx", bi->RsdpAddress);
     if (bi->SmbiosAddress)
-        LOG_KV("SMBIOS", "0x%lx", bi->SmbiosAddress);
-    LOG_KV("Command line", "(none)");
+        LOG_INFO_LINE("SMBIOS: 0x%lx", bi->SmbiosAddress);
 
     // ========== ДИСПЛЕЙ ==========
-    LOG_SECTION("Display Information");
-    LOG_KV("Framebuffer", "0x%lx", bi->FrameBufferBase);
-    LOG_KV("Framebuffer size", "%u KB", (uint32_t)(bi->FrameBufferSize / 1024));
-    LOG_KV("Resolution", "%dx%d", bi->HorizontalResolution, bi->VerticalResolution);
-    LOG_KV("Pixel format", "%s", (bi->PixelFormat == 0) ? "RGB" : "BGR");
-    LOG_KV("Scanline pixels", "%d", bi->PixelsPerScanLine);
-    LOG_KV("Console grid", "%dx%d chars", screen_width_chars, screen_height_chars);
+    LOG_INFO_LINE("");
+    LOG_INFO_LINE("Display Information");
+    LOG_INFO_LINE("Framebuffer: 0x%lx", bi->FrameBufferBase);
+    LOG_INFO_LINE("Framebuffer size: %u KB", (uint32_t)(bi->FrameBufferSize / 1024));
+    LOG_INFO_LINE("Resolution: %dx%d", bi->HorizontalResolution, bi->VerticalResolution);
+    LOG_INFO_LINE("Pixel format: %s", (bi->PixelFormat == 0) ? "RGB" : "BGR");
+    LOG_INFO_LINE("Scanline pixels: %d", bi->PixelsPerScanLine);
+    LOG_INFO_LINE("Console grid: %dx%d chars", screen_width_chars, screen_height_chars);
 
     // ========== ИНИЦИАЛИЗАЦИЯ УСТРОЙСТВ ==========
     LOG_PENDING("Initializing keyboard...");
@@ -143,21 +144,20 @@ void _start(BootInfo* bi) {
     printf("================================================\n");
     set_foreground_color(LOG_COLOR_INFO);
     
-    // ========== СИСТЕМНАЯ ИНФОРМАЦИЯ ==========
-    LOG_SECTION("System Information");
-    LOG_KV("Architecture", "x86_64");
-    LOG_KV("Build date", "%s", __DATE__);
-    LOG_KV("Build time", "%s", __TIME__);
+    // ========== СИСТЕМНАЯ ИНФОРМАЦИЯ (без [ INFO ]) ==========
+    printf("\nSYSTEM INFORMATION:\n");
+    printf("  Architecture: x86_64\n");
+    printf("  Build date: %s\n", __DATE__);
+    printf("  Build time: %s\n", __TIME__);
 
-    // ========== СТАТУС СИСТЕМЫ ==========
-    LOG_SECTION("System Status");
-    LOG_KV("Console", "READY (%d colors)", 256);
-    LOG_KV("Keyboard", "%s", keyboard_is_initialized() ? "READY" : "NOT DETECTED");
-    LOG_KV("Mouse", "%s", mouse_is_initialized() ? "READY" : "NOT DETECTED");
-    LOG_KV("Memory manager", "INITIALIZED");
-    LOG_KV("Interrupts", "ENABLED");
-    LOG_KV("Heap base", "0x%lx", KERNEL_HEAP_START);
-    LOG_KV("FAT driver", "%s", (bi->FATImageBase && bi->FATImageSize && fatfs.image) ? "READY" : "NOT LOADED");
+    // ========== СТАТУС СИСТЕМЫ (без [ INFO ]) ==========
+    printf("\nSYSTEM STATUS:\n");
+    printf("  Console: READY (256 colors)\n");
+    printf("  Keyboard: %s\n", keyboard_is_initialized() ? "READY" : "NOT DETECTED");
+    printf("  Mouse: %s\n", mouse_is_initialized() ? "READY" : "NOT DETECTED");
+    printf("  Memory manager: INITIALIZED\n");
+    printf("  Interrupts: ENABLED\n");
+    printf("  Heap base: 0x%lx\n", KERNEL_HEAP_START);
 
     // ========== ПРИГЛАШЕНИЕ ==========
     set_foreground_color(LOG_COLOR_HEADER);
