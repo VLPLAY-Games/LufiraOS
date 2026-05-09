@@ -20,6 +20,10 @@ $(foreach tool,$(REQUIRED_TOOLS),\
 
 $(shell mkdir -p $(BUILD_DIR) \
     $(BUILD_DIR)/boot \
+    $(BUILD_DIR)/boot/ui \
+    $(BUILD_DIR)/boot/system \
+    $(BUILD_DIR)/boot/loaders \
+    $(BUILD_DIR)/boot/boot_modes \
     $(BUILD_DIR)/kernel/drivers \
     $(BUILD_DIR)/kernel/shell \
     $(BUILD_DIR)/kernel/system \
@@ -42,7 +46,7 @@ KERNEL_CFLAGS := -m64 -ffreestanding -fno-stack-protector -fno-stack-check \
 
 KERNEL_LDFLAGS := -static -nostdlib -z max-page-size=0x1000 --gc-sections
 
-BOOTLOADER_SOURCES := $(wildcard $(BOOTLOADER_DIR)/*.c)
+BOOTLOADER_SOURCES := $(shell find $(BOOTLOADER_DIR) -name '*.c')
 BOOTLOADER_OBJECTS := $(patsubst $(BOOTLOADER_DIR)/%.c,$(BUILD_DIR)/boot/%.o,$(BOOTLOADER_SOURCES))
 
 KERNEL_C_SOURCES := \

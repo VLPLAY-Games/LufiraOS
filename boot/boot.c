@@ -1,10 +1,10 @@
 #include <efi.h>
 #include <efilib.h>
-#include "utils.h"
-#include "splash.h"
-#include "quick_boot.h"
-#include "safe_boot.h"
-#include "debug_boot.h"
+#include "ui/utils.h"
+#include "ui/splash.h"
+#include "boot_modes/quick_boot.h"
+#include "boot_modes/safe_boot.h"
+#include "boot_modes/debug_boot.h"
 
 EFI_HANDLE gImageHandle;
 

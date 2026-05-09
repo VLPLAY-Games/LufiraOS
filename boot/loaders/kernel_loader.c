@@ -1,5 +1,5 @@
 #include "kernel_loader.h"
-#include "utils.h"
+#include "../ui/utils.h"
 
 EFI_STATUS LoadKernel(BootInfo *bi, EFI_HANDLE ImageHandle, BOOLEAN animateSpinner, 
                       UINTN *spinIdx, UINTN statusRow, UINTN spinnerRow, UINTN cols) {

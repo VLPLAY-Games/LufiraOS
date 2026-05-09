@@ -1,7 +1,7 @@
 # Правила для загрузчика
 
-# Исходные файлы загрузчика
-BOOTLOADER_SOURCES := $(wildcard $(BOOTLOADER_DIR)/*.c)
+# Исходные файлы загрузчика (рекурсивно по всем подпапкам)
+BOOTLOADER_SOURCES := $(shell find $(BOOTLOADER_DIR) -name '*.c')
 BOOTLOADER_OBJECTS := $(patsubst $(BOOTLOADER_DIR)/%.c,$(BUILD_DIR)/boot/%.o,$(BOOTLOADER_SOURCES))
 BOOTLOADER_SO := $(BUILD_DIR)/boot.so
 

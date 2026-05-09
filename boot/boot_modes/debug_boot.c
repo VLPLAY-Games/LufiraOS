@@ -1,12 +1,12 @@
 #include "debug_boot.h"
-#include "utils.h"
-#include "memory.h"
-#include "graphics.h"
-#include "tables.h"
-#include "fat_loader.h"
-#include "exit_boot.h"
-#include "kernel_loader.h"
-#include "splash.h"
+#include "../ui/utils.h"
+#include "../system/memory.h"
+#include "../system/graphics.h"
+#include "../system/tables.h"
+#include "../loaders/fat_loader.h"
+#include "../system/exit_boot.h"
+#include "../loaders/kernel_loader.h"
+#include "../ui/splash.h"
 
 VOID DebugBoot(BootInfo *bi, EFI_HANDLE ImageHandle) {
     uefi_call_wrapper(gST->ConOut->ClearScreen, 1, gST->ConOut);
