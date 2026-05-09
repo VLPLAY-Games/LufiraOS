@@ -54,6 +54,7 @@ fat_fs_t fatfs;   // глобальная файловая система (дл�
 
 // --- Точка входа ядра ---
 __attribute__((section(".text.prologue")))
+__attribute__((section(".text.prologue")))
 void _start(BootInfo* bi) {
     asm volatile ("cli");
 
@@ -136,32 +137,44 @@ void _start(BootInfo* bi) {
     
     asm volatile("sti");
 
-    // ========== ЗАГОЛОВОК ЯДРА ==========
+    // ========== ЗАГОЛОВОК ЯДРА (киберпанк) ==========
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
     printf("================================================\n");
-    printf("             LufiraOS Kernel v0.2               \n");
+    printf("          LufiraOS Kernel v0.2                  \n");
     printf("================================================\n");
     set_foreground_color(LOG_COLOR_INFO);
     
-    // ========== СИСТЕМНАЯ ИНФОРМАЦИЯ (без [ INFO ]) ==========
-    printf("\nSYSTEM INFORMATION:\n");
+    // ========== СИСТЕМНАЯ ИНФОРМАЦИЯ (киберпанк) ==========
+    printf("\n");
+    set_foreground_color(LOG_COLOR_HEADER);
+    printf("SYSTEM INFORMATION:\n");
+    set_foreground_color(LOG_COLOR_INFO);
     printf("  Architecture: x86_64\n");
-    printf("  Build date: %s\n", __DATE__);
-    printf("  Build time: %s\n", __TIME__);
+    printf("  Build date:   %s\n", __DATE__);
+    printf("  Build time:   %s\n", __TIME__);
 
-    // ========== СТАТУС СИСТЕМЫ (без [ INFO ]) ==========
-    printf("\nSYSTEM STATUS:\n");
-    printf("  Console: READY (256 colors)\n");
-    printf("  Keyboard: %s\n", keyboard_is_initialized() ? "READY" : "NOT DETECTED");
-    printf("  Mouse: %s\n", mouse_is_initialized() ? "READY" : "NOT DETECTED");
+    // ========== СТАТУС СИСТЕМЫ (цветной: зелёный/красный) ==========
+    printf("\n");
+    set_foreground_color(LOG_COLOR_HEADER);
+    printf("SYSTEM STATUS:\n");
+    
+    LOG_STATUS_LINE("Console", 1, "READY (256 colors)");
+    LOG_STATUS_LINE("Keyboard", keyboard_is_initialized(), 
+        keyboard_is_initialized() ? "READY" : "NOT DETECTED");
+    LOG_STATUS_LINE("Mouse", mouse_is_initialized(),
+        mouse_is_initialized() ? "READY" : "NOT DETECTED");
+    
+    set_foreground_color(STATUS_READY);
     printf("  Memory manager: INITIALIZED\n");
     printf("  Interrupts: ENABLED\n");
     printf("  Heap base: 0x%lx\n", KERNEL_HEAP_START);
+    set_foreground_color(LOG_COLOR_INFO);
 
-    // ========== ПРИГЛАШЕНИЕ ==========
+    // ========== ПРИГЛАШЕНИЕ (киберпанк) ==========
+    printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
-    printf("\n================================================\n");
+    printf("================================================\n");
     printf(" Type 'help' for available commands\n");
     printf("================================================\n\n");
     set_foreground_color(LOG_COLOR_INFO);

@@ -250,7 +250,11 @@ void execute_command(void) {
     input_buffer[0] = '\0';
 }
 void show_prompt(void) {
-    printf("\n[lufiraos@kernel] %s $ ", cwd_path);
+    printf("\n");
+    set_foreground_color(COLOR_LIGHT_CYAN);
+    printf("[lufiraos@kernel]");
+    set_foreground_color(COLOR_WHITE);
+    printf(" %s $ ", cwd_path);
     command_start_x = current_x;
     command_start_y = current_y;
     cursor_position_in_line = 0;
