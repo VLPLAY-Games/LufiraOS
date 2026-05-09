@@ -198,3 +198,7 @@ void mouse_irq_handler(void) {
 
     mouse_buttons = packet[0] & 0x07;
 }
+
+int mouse_is_initialized(void) {
+    return mouse_initialized;
+}

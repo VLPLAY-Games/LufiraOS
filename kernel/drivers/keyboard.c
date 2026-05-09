@@ -27,6 +27,7 @@ static int caps_lock = 0;
 static int ctrl_pressed = 0;
 static int alt_pressed = 0;
 static int extended_scancode = 0;
+static int keyboard_initialized = 0;
 
 // Таблицы скан-кодов (без изменений)
 static const char scancode_to_char[128] = {
@@ -56,6 +57,16 @@ void keyboard_init(void) {
 
     // Включение прерываний клавиатуры
     outb(KEYBOARD_COMMAND_PORT, 0xAE);
+    
+    // Проверка наличия клавиатуры
+    outb(KEYBOARD_COMMAND_PORT, 0xAA);  // self-test
+    for (volatile int i = 0; i < 100000; i++);
+    uint8_t test_result = inb(KEYBOARD_DATA_PORT);
+    
+    if (test_result != 0x55) {
+        keyboard_initialized = 0;
+        return;
+    }
 
     // Сброс состояния модификаторов
     shift_pressed = 0;
@@ -73,9 +84,28 @@ void keyboard_init(void) {
     }
 
     // Отправка команды сброса клавиатуры
-    outb(KEYBOARD_DATA_PORT, 0xF6);
+    outb(KEYBOARD_COMMAND_PORT, 0xD4);  // write to keyboard
+    for (volatile int i = 0; i < 10000; i++);
+    outb(KEYBOARD_DATA_PORT, 0xF6);    // reset command
     for (volatile int i = 0; i < 50000; i++);
+    
+    // Ждём ACK
+    uint8_t ack = 0;
+    int timeout = 1000000;
+    while (--timeout) {
+        if (inb(KEYBOARD_STATUS_PORT) & 1) {
+            ack = inb(KEYBOARD_DATA_PORT);
+            break;
+        }
+    }
+    
+    if (ack == 0xFA) {
+        keyboard_initialized = 1;
+    } else {
+        keyboard_initialized = 0;
+    }
 }
+
 
 // Чтение скан-кода из порта (без ожидания)
 uint8_t keyboard_read_scancode(void) {
@@ -174,4 +204,8 @@ void keyboard_irq_handler(void) {
     uint8_t scancode = keyboard_read_scancode();
     int key = keyboard_scancode_to_key(scancode);
     process_keypress(key);
+}
+
+int keyboard_is_initialized(void) {
+    return keyboard_initialized;
 }

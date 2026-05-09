@@ -18,5 +18,6 @@ void keyboard_irq_handler(void);           // обработчик прерыв�
 uint8_t keyboard_read_scancode(void);
 int keyboard_scancode_to_key(uint8_t scancode);
 void process_keypress(int key);
+int keyboard_is_initialized(void);
 
 #endif

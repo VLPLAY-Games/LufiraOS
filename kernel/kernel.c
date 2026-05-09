@@ -86,9 +86,21 @@ void _start(BootInfo* bi) {
     irq_init();
     asm volatile("sti");
 
-    current_color = convert_color(0x55FF55);
-    printf("\n Keyboard: READY\n");
-    printf(" Mouse: READY\n");
+    if (keyboard_is_initialized()) {
+        current_color = convert_color(0x55FF55);
+        printf("\n Keyboard: READY\n");
+    } else {
+        current_color = convert_color(0xFF5555);
+        printf("\n Keyboard: NOT DETECTED\n");
+    }
+    
+    if (mouse_is_initialized()) {
+        current_color = convert_color(0x55FF55);
+        printf(" Mouse: READY\n");
+    } else {
+        current_color = convert_color(0xFF5555);
+        printf(" Mouse: NOT DETECTED\n");
+    }
     current_color = convert_color(0x00AAFF);
     printf("\n================================================\n");
     printf(" Type 'help' for available commands\n");
