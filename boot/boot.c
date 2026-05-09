@@ -28,6 +28,8 @@
 
 #define ACPI_10_TABLE_GUID {0xeb9d2d30, 0x2d88, 0x11d3, {0x9a, 0x16, 0x0, 0x90, 0x27, 0x3f, 0xc1, 0x4d}}
 
+EFI_HANDLE gImageHandle;
+
 typedef struct {
     uint64_t FrameBufferBase;
     uint64_t FrameBufferSize;
@@ -164,6 +166,54 @@ VOID LoadFATImage(EFI_BLOCK_IO_PROTOCOL *BlockIo, BootInfo *bi, BOOLEAN showProg
         if (showProgress) PrintColored(L"ALLOC FAILED\n", COLOR_RED, COLOR_BLACK);
     }
 }
+
+VOID ExitBootServicesWrapper(BootInfo *bi) {
+    EFI_STATUS status;
+    UINTN MemoryMapSize = bi->MemoryMapSize;
+    UINTN MapKey;
+    UINTN DescriptorSize = bi->MemoryMapDescriptorSize;
+    UINT32 DescriptorVersion;
+    
+    // Получаем MapKey перед выходом
+    status = uefi_call_wrapper(gBS->GetMemoryMap, 5, &MemoryMapSize, bi->MemoryMap, &MapKey, &DescriptorSize, &DescriptorVersion);
+    
+    if (EFI_ERROR(status)) {
+        // Не удалось получить карту памяти - фатальная ошибка
+        return;
+    }
+    
+    // Пытаемся выйти из Boot Services
+    status = uefi_call_wrapper(gBS->ExitBootServices, 2, gImageHandle, MapKey);
+    
+    if (EFI_ERROR(status)) {
+        // Если не удалось (карта памяти изменилась), пробуем снова
+        MemoryMapSize = 0;
+        uefi_call_wrapper(gBS->GetMemoryMap, 5, &MemoryMapSize, NULL, &MapKey, &DescriptorSize, &DescriptorVersion);
+        MemoryMapSize += 2 * DescriptorSize;
+        
+        // Перевыделяем память для карты
+        EFI_MEMORY_DESCRIPTOR *NewMemoryMap;
+        status = uefi_call_wrapper(gBS->AllocatePool, 3, EfiLoaderData, MemoryMapSize, (VOID**)&NewMemoryMap);
+        
+        if (!EFI_ERROR(status)) {
+            status = uefi_call_wrapper(gBS->GetMemoryMap, 5, &MemoryMapSize, NewMemoryMap, &MapKey, &DescriptorSize, &DescriptorVersion);
+            
+            if (!EFI_ERROR(status)) {
+                // Обновляем BootInfo
+                bi->MemoryMap = NewMemoryMap;
+                bi->MemoryMapSize = MemoryMapSize;
+                bi->MemoryMapDescriptorSize = DescriptorSize;
+                
+                // Пробуем снова
+                status = uefi_call_wrapper(gBS->ExitBootServices, 2, gImageHandle, MapKey);
+            }
+        }
+    }
+    
+    // После успешного ExitBootServices, Boot Services недоступны
+    // gBS, gST->ConOut и т.д. больше использовать нельзя
+}
+
 
 // ==================== БЫСТРАЯ ЗАГРУЗКА (NORMAL / SAFE) ====================
 VOID QuickBoot(BootInfo *bi, EFI_HANDLE ImageHandle, BootMode mode, BOOLEAN keepLogo, BOOLEAN animateSpinner) {
@@ -354,16 +404,11 @@ VOID QuickBoot(BootInfo *bi, EFI_HANDLE ImageHandle, BootMode mode, BOOLEAN keep
     
     UPDATE_STATUS(L"Starting kernel...");
     uefi_call_wrapper(gBS->Stall, 1, 1000000);
+
+    UPDATE_STATUS(L"Exiting boot services...");
+    uefi_call_wrapper(gBS->Stall, 1, 500000);
     
-    // Очистка статуса перед передачей управления
-    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, statusRow);
-    SetColor(COLOR_BLACK, COLOR_BLACK);
-    for (UINTN i = 0; i < cols; i++) Print(L" ");
-    if (animateSpinner) {
-        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, cols / 2, spinnerRow);
-        Print(L" ");
-    }
-    uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, rows - 1);
+    ExitBootServicesWrapper(bi);
     
     KernelEntry kStart = (KernelEntry)bi->KernelBase;
     kStart(bi);
@@ -626,6 +671,8 @@ VOID DebugBoot(BootInfo *bi, EFI_HANDLE ImageHandle) {
     }
     
     uefi_call_wrapper(gST->ConOut->ClearScreen, 1, gST->ConOut);
+    LOG_OK(L"Exiting boot services...");
+    ExitBootServicesWrapper(bi);
     KernelEntry kStart = (KernelEntry)bi->KernelBase;
     kStart(bi);
     while(1) __asm__ volatile("hlt");
@@ -637,6 +684,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     gST = SystemTable;
     gBS = SystemTable->BootServices;
     gRT = SystemTable->RuntimeServices;
+    gImageHandle = ImageHandle;
     
     SetColor(COLOR_BLACK, COLOR_BLACK);
     uefi_call_wrapper(gST->ConOut->ClearScreen, 1, gST->ConOut);
