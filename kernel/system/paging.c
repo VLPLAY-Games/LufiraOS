@@ -88,8 +88,8 @@ void paging_init(void) {
 
     // Включаем пейджинг и возможно PAE/NXE? CR0.PG уже должен быть установлен UEFI, но мы перезаписываем.
     // В long mode пейджинг всегда включен, но CR3 мы обновили, этого достаточно.
-    printf("Paging initialized: identity mapping of %lu MB of RAM.\n",
-           (total_memory / (1024*1024)));
+    printf("Paging initialized: identity mapping of %u MB of RAM.\n",
+       (uint32_t)(total_memory / (1024*1024)));
 }
 
 static pt_entry_t* ensure_table(pt_entry_t *table, uint64_t index) {

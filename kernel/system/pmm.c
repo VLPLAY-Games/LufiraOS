@@ -111,9 +111,7 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
         while (1) __asm__("hlt");
     }
 
-    printf("bitmap_phys=%lx bitmap_size=%lx\n",
-           bitmap_phys,
-           bitmap_size);
+    printf("bitmap_phys=0x%x bitmap_size=%u\n", (uint32_t)bitmap_phys, (uint32_t)bitmap_size);
 
     // =====================================================
     // PHYSICAL == VIRTUAL (identity mapping)
@@ -165,6 +163,12 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
         bitmap_set(i);
 
     // =====================================================
+    // РЕЗЕРВ ПЕРВЫХ 2MB (identity mapping area)
+    // =====================================================
+    for (uint64_t i = 0; i < 512; i++)
+        bitmap_set(i);
+
+    // =====================================================
     // РЕЗЕРВ BITMAP
     // =====================================================
 
@@ -202,10 +206,10 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
             used_pages++;
     }
 
-    printf("PMM initialized: %lu pages total, %lu used, %lu free.\n",
-           total_pages,
-           used_pages,
-           total_pages - used_pages);
+    printf("PMM initialized: %u pages total, %u used, %u free.\n",
+       (uint32_t)total_pages,
+       (uint32_t)used_pages,
+       (uint32_t)(total_pages - used_pages));
 }
 
 uint64_t pmm_alloc_page(void) {

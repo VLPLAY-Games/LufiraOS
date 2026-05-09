@@ -31,50 +31,70 @@ static block_header_t *find_free_block(size_t size) {
 }
 
 static block_header_t *request_space(block_header_t *last, size_t size) {
-    // Выделяем новую страницу (или несколько) виртуальной памяти
-    // и добавляем в список свободных как один большой блок.
-    // Возвращаем указатель на начало выделенного блока (заголовок)
-    uint64_t phys = pmm_alloc_page();
-    if (!phys) return NULL;
-    if (heap_current_top == 0) heap_current_top = KERNEL_HEAP_START;
-    uint64_t virt = heap_current_top;
-    if (map_page(virt, phys, PAGE_PRESENT | PAGE_WRITE) != 0) {
-        pmm_free_page(phys);
-        return NULL;
-    }
-    heap_current_top += PAGE_SIZE;
+    size_t needed = size + sizeof(block_header_t);
+    size_t pages = (needed + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (pages == 0) pages = 1;
 
-    // Инициализируем заголовок в начале страницы
-    block_header_t *header = (block_header_t*)virt;
-    header->size = PAGE_SIZE;
+    if (heap_current_top == 0)
+        heap_current_top = KERNEL_HEAP_START;
+
+    uint64_t virt_base = heap_current_top;
+
+    for (size_t i = 0; i < pages; i++) {
+        uint64_t phys = pmm_alloc_page();
+        if (!phys) {
+            return NULL;
+        }
+
+        if (map_page(heap_current_top, phys, PAGE_PRESENT | PAGE_WRITE) != 0) {
+            pmm_free_page(phys);
+            return NULL;
+        }
+
+        heap_current_top += PAGE_SIZE;
+    }
+
+    block_header_t *header = (block_header_t*)virt_base;
+    header->size = pages * PAGE_SIZE;
     header->free = 1;
     header->next = NULL;
     header->prev = last;
-    if (last) last->next = header;
 
-    // Если это первая страница, обновляем heap_start
-    if (!heap_start) heap_start = header;
+    if (last)
+        last->next = header;
+
+    if (!heap_start)
+        heap_start = header;
+
     heap_end = header;
     return header;
 }
 
 void heap_init(void) {
-    printf("Heap initialized at 0x%lx\n", KERNEL_HEAP_START);
     heap_start = NULL;
     heap_end = NULL;
     heap_current_top = KERNEL_HEAP_START;
-    // Можно сразу выделить начальный блок
-    request_space(NULL, 0);
+
+    // Не вызываем printf здесь — сначала нужно стабильно поднять кучу
+    if (!request_space(NULL, 4 * 1024)) {
+        printf("FATAL: heap_init failed\n");
+        while (1) __asm__("hlt");
+    }
+
+    printf("Heap initialized at 0x%lx\n", KERNEL_HEAP_START);
 }
 
 static void split_block(block_header_t *block, size_t size) {
-    if (block->size - size > sizeof(block_header_t)) {
+    if (block->size >= size + sizeof(block_header_t) + 8) {
         block_header_t *new_block = (block_header_t*)((uint8_t*)block + size);
         new_block->size = block->size - size;
         new_block->free = 1;
         new_block->next = block->next;
         new_block->prev = block;
-        if (block->next) block->next->prev = new_block;
+
+        if (block->next)
+            block->next->prev = new_block;
+
         block->next = new_block;
         block->size = size;
     }
@@ -95,29 +115,22 @@ static void merge_blocks(block_header_t *block) {
 }
 
 void *kmalloc(size_t size) {
-    if (size == 0) return NULL;
+    if (size == 0)
+        return NULL;
+
     size_t total_size = size + sizeof(block_header_t);
-    // Выравнивание по 8 байт
     total_size = (total_size + 7) & ~7;
 
     block_header_t *block = find_free_block(total_size);
     if (!block) {
-        block = request_space((heap_end) ? heap_end : NULL, total_size);
-        if (!block) return NULL;
-        // Если запрошенного блока недостаточно, будем расширять кучу дальше
-        while (block->size < total_size) {
-            if (!request_space(block, total_size - block->size)) {
-                return NULL;
-            }
-            // После request_space у нас появился новый блок в конце, который свободен,
-            // попробуем объединить с текущим
-            merge_blocks(block);
-            if (block->size >= total_size) break;
-        }
+        block = request_space(heap_end, total_size);
+        if (!block)
+            return NULL;
     }
 
     split_block(block, total_size);
     block->free = 0;
+
     return (void*)((uint8_t*)block + sizeof(block_header_t));
 }
 
