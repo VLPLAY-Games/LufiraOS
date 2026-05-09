@@ -291,15 +291,52 @@ void command_ls(const char* flags) {
 void command_mkdir(const char* name) {
     if (!name || !*name) return;
     int res = fat_mkdir(&fatfs, cwd_first_cluster, name);
-    if (res == 0) printf("\nDirectory created: %s\n", name);
-    else printf("\nmkdir failed (error %d)\n", res);
+    switch (res) {
+        case 0:
+            printf("\nDirectory created: %s\n", name);
+            break;
+        case -1:
+            printf("\nmkdir: invalid name\n");
+            break;
+        case -2:
+            printf("\nmkdir: '%s' already exists\n", name);
+            break;
+        case -3:
+            printf("\nmkdir: no free directory entry\n");
+            break;
+        case -4:
+            printf("\nmkdir: no free clusters\n");
+            break;
+        default:
+            printf("\nmkdir: failed (error %d)\n", res);
+            break;
+    }
 }
+
 
 void command_rm(const char* name) {
     if (!name || !*name) return;
     int res = fat_rm(&fatfs, cwd_first_cluster, name);
-    if (res == 0) printf("\nRemoved: %s\n", name);
-    else printf("\nrm failed (error %d)\n", res);
+    switch (res) {
+        case 0:
+            printf("\nRemoved: %s\n", name);
+            break;
+        case -1:
+            printf("\nrm: invalid name\n");
+            break;
+        case -2:
+            printf("\nrm: '%s' not found\n", name);
+            break;
+        case -3:
+            printf("\nrm: cannot remove '.' or '..'\n");
+            break;
+        case -4:
+            printf("\nrm: directory not empty\n");
+            break;
+        default:
+            printf("\nrm: failed (error %d)\n", res);
+            break;
+    }
 }
 
 void command_touch(const char* name) {
@@ -308,6 +345,22 @@ void command_touch(const char* name) {
         return;
     }
     int res = fat_create_file(&fatfs, cwd_first_cluster, name);
-    if (res == 0) printf("\nFile created: %s\n", name);
-    else printf("\ntouch failed (error %d)\n", res);
+    switch (res) {
+        case 0:
+            printf("\nFile created: %s\n", name);
+            break;
+        case -1:
+            printf("\ntouch: invalid name\n");
+            break;
+        case -2:
+            printf("\ntouch: '%s' already exists\n", name);
+            break;
+        case -3:
+            printf("\ntouch: no free directory entry\n");
+            break;
+        default:
+            printf("\ntouch: failed (error %d)\n", res);
+            break;
+    }
 }
+

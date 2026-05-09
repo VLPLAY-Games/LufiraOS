@@ -56,7 +56,7 @@
 
 #define LOG_PENDING(fmt, ...) do { \
     set_foreground_color(LOG_COLOR_PENDING); \
-    printf("[  ....  ] "); \
+    printf("[  ..  ] "); \
     set_foreground_color(LOG_COLOR_INFO); \
     printf(fmt, ##__VA_ARGS__); \
 } while(0)
