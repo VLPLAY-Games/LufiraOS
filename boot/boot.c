@@ -406,7 +406,39 @@ VOID QuickBoot(BootInfo *bi, EFI_HANDLE ImageHandle, BootMode mode, BOOLEAN keep
                 uefi_call_wrapper(gBS->HandleProtocol, 3, blockHandle, &BlockIoGuid, (VOID**)&BlockIo);
         }
     }
-    LoadFATImage(BlockIo, bi, FALSE);
+
+    BOOLEAN fatError = FALSE;
+
+    if (BlockIo && BlockIo->Media) {
+        LoadFATImage(BlockIo, bi, FALSE);
+        if (bi->FATImageBase == 0) {
+            fatError = TRUE;
+            if (bi->FATImageSize == 0) {
+                uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 0);
+                SetColor(COLOR_RED, COLOR_BLACK);
+                Print(L"[ERROR] FAT: read error or allocation failed");
+            } else {
+                uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 0);
+                SetColor(COLOR_RED, COLOR_BLACK);
+                Print(L"[ERROR] FAT: unknown error");
+            }
+        }
+    } else {
+        fatError = TRUE;
+        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 0);
+        SetColor(COLOR_RED, COLOR_BLACK);
+        if (!BlockIo)
+            Print(L"[ERROR] FAT: No Block I/O Protocol");
+        else if (!BlockIo->Media)
+            Print(L"[ERROR] FAT: No media present");
+        else
+            Print(L"[ERROR] FAT: Device not accessible");
+    }
+
+    if (fatError) {
+        uefi_call_wrapper(gBS->Stall, 1, 2000000); // пауза 3 секунды
+    }
+
     
     UPDATE_STATUS(L"Starting kernel...");
     uefi_call_wrapper(gBS->Stall, 1, 1000000);
@@ -588,10 +620,17 @@ VOID DebugBoot(BootInfo *bi, EFI_HANDLE ImageHandle) {
         LoadFATImage(BlockIo, bi, FALSE);
         if (bi->FATImageBase)
             LOG_OK(L"FAT image loaded (%ld MB)", bi->FATImageSize / (1024 * 1024));
+        else if (bi->FATImageSize == 0 && bi->FATImageBase == 0)
+            LOG_FAIL(L"FAT image not loaded - read error or allocation failed");
         else
-            LOG_WARN(L"FAT image not loaded");
+            LOG_FAIL(L"FAT image not loaded - unknown error");
     } else {
-        LOG_WARN(L"No Block I/O Protocol");
+        if (!BlockIo)
+            LOG_FAIL(L"No Block I/O Protocol available");
+        else if (!BlockIo->Media)
+            LOG_FAIL(L"Block I/O media not present");
+        else
+            LOG_FAIL(L"Block I/O device not accessible");
     }
     
     // === ДЕТАЛЬНЫЕ ДАМПЫ ===
