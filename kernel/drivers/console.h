@@ -86,7 +86,7 @@ extern uint32_t color_palette_256[];
 void initialize_console(BootInfo* bi);
 void put_pixel(uint32_t x, uint32_t y, uint32_t color);
 uint32_t convert_color(uint32_t color);
-void put_char_graphic(char c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color);
+void put_char_graphic(int c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color);
 void put_char(char c);
 void print_string(const char* str);
 void printf(const char* format, ...);

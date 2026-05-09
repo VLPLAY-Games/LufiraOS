@@ -35,9 +35,6 @@ static inline void outb(uint16_t port, uint8_t val) {
 #define ICW1_INIT    0x10
 
 static void pic_remap(void) {
-    uint8_t mask1 = inb(PIC1_DATA);
-    uint8_t mask2 = inb(PIC2_DATA);
-
     outb(PIC1_COMMAND, ICW1_INIT | ICW1_ICW4);
     outb(PIC2_COMMAND, ICW1_INIT | ICW1_ICW4);
     outb(PIC1_DATA, 0x20);    // master offset

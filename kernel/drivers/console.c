@@ -274,7 +274,7 @@ const char* get_color_name(ConsoleColor color) {
 }
 
 // Отрисовка символа 8x8
-void put_char_graphic(char c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color) {
+void put_char_graphic(int c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color) {
     if (c < 32 || c > 127) c = '?';
     
     unsigned char* glyph = full_font_data[c - 32];
@@ -435,7 +435,6 @@ void print_string(const char* str) {
 }
 
 void utoa(uint64_t value, char* buffer, int base) {
-    char* original_buffer = buffer;
     uint64_t temp = value;
     int digits = 0;
     
