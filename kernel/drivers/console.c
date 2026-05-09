@@ -459,29 +459,83 @@ void printf(const char* format, ...) {
     while (*format) {
         if (*format == '%') {
             format++;
-            if (*format == 's') {
+            
+            // Обработка %%
+            if (*format == '%') {
+                put_char('%');
+            }
+            // Строка
+            else if (*format == 's') {
                 char* str = va_arg(args, char*);
                 print_string(str);
-            } else if (*format == 'd') {
+            }
+            // Символ
+            else if (*format == 'c') {
+                char c = (char)va_arg(args, int);
+                put_char(c);
+            }
+            // Десятичное знаковое
+            else if (*format == 'd') {
                 int64_t val = va_arg(args, int64_t);
                 itoa(val, buffer, 10);
                 print_string(buffer);
-            } else if (*format == 'u') {
+            }
+            // Десятичное беззнаковое
+            else if (*format == 'u') {
                 uint64_t val = va_arg(args, uint64_t);
                 utoa(val, buffer, 10);
                 print_string(buffer);
-            } else if (*format == 'x' || *format == 'p' || *format == 'l') {
+            }
+            // Указатель (всегда с 0x)
+            else if (*format == 'p') {
                 uint64_t val = va_arg(args, uint64_t);
+                print_string("0x");
                 utoa(val, buffer, 16);
-                if (*format == 'p' || *format == 'l') {
-                    print_string("0x");
-                }
                 print_string(buffer);
-            } else if (*format == '%') {
-                put_char('%');
-            } else if (*format == 'c') {
-                char c = (char)va_arg(args, int);
-                put_char(c);
+            }
+            // Шестнадцатеричное или long/long long
+            else if (*format == 'x' || *format == 'l') {
+                // Если просто %x — печатаем без 0x
+                if (*format == 'x') {
+                    uint64_t val = va_arg(args, uint64_t);
+                    utoa(val, buffer, 16);
+                    print_string(buffer);
+                }
+                // Если %l... — пропускаем все 'l' и смотрим что дальше
+                else {
+                    format++; // пропускаем первый 'l'
+                    if (*format == 'l') {
+                        format++; // пропускаем второй 'l' (%llx)
+                    }
+                    
+                    if (*format == 'x') {
+                        uint64_t val = va_arg(args, uint64_t);
+                        utoa(val, buffer, 16);
+                        print_string(buffer);
+                    }
+                    else if (*format == 'u') {
+                        uint64_t val = va_arg(args, uint64_t);
+                        utoa(val, buffer, 10);
+                        print_string(buffer);
+                    }
+                    else if (*format == 'd') {
+                        int64_t val = va_arg(args, int64_t);
+                        itoa(val, buffer, 10);
+                        print_string(buffer);
+                    }
+                    else if (*format == 's') {
+                        char* str = va_arg(args, char*);
+                        print_string(str);
+                    }
+                    else {
+                        // Неизвестный формат — пропускаем
+                        format--;
+                    }
+                }
+            }
+            // Неизвестный спецификатор — игнорируем
+            else {
+                // Ничего не делаем, просто пропускаем
             }
         } else {
             put_char(*format);
