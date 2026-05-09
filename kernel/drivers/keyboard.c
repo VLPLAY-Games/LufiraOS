@@ -47,7 +47,7 @@ static const char scancode_to_char_shift[128] = {
     'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, '*', 0, ' ', 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
 
 void keyboard_init(void) {
@@ -76,11 +76,11 @@ void keyboard_init(void) {
     extended_scancode = 0;
 
     // Очистка буфера клавиатуры
-    uint8_t temp, status;
+    uint8_t status;
     while (1) {
         status = inb(KEYBOARD_STATUS_PORT);
         if (!(status & 1)) break;
-        temp = inb(KEYBOARD_DATA_PORT);
+        (void)inb(KEYBOARD_DATA_PORT);
     }
 
     // Отправка команды сброса клавиатуры

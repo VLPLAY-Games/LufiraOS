@@ -1,6 +1,7 @@
 #include "fat.h"
 #include "../system/disk.h"
 #include "../system/heap.h"
+#include "../drivers/console.h"
 #include <stddef.h>
 
 static void* memcpy(void* dest, const void* src, unsigned int n) {

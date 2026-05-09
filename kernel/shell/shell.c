@@ -12,8 +12,6 @@ extern fat_fs_t fatfs;
 char cwd_path[256] = "/";
 uint32_t cwd_first_cluster = 0;   // 0 = корень
 
-static uint32_t prompt_x = 0;
-static uint32_t prompt_y = 0;
 static uint32_t cursor_position_in_line = 0;
 static uint32_t command_start_x = 0;
 static uint32_t command_start_y = 0;
@@ -68,7 +66,6 @@ void strcpy(char* dest, const char* src) {
     *dest = '\0';
 }
 void shell_refresh_input_line(void) {
-    uint32_t saved_x = current_x, saved_y = current_y;
     set_cursor_position(command_start_x, command_start_y);
     for (uint32_t i = 0; i < screen_width_chars - command_start_x; i++)
         put_char_graphic(' ', command_start_x + i, command_start_y, current_color, current_bg_color);
