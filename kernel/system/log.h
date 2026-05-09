@@ -90,7 +90,7 @@
 // Пары "ключ: значение"
 #define LOG_KV(key, fmt, ...) do { \
     set_foreground_color(LOG_COLOR_LABEL); \
-    printf("  %-18s: ", key); \
+    printf("  %s: ", key); \
     set_foreground_color(LOG_COLOR_INFO); \
     printf(fmt, ##__VA_ARGS__); \
     printf("\n"); \

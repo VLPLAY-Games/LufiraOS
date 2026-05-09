@@ -101,26 +101,16 @@ void _start(BootInfo* bi) {
         LOG_KV("RSDP", "0x%lx", bi->RsdpAddress);
     if (bi->SmbiosAddress)
         LOG_KV("SMBIOS", "0x%lx", bi->SmbiosAddress);
+    LOG_KV("Command line", "(none)");
 
-    // ========== ИНФОРМАЦИЯ О ДИСПЛЕЕ ==========
+    // ========== ДИСПЛЕЙ ==========
     LOG_SECTION("Display Information");
-    LOG_KV("Resolution", "%d x %d", bi->HorizontalResolution, bi->VerticalResolution);
+    LOG_KV("Framebuffer", "0x%lx", bi->FrameBufferBase);
+    LOG_KV("Framebuffer size", "%u KB", (uint32_t)(bi->FrameBufferSize / 1024));
+    LOG_KV("Resolution", "%dx%d", bi->HorizontalResolution, bi->VerticalResolution);
     LOG_KV("Pixel format", "%s", (bi->PixelFormat == 0) ? "RGB" : "BGR");
-    LOG_KV("Pixels per line", "%d", bi->PixelsPerScanLine);
-    LOG_KV("Console grid", "%d x %d chars", screen_width_chars, screen_height_chars);
-
-    // ========== ЗАГОЛОВОК ЯДРА ==========
-    printf("\n");
-    set_foreground_color(LOG_COLOR_HEADER);
-    printf("================================================\n");
-    printf("             LufiraOS Kernel v0.2               \n");
-    printf("================================================\n");
-    set_foreground_color(LOG_COLOR_INFO);
-    
-    LOG_SECTION("System Information");
-    LOG_KV("Architecture", "x86_64");
-    LOG_KV("Build date", "%s", __DATE__);
-    LOG_KV("Build time", "%s", __TIME__);
+    LOG_KV("Scanline pixels", "%d", bi->PixelsPerScanLine);
+    LOG_KV("Console grid", "%dx%d chars", screen_width_chars, screen_height_chars);
 
     // ========== ИНИЦИАЛИЗАЦИЯ УСТРОЙСТВ ==========
     LOG_PENDING("Initializing keyboard...");
@@ -145,14 +135,29 @@ void _start(BootInfo* bi) {
     
     asm volatile("sti");
 
+    // ========== ЗАГОЛОВОК ЯДРА ==========
+    printf("\n");
+    set_foreground_color(LOG_COLOR_HEADER);
+    printf("================================================\n");
+    printf("             LufiraOS Kernel v0.2               \n");
+    printf("================================================\n");
+    set_foreground_color(LOG_COLOR_INFO);
+    
+    // ========== СИСТЕМНАЯ ИНФОРМАЦИЯ ==========
+    LOG_SECTION("System Information");
+    LOG_KV("Architecture", "x86_64");
+    LOG_KV("Build date", "%s", __DATE__);
+    LOG_KV("Build time", "%s", __TIME__);
+
     // ========== СТАТУС СИСТЕМЫ ==========
     LOG_SECTION("System Status");
-    LOG_KV("Console", "READY (256 colors)");
+    LOG_KV("Console", "READY (%d colors)", 256);
     LOG_KV("Keyboard", "%s", keyboard_is_initialized() ? "READY" : "NOT DETECTED");
     LOG_KV("Mouse", "%s", mouse_is_initialized() ? "READY" : "NOT DETECTED");
     LOG_KV("Memory manager", "INITIALIZED");
     LOG_KV("Interrupts", "ENABLED");
-    LOG_KV("Heap", "0x%lx", KERNEL_HEAP_START);
+    LOG_KV("Heap base", "0x%lx", KERNEL_HEAP_START);
+    LOG_KV("FAT driver", "%s", (bi->FATImageBase && bi->FATImageSize && fatfs.image) ? "READY" : "NOT LOADED");
 
     // ========== ПРИГЛАШЕНИЕ ==========
     set_foreground_color(LOG_COLOR_HEADER);
