@@ -1,4 +1,4 @@
-#include "exitbs.h"
+#include "exit_boot.h"
 
 VOID ExitBootServicesWrapper(BootInfo *bi, EFI_HANDLE ImageHandle) {
     EFI_STATUS status;

@@ -1,4 +1,4 @@
-#include "kernel.h"
+#include "kernel_loader.h"
 #include "utils.h"
 
 EFI_STATUS LoadKernel(BootInfo *bi, EFI_HANDLE ImageHandle, BOOLEAN animateSpinner, 

@@ -1,11 +1,11 @@
-#include "safeboot.h"
+#include "safe_boot.h"
 #include "utils.h"
 #include "memory.h"
 #include "graphics.h"
 #include "tables.h"
-#include "fatloader.h"
-#include "exitbs.h"
-#include "kernel.h"
+#include "fat_loader.h"
+#include "exit_boot.h"
+#include "kernel_loader.h"
 
 VOID SafeBoot(BootInfo *bi, EFI_HANDLE ImageHandle) {
     uefi_call_wrapper(gST->ConOut->ClearScreen, 1, gST->ConOut);

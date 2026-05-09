@@ -2,9 +2,9 @@
 #include <efilib.h>
 #include "utils.h"
 #include "splash.h"
-#include "quickboot.h"
-#include "safeboot.h"
-#include "debugboot.h"
+#include "quick_boot.h"
+#include "safe_boot.h"
+#include "debug_boot.h"
 
 EFI_HANDLE gImageHandle;
 

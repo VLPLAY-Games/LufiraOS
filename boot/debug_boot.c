@@ -1,11 +1,11 @@
-#include "debugboot.h"
+#include "debug_boot.h"
 #include "utils.h"
 #include "memory.h"
 #include "graphics.h"
 #include "tables.h"
-#include "fatloader.h"
-#include "exitbs.h"
-#include "kernel.h"
+#include "fat_loader.h"
+#include "exit_boot.h"
+#include "kernel_loader.h"
 #include "splash.h"
 
 VOID DebugBoot(BootInfo *bi, EFI_HANDLE ImageHandle) {
