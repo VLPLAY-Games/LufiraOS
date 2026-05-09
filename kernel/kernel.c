@@ -62,7 +62,7 @@ void _start(BootInfo* bi) {
 
     pmm_init(bi->MemoryMap, bi->MemoryMapSize, bi->MemoryMapDescriptorSize,
                 bi->KernelBase, bi->KernelSize);
-    paging_init();
+    paging_init(bi);
     heap_init();
 
 

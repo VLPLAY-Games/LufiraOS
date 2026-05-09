@@ -2,6 +2,8 @@
 #define PAGING_H
 
 #include <stdint.h>
+#include <stddef.h>
+#include "../drivers/console.h"
 
 #define PAGE_SIZE            4096
 #define PAGE_PRESENT         0x001
@@ -16,7 +18,7 @@
 #define PAGE_NX              (1ULL << 63)   // NX bit, if supported
 
 // Инициализация страничной адресации (identity mapping всей физической памяти)
-void paging_init(void);
+void paging_init(BootInfo* bi);
 
 // Отобразить виртуальную страницу на физический адрес
 // Возвращает 0 при успехе, -1 при ошибке.

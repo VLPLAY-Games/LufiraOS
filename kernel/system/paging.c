@@ -41,55 +41,58 @@ static pt_entry_t* get_or_create_table(pt_entry_t *parent, uint64_t index, int c
 }
 
 // Инициализация: identity mapping всей физической памяти 2-МБ страницами
-void paging_init(void) {
-    // Выделяем PML4
-    uint64_t pml4_phys = pmm_alloc_page();
-    if (!pml4_phys) { printf("FATAL: cannot allocate PML4\n"); while(1) __asm__("hlt"); }
-    pml4 = (pt_entry_t*)pml4_phys;
-    for (int i = 0; i < 512; i++) pml4[i] = 0;
+void paging_init(BootInfo* bi) {
+    // PML4 и PDPT размещаем статически
+    static pt_entry_t pml4_table[512] __attribute__((aligned(4096)));
+    static pt_entry_t pdpt_table[512] __attribute__((aligned(4096)));
 
-    // Выделяем PDPT (одна, covers 512*1GB = 512GB, более чем достаточно)
-    uint64_t pdpt_phys = pmm_alloc_page();
-    if (!pdpt_phys) { printf("FATAL: cannot allocate PDPT\n"); while(1) __asm__("hlt"); }
-    pdpt = (pt_entry_t*)pdpt_phys;
+    pml4 = pml4_table;
+    pdpt = pdpt_table;
+
+    // Обнуляем таблицы
+    for (int i = 0; i < 512; i++) pml4[i] = 0;
     for (int i = 0; i < 512; i++) pdpt[i] = 0;
 
-    // Связываем PML4 с PDPT
-    pml4[0] = paddr_to_entry(pdpt_phys, PAGE_PRESENT | PAGE_WRITE);
+    pml4[0] = paddr_to_entry((uint64_t)pdpt_table, PAGE_PRESENT | PAGE_WRITE);
 
-    // Определяем, сколько PDPTE записей нужно для покрытия всей физической памяти
-    uint64_t total_pages = pmm_get_total_pages();
-    uint64_t total_memory = total_pages * PAGE_SIZE;
-    // Каждая запись PDPTE (с PS=1) покрывает 1 GB (2^30), но мы используем обычные PDPTE
-    // и для каждой создадим PD с 2-МБ страницами.
-    // Количество PDPTE = ceil(total_memory / (512 * 2*1024*1024))
-    uint64_t mem_gb = (total_memory + (1ULL<<30) - 1) >> 30;
-    if (mem_gb > 512) mem_gb = 512; // ограничим
+    // Вычисляем максимальный физический адрес **по всей карте памяти** (включая MMIO)
+    uint8_t *map = (uint8_t*)bi->MemoryMap;
+    uint64_t desc_size = bi->MemoryMapDescriptorSize;
+    uint64_t desc_count = bi->MemoryMapSize / desc_size;
+    uint64_t max_phys = 0;
+
+    for (uint64_t i = 0; i < desc_count; i++) {
+        EFI_MEMORY_DESCRIPTOR *d = (EFI_MEMORY_DESCRIPTOR*)(map + i * desc_size);
+        uint64_t end = d->PhysicalStart + d->NumberOfPages * PAGE_SIZE;
+        if (end > max_phys) max_phys = end;
+    }
+
+    uint64_t total_memory = max_phys;          // полный физический диапазон
+    uint64_t mem_gb = (total_memory + (1ULL << 30) - 1) >> 30;
+    if (mem_gb > 512) mem_gb = 512;
 
     for (uint64_t gb = 0; gb < mem_gb; gb++) {
-        // Выделяем PD для этого гигабайта
         uint64_t pd_phys = pmm_alloc_page();
-        if (!pd_phys) { printf("FATAL: cannot allocate PD\n"); while(1) __asm__("hlt"); }
+        if (!pd_phys) {
+            printf("FATAL: cannot allocate PD\n");
+            while(1) __asm__("hlt");
+        }
+
         pt_entry_t *pd = (pt_entry_t*)pd_phys;
         for (int i = 0; i < 512; i++) pd[i] = 0;
 
-        // Связываем PDPTE с PD
         pdpt[gb] = paddr_to_entry(pd_phys, PAGE_PRESENT | PAGE_WRITE);
 
-        // Заполняем PD 2-МБ страницами
         for (int i = 0; i < 512; i++) {
-            uint64_t phys = (gb << 30) + (i << 21); // 1GB * gb + 2MB * i
+            uint64_t phys = (gb << 30) + (i << 21);
             pd[i] = paddr_to_entry(phys, PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE);
         }
     }
 
-    // Загружаем CR3
-    asm volatile ("mov %0, %%cr3" : : "r" (pml4_phys) : "memory");
+    // Загружаем новый CR3
+    asm volatile ("mov %0, %%cr3" : : "r" ((uint64_t)pml4_table) : "memory");
 
-    // Включаем пейджинг и возможно PAE/NXE? CR0.PG уже должен быть установлен UEFI, но мы перезаписываем.
-    // В long mode пейджинг всегда включен, но CR3 мы обновили, этого достаточно.
-    printf("Paging initialized: identity mapping of %u MB of RAM.\n",
-       (uint32_t)(total_memory / (1024*1024)));
+    printf("Paging: identity mapped up to 0x%llx\n", max_phys);
 }
 
 static pt_entry_t* ensure_table(pt_entry_t *table, uint64_t index) {

@@ -37,16 +37,14 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
     // =====================================================
 
     uint64_t max_phys = 0;
-
     for (uint64_t i = 0; i < desc_count; i++) {
-
         EFI_MEMORY_DESCRIPTOR *d =
             (EFI_MEMORY_DESCRIPTOR*)(map + i * desc_size);
-
+        if (d->Type != EfiConventionalMemory)
+            continue;
         uint64_t end =
             d->PhysicalStart +
             d->NumberOfPages * PAGE_SIZE;
-
         if (end > max_phys)
             max_phys = end;
     }
@@ -111,7 +109,7 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
         while (1) __asm__("hlt");
     }
 
-    printf("bitmap_phys=0x%x bitmap_size=%u\n", (uint32_t)bitmap_phys, (uint32_t)bitmap_size);
+    printf("bitmap_phys=0x%x bitmap_size=%u bytes\n", (uint32_t)bitmap_phys, (uint32_t)bitmap_size);
 
     // =====================================================
     // PHYSICAL == VIRTUAL (identity mapping)
@@ -206,10 +204,14 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
             used_pages++;
     }
 
-    printf("PMM initialized: %u pages total, %u used, %u free.\n",
-       (uint32_t)total_pages,
-       (uint32_t)used_pages,
-       (uint32_t)(total_pages - used_pages));
+    next_free_page = 512;
+
+    uint64_t free_pages = total_pages - used_pages;
+    printf("PMM: %u MB total, %u MB used, %u MB free (%u pages)\n",
+        (uint32_t)(total_pages * 4 / 1024),
+        (uint32_t)(used_pages * 4 / 1024),
+        (uint32_t)(free_pages * 4 / 1024),
+        (uint32_t)free_pages);
 }
 
 uint64_t pmm_alloc_page(void) {
