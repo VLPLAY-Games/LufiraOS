@@ -5,6 +5,7 @@
 
 #define PAGE_SIZE 4096
 #define BITMAP_ENTRY_SIZE 8
+#define EfiConventionalMemory 7
 
 static uint8_t *bitmap = NULL;
 static uint64_t total_pages = 0;
@@ -28,16 +29,23 @@ static inline int bitmap_test(uint64_t page) {
 void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
               uint64_t kernel_base, uint64_t kernel_size)
 {
-    EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR*)memory_map;
+    uint8_t *map = (uint8_t*)memory_map;
     uint64_t desc_count = map_size / desc_size;
 
-    // Находим максимальный физический адрес
+    // =====================================================
+    // НАХОДИМ МАКСИМАЛЬНЫЙ ФИЗИЧЕСКИЙ АДРЕС
+    // =====================================================
+
     uint64_t max_phys = 0;
 
     for (uint64_t i = 0; i < desc_count; i++) {
+
+        EFI_MEMORY_DESCRIPTOR *d =
+            (EFI_MEMORY_DESCRIPTOR*)(map + i * desc_size);
+
         uint64_t end =
-            desc[i].PhysicalStart +
-            desc[i].NumberOfPages * PAGE_SIZE;
+            d->PhysicalStart +
+            d->NumberOfPages * PAGE_SIZE;
 
         if (end > max_phys)
             max_phys = end;
@@ -48,25 +56,53 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
     if (max_phys % PAGE_SIZE)
         total_pages++;
 
-    // Размер bitmap в байтах
+    // =====================================================
+    // РАЗМЕР BITMAP
+    // =====================================================
+
     uint64_t bitmap_size =
         (total_pages + BITMAP_ENTRY_SIZE - 1) / BITMAP_ENTRY_SIZE;
 
-    // Ищем место под bitmap
+    // =====================================================
+    // ПОИСК МЕСТА ПОД BITMAP
+    // =====================================================
+
     uint64_t bitmap_phys = 0;
+    uint64_t best_size = 0;
+
+    uint64_t kernel_end =
+        kernel_base + kernel_size;
 
     for (uint64_t i = 0; i < desc_count; i++) {
 
-        if (desc[i].Type != 7) // EfiConventionalMemory
+        EFI_MEMORY_DESCRIPTOR *d =
+            (EFI_MEMORY_DESCRIPTOR*)(map + i * desc_size);
+
+        if (d->Type != EfiConventionalMemory)
             continue;
 
-        uint64_t block_start = desc[i].PhysicalStart;
-        uint64_t block_size  = desc[i].NumberOfPages * PAGE_SIZE;
+        uint64_t block_start =
+            d->PhysicalStart;
 
-        // bitmap должен помещаться целиком
-        if (block_size >= bitmap_size) {
+        uint64_t block_size =
+            d->NumberOfPages * PAGE_SIZE;
+
+        uint64_t block_end =
+            block_start + block_size;
+
+        // не размещать bitmap поверх ядра
+        if (!(block_end <= kernel_base ||
+              block_start >= kernel_end))
+        {
+            continue;
+        }
+
+        // выбираем самый большой блок
+        if (block_size >= bitmap_size &&
+            block_size > best_size)
+        {
+            best_size = block_size;
             bitmap_phys = block_start;
-            break;
         }
     }
 
@@ -76,32 +112,46 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
     }
 
     printf("bitmap_phys=%lx bitmap_size=%lx\n",
-           bitmap_phys, bitmap_size);
+           bitmap_phys,
+           bitmap_size);
 
-    // IMPORTANT:
-    // Сейчас paging ещё identity mapped,
-    // поэтому physical == virtual.
+    // =====================================================
+    // PHYSICAL == VIRTUAL (identity mapping)
+    // =====================================================
+
     bitmap = (uint8_t*)bitmap_phys;
 
-    // Обнуляем bitmap
+    // =====================================================
+    // ОЧИСТКА BITMAP
+    // =====================================================
+
     for (uint64_t i = 0; i < bitmap_size; i++)
         bitmap[i] = 0;
 
-    // Сначала помечаем ВСЁ как занятое
+    // =====================================================
+    // СНАЧАЛА ВСЁ ЗАНЯТО
+    // =====================================================
+
     for (uint64_t i = 0; i < total_pages; i++)
         bitmap_set(i);
 
-    // Освобождаем только EfiConventionalMemory
+    // =====================================================
+    // ОСВОБОЖДАЕМ EfiConventionalMemory
+    // =====================================================
+
     for (uint64_t i = 0; i < desc_count; i++) {
 
-        if (desc[i].Type != 7)
+        EFI_MEMORY_DESCRIPTOR *d =
+            (EFI_MEMORY_DESCRIPTOR*)(map + i * desc_size);
+
+        if (d->Type != EfiConventionalMemory)
             continue;
 
         uint64_t start_page =
-            desc[i].PhysicalStart / PAGE_SIZE;
+            d->PhysicalStart / PAGE_SIZE;
 
         uint64_t pages =
-            desc[i].NumberOfPages;
+            d->NumberOfPages;
 
         for (uint64_t p = 0; p < pages; p++)
             bitmap_clear(start_page + p);
@@ -111,12 +161,11 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
     // РЕЗЕРВ LOW MEMORY (0..1MB)
     // =====================================================
 
-    // 256 страниц * 4096 = 1MB
     for (uint64_t i = 0; i < 256; i++)
         bitmap_set(i);
 
     // =====================================================
-    // РЕЗЕРВ СТРАНИЦ BITMAP
+    // РЕЗЕРВ BITMAP
     // =====================================================
 
     uint64_t bitmap_start_page =
@@ -148,6 +197,7 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
     used_pages = 0;
 
     for (uint64_t i = 0; i < total_pages; i++) {
+
         if (bitmap_test(i))
             used_pages++;
     }

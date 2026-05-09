@@ -316,12 +316,18 @@ VOID QuickBoot(BootInfo *bi, EFI_HANDLE ImageHandle, BootMode mode, BOOLEAN keep
     UPDATE_STATUS(L"Allocating memory for kernel...");
     UINTN Pages = (bi->KernelSize + 4095) / 4096;
     EFI_PHYSICAL_ADDRESS KernelBase = 0x100000;
-    status = uefi_call_wrapper(gBS->AllocatePages, 4, AllocateAddress, EfiLoaderData, Pages, &KernelBase);
-    if (EFI_ERROR(status))
-        uefi_call_wrapper(gBS->AllocatePages, 4, AllocateAnyPages, EfiLoaderData, Pages, &KernelBase);
+    status = uefi_call_wrapper(gBS->AllocatePages, 4,
+        AllocateAddress, EfiLoaderData, Pages, &KernelBase);
+
+    if (EFI_ERROR(status)) {
+        status = uefi_call_wrapper(gBS->AllocatePages, 4,
+            AllocateAnyPages, EfiLoaderData, Pages, &KernelBase);
+    }
+
     if (EFI_ERROR(status)) {
         FATAL_ERROR(L"Cannot allocate kernel memory");
     }
+
     bi->KernelBase = KernelBase;
     
     UPDATE_STATUS(L"Loading kernel...");
@@ -534,10 +540,18 @@ VOID DebugBoot(BootInfo *bi, EFI_HANDLE ImageHandle) {
     
     UINTN Pages = (bi->KernelSize + 4095) / 4096;
     EFI_PHYSICAL_ADDRESS KernelBase = 0x100000;
-    status = uefi_call_wrapper(gBS->AllocatePages, 4, AllocateAddress, EfiLoaderData, Pages, &KernelBase);
-    if (EFI_ERROR(status))
-        uefi_call_wrapper(gBS->AllocatePages, 4, AllocateAnyPages, EfiLoaderData, Pages, &KernelBase);
-    if (EFI_ERROR(status)) { LOG_FAIL(L"Memory allocation failed"); while(1) __asm__ volatile("hlt"); }
+    status = uefi_call_wrapper(gBS->AllocatePages, 4,
+        AllocateAddress, EfiLoaderData, Pages, &KernelBase);
+
+    if (EFI_ERROR(status)) {
+        status = uefi_call_wrapper(gBS->AllocatePages, 4,
+            AllocateAnyPages, EfiLoaderData, Pages, &KernelBase);
+    }
+
+    if (EFI_ERROR(status)) {
+        LOG_FAIL(L"Cannot allocate kernel memory");
+    }
+
     bi->KernelBase = KernelBase;
     LOG_OK(L"Kernel memory allocated at 0x%lx", KernelBase);
     
