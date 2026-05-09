@@ -315,7 +315,85 @@ void command_mkdir(const char* name) {
 
 
 void command_rm(const char* name) {
-    if (!name || !*name) return;
+    if (!name || !*name) {
+        printf("\nUsage: rm <name> or rm *\n");
+        return;
+    }
+    
+    // Проверяем, является ли аргумент "*"
+    if (strcmp(name, "*") == 0) {
+        // Удаляем все файлы и пустые директории в текущей директории
+        fat_dir_t dir;
+        if (fat_opendir(&fatfs, cwd_first_cluster, &dir) != 0) {
+            printf("\nCannot open directory\n");
+            return;
+        }
+        
+        printf("\n");
+        fat_dir_entry_t entry;
+        int removed_count = 0;
+        int error_count = 0;
+        
+        // Сначала собираем имена всех НЕ-специальных записей
+        char names_to_delete[256][13];  // макс 256 файлов
+        int name_count = 0;
+        
+        while (fat_readdir(&dir, &entry)) {
+            // Пропускаем . и ..
+            if (entry.name[0] == '.' && (entry.name[1] == ' ' || entry.name[1] == '.'))
+                continue;
+            
+            // Пропускаем удаленные записи и LFN
+            if (entry.name[0] == 0xE5 || entry.attr == 0x0F)
+                continue;
+            
+            // Формируем имя
+            char name_buf[13];
+            int pos = 0;
+            for (int j = 0; j < 8 && entry.name[j] != ' '; j++)
+                name_buf[pos++] = (char)entry.name[j];
+            if (entry.name[8] != ' ') {
+                name_buf[pos++] = '.';
+                for (int j = 8; j < 11 && entry.name[j] != ' '; j++)
+                    name_buf[pos++] = (char)entry.name[j];
+            }
+            name_buf[pos] = '\0';
+            
+            // Копируем имя в массив для удаления
+            strcpy(names_to_delete[name_count], name_buf);
+            name_count++;
+            
+            if (name_count >= 256) break; // Защита от переполнения
+        }
+        fat_closedir(&dir);
+        
+        // Теперь удаляем все собранные элементы
+        for (int i = 0; i < name_count; i++) {
+            int res = fat_rm(&fatfs, cwd_first_cluster, names_to_delete[i]);
+            switch (res) {
+                case 0:
+                    printf("  Removed: %s\n", names_to_delete[i]);
+                    removed_count++;
+                    break;
+                case -4:
+                    printf("  Skipped (not empty): %s\n", names_to_delete[i]);
+                    error_count++;
+                    break;
+                default:
+                    printf("  Failed to remove: %s (error %d)\n", names_to_delete[i], res);
+                    error_count++;
+                    break;
+            }
+        }
+        
+        printf("\nRemoved %d item(s)", removed_count);
+        if (error_count > 0)
+            printf(", %d error(s)", error_count);
+        printf("\n");
+        return;
+    }
+    
+    // Обычное удаление одного файла/директории
     int res = fat_rm(&fatfs, cwd_first_cluster, name);
     switch (res) {
         case 0:
@@ -331,7 +409,7 @@ void command_rm(const char* name) {
             printf("\nrm: cannot remove '.' or '..'\n");
             break;
         case -4:
-            printf("\nrm: directory not empty\n");
+            printf("\nrm: directory not empty: %s\n", name);
             break;
         default:
             printf("\nrm: failed (error %d)\n", res);
