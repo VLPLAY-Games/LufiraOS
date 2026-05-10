@@ -181,6 +181,9 @@ void process_keypress(int key) {
         case KEY_DOWN_ARROW:
             shell_handle_down_arrow();
             return;
+        case '\t':  // Tab!
+            shell_handle_tab();
+            return;
     }
 
     if (key == '\n') {

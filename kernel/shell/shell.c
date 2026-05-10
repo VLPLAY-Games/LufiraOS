@@ -240,3 +240,67 @@ void show_prompt(void) {
     history_index = -1;
     if (cursor_enabled && !cursor_visible) draw_cursor();
 }
+
+void shell_handle_tab(void) {
+    static const char *commands[] = {
+        "help", "clear", "reboot", "shutdown", "version",
+        "echo", "history", "status", "trap",
+        "color", "colors", "fg", "bg", "reset",
+        "pwd", "cd", "ls", "mkdir", "rm", "touch", "cat", "run",
+        NULL
+    };
+    
+    int matches[32];
+    int match_count = 0;
+    
+    for (int i = 0; commands[i] != NULL; i++) {
+        int match = 1;
+        for (int j = 0; j < (int)current_line_length; j++) {
+            if (commands[i][j] == '\0' || 
+                to_lower(commands[i][j]) != to_lower(current_line[j])) {
+                match = 0;
+                break;
+            }
+        }
+        if (match) {
+            matches[match_count++] = i;
+            if (match_count >= 32) break;
+        }
+    }
+    
+    if (match_count == 0) return;
+    
+    if (match_count == 1) {
+        // Автодополняем
+        const char *cmd = commands[matches[0]];
+        while (current_line_length < INPUT_BUFFER_SIZE - 1 && cmd[current_line_length]) {
+            current_line[current_line_length] = cmd[current_line_length];
+            current_line_length++;
+            cursor_position_in_line++;
+        }
+        current_line[current_line_length] = '\0';
+        
+        // Добавляем пробел
+        if (current_line_length < INPUT_BUFFER_SIZE - 1) {
+            current_line[current_line_length] = ' ';
+            current_line_length++;
+            cursor_position_in_line++;
+            current_line[current_line_length] = '\0';
+        }
+        
+        shell_refresh_input_line();
+    } else {
+        // Показываем варианты
+        put_char('\n');
+        for (int i = 0; i < match_count; i++) {
+            printf("%s  ", commands[matches[i]]);
+        }
+        put_char('\n');
+        show_prompt();
+        
+        // Восстанавливаем ввод
+        for (uint32_t i = 0; i < current_line_length; i++) {
+            put_char(current_line[i]);
+        }
+    }
+}
