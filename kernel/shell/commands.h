@@ -29,6 +29,7 @@ void command_mkdir(const char* name);
 void command_rm(const char* name);
 void command_touch(const char* name);
 void command_cat(const char* filename);
+void command_write(const char *filename);
 
 // ELF loader
 void command_run(const char* filename);

@@ -653,3 +653,232 @@ void fat_flush(fat_fs_t *fs) {
     memset(fs->dirty_map, 0, fs->dirty_map_size);  // сбрасываем карту
     printf("done (%u sectors written).\n", written);
 }
+
+// ========== ЗАПИСЬ В ФАЙЛ ==========
+
+// Найти свободный кластер в FAT
+static uint32_t fat_find_free_cluster(fat_fs_t *fs) {
+    uint32_t max_cluster;
+    if (fs->fat_type == 12) max_cluster = 0xFF0;
+    else if (fs->fat_type == 16) max_cluster = 0xFFF0;
+    else max_cluster = 0x0FFFFFF0;
+    
+    uint32_t total_clusters = (fs->total_sectors - fs->data_start) / fs->cluster_size;
+    if (total_clusters > max_cluster - 2) total_clusters = max_cluster - 2;
+    
+    // Начинаем с 2 (0 и 1 зарезервированы)
+    for (uint32_t i = 2; i < total_clusters + 2; i++) {
+        uint32_t val = get_fat_entry(fs, i);
+        if (val == 0) return i;
+    }
+    return 0;  // Нет свободных кластеров
+}
+
+// Выделить новый кластер в цепочке
+static uint32_t fat_alloc_cluster(fat_fs_t *fs, uint32_t prev_cluster) {
+    uint32_t new_cluster = fat_find_free_cluster(fs);
+    if (new_cluster == 0) return 0;
+    
+    // Помечаем как конец цепочки
+    if (fs->fat_type == 12) set_fat_entry(fs, new_cluster, 0xFFF);
+    else if (fs->fat_type == 16) set_fat_entry(fs, new_cluster, 0xFFFF);
+    else set_fat_entry(fs, new_cluster, 0x0FFFFFFF);
+    
+    // Связываем с предыдущим
+    if (prev_cluster >= 2) {
+        set_fat_entry(fs, prev_cluster, new_cluster);
+    }
+    
+    // Очищаем кластер
+    uint8_t *cluster_data = (uint8_t*)cluster_to_sector(fs, new_cluster);
+    for (uint32_t i = 0; i < fs->cluster_size * 512; i++) {
+        cluster_data[i] = 0;
+    }
+    mark_cluster_dirty(fs, new_cluster);
+    
+    return new_cluster;
+}
+
+// Запись в файл (полная перезапись)
+int fat_write_file(fat_fs_t *fs, const char *filename, const void *buffer, uint32_t size) {
+    if (!fs || !filename || !buffer) return -1;
+    
+    char sname[11];
+    to_short_name(filename, sname);
+    
+    fat_dir_entry_t *entry = find_in_root(fs, sname);
+    if (!entry) return -1;  // Файл не найден
+    
+    // Если файл существует, освобождаем старые кластеры
+    uint16_t clow = read_le16((const uint8_t*)&entry->first_cluster_low);
+    uint16_t chigh = 0;
+    if (fs->fat_type == 32) {
+        chigh = read_le16((const uint8_t*)&entry->first_cluster_high);
+    }
+    uint32_t old_cluster = ((uint32_t)chigh << 16) | clow;
+    
+    if (old_cluster >= 2) {
+        free_cluster_chain(fs, old_cluster);
+    }
+    
+    if (size == 0) {
+        // Файл нулевого размера
+        write_le16((uint8_t*)&entry->first_cluster_low, 0);
+        if (fs->fat_type == 32) {
+            write_le16((uint8_t*)&entry->first_cluster_high, 0);
+        }
+        write_le32((uint8_t*)&entry->file_size, 0);
+        
+        // Помечаем сектор директории как грязный
+        uint32_t dir_lba = fs->root_dir_start + 
+            (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
+        fat_mark_sector_dirty(fs, dir_lba);
+        return 0;
+    }
+    
+    // Вычисляем сколько кластеров нужно
+    uint32_t bytes_per_cluster = fs->cluster_size * 512;
+    uint32_t needed_clusters = (size + bytes_per_cluster - 1) / bytes_per_cluster;
+    
+    // Выделяем цепочку кластеров
+    uint32_t cluster = fat_alloc_cluster(fs, 0);
+    if (cluster == 0) return -1;
+    
+    uint32_t first_cluster = cluster;
+    uint32_t prev = cluster;
+    
+    for (uint32_t i = 1; i < needed_clusters; i++) {
+        cluster = fat_alloc_cluster(fs, prev);
+        if (cluster == 0) {
+            // Не хватило места - освобождаем что выделили
+            free_cluster_chain(fs, first_cluster);
+            return -1;
+        }
+        prev = cluster;
+    }
+    
+    // Копируем данные
+    const uint8_t *src = (const uint8_t *)buffer;
+    uint32_t remaining = size;
+    cluster = first_cluster;
+    
+    while (remaining > 0 && cluster >= 2) {
+        uint8_t *dst = (uint8_t*)cluster_to_sector(fs, cluster);
+        uint32_t to_copy = remaining > bytes_per_cluster ? bytes_per_cluster : remaining;
+        
+        for (uint32_t i = 0; i < to_copy; i++) {
+            dst[i] = src[size - remaining + i];
+        }
+        
+        mark_cluster_dirty(fs, cluster);
+        remaining -= to_copy;
+        cluster = get_fat_entry(fs, cluster);
+    }
+    
+    // Обновляем директорию
+    write_le16((uint8_t*)&entry->first_cluster_low, first_cluster & 0xFFFF);
+    if (fs->fat_type == 32) {
+        write_le16((uint8_t*)&entry->first_cluster_high, (first_cluster >> 16) & 0xFFFF);
+    }
+    write_le32((uint8_t*)&entry->file_size, size);
+    
+    // Помечаем сектор директории
+    uint32_t dir_lba = fs->root_dir_start + 
+        (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
+    fat_mark_sector_dirty(fs, dir_lba);
+    
+    return 0;
+}
+
+// Дописать в конец файла
+int fat_append_file(fat_fs_t *fs, const char *filename, const void *buffer, uint32_t size) {
+    if (!fs || !filename || !buffer || size == 0) return -1;
+    
+    char sname[11];
+    to_short_name(filename, sname);
+    
+    fat_dir_entry_t *entry = find_in_root(fs, sname);
+    if (!entry) return -1;
+    
+    uint32_t old_size = read_le32((const uint8_t*)&entry->file_size);
+    uint32_t new_size = old_size + size;
+    
+    uint16_t clow = read_le16((const uint8_t*)&entry->first_cluster_low);
+    uint16_t chigh = 0;
+    if (fs->fat_type == 32) {
+        chigh = read_le16((const uint8_t*)&entry->first_cluster_high);
+    }
+    uint32_t cluster = ((uint32_t)chigh << 16) | clow;
+    
+    uint32_t bytes_per_cluster = fs->cluster_size * 512;
+    
+    // Ищем последний кластер
+    uint32_t last_cluster = cluster;
+    if (last_cluster >= 2) {
+        while (!is_eoc(fs, get_fat_entry(fs, last_cluster))) {
+            last_cluster = get_fat_entry(fs, last_cluster);
+            if (last_cluster < 2) break;
+        }
+    }
+    
+    // Вычисляем смещение в последнем кластере
+    uint32_t offset_in_last = old_size % bytes_per_cluster;
+    uint32_t free_in_last = offset_in_last > 0 ? bytes_per_cluster - offset_in_last : 0;
+    
+    const uint8_t *src = (const uint8_t *)buffer;
+    uint32_t src_offset = 0;
+    
+    // Дописываем в последний кластер если есть место
+    if (free_in_last > 0 && last_cluster >= 2) {
+        uint8_t *dst = (uint8_t*)cluster_to_sector(fs, last_cluster);
+        uint32_t to_copy = size > free_in_last ? free_in_last : size;
+        
+        for (uint32_t i = 0; i < to_copy; i++) {
+            dst[offset_in_last + i] = src[i];
+        }
+        
+        mark_cluster_dirty(fs, last_cluster);
+        src_offset = to_copy;
+    }
+    
+    // Если остались данные - выделяем новые кластеры
+    while (src_offset < size) {
+        uint32_t new_cluster = fat_alloc_cluster(fs, last_cluster >= 2 ? last_cluster : 0);
+        if (new_cluster == 0) {
+            // Не хватило места, но часть данных уже записана
+            write_le32((uint8_t*)&entry->file_size, old_size + src_offset);
+            uint32_t dir_lba = fs->root_dir_start + 
+                (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
+            fat_mark_sector_dirty(fs, dir_lba);
+            return -1;
+        }
+        
+        if (last_cluster < 2) {
+            // Это первый кластер
+            write_le16((uint8_t*)&entry->first_cluster_low, new_cluster & 0xFFFF);
+            if (fs->fat_type == 32) {
+                write_le16((uint8_t*)&entry->first_cluster_high, (new_cluster >> 16) & 0xFFFF);
+            }
+        }
+        
+        last_cluster = new_cluster;
+        
+        uint8_t *dst = (uint8_t*)cluster_to_sector(fs, new_cluster);
+        uint32_t to_copy = (size - src_offset) > bytes_per_cluster ? bytes_per_cluster : (size - src_offset);
+        
+        for (uint32_t i = 0; i < to_copy; i++) {
+            dst[i] = src[src_offset + i];
+        }
+        
+        mark_cluster_dirty(fs, new_cluster);
+        src_offset += to_copy;
+    }
+    
+    // Обновляем размер файла
+    write_le32((uint8_t*)&entry->file_size, new_size);
+    uint32_t dir_lba = fs->root_dir_start + 
+        (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
+    fat_mark_sector_dirty(fs, dir_lba);
+    
+    return 0;
+}

@@ -315,3 +315,49 @@ void command_run(const char *filename) {
     
     // Не освобождаем буфер - он используется процессом
 }
+
+// write - запись в файл
+void command_write(const char *filename) {
+    if (!filename || *filename == '\0') {
+        printf("\nUsage: write <filename> <text>\n");
+        printf("Example: write test.txt Hello World\n");
+        return;
+    }
+    
+    // Ищем аргументы (текст для записи)
+    const char *text = filename;
+    while (*text && *text != ' ') text++;
+    if (*text == ' ') {
+        text++;  // Пропускаем пробел
+        while (*text == ' ') text++;
+    }
+    
+    if (*text == '\0') {
+        printf("\nUsage: write <filename> <text>\n");
+        return;
+    }
+    
+    // Вычисляем длину текста
+    int len = 0;
+    while (text[len]) len++;
+    
+    // Пытаемся открыть файл чтобы проверить существует ли
+    uint32_t fsize;
+    int exists = (fat_open(&fatfs, filename, &fsize) == 0);
+    
+    int result;
+    if (exists) {
+        // Перезаписываем
+        result = fat_write_file(&fatfs, filename, text, len);
+        printf("\nFile '%s' overwritten (%d bytes)\n", filename, len);
+    } else {
+        // Создаём новый
+        fat_create_file(&fatfs, 0, filename);
+        result = fat_write_file(&fatfs, filename, text, len);
+        printf("\nFile '%s' created and written (%d bytes)\n", filename, len);
+    }
+    
+    if (result != 0) {
+        printf("Error writing file!\n");
+    }
+}

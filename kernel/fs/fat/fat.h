@@ -95,3 +95,8 @@ int fat_create_file(fat_fs_t *fs, uint32_t parent_cluster, const char *name);
 
 void fat_mark_sector_dirty(fat_fs_t *fs, uint32_t lba);
 void fat_flush(fat_fs_t *fs);
+
+int fat_write_file(fat_fs_t *fs, const char *filename, const void *buffer, uint32_t size);
+int fat_append_file(fat_fs_t *fs, const char *filename, const void *buffer, uint32_t size);
+int fat_truncate_file(fat_fs_t *fs, const char *filename, uint32_t new_size);
+int fat_rename_file(fat_fs_t *fs, const char *old_name, const char *new_name);

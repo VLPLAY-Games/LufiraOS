@@ -218,6 +218,9 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "run") == 0) {
         if (*args == '\0') printf("\nUsage: run <filename>\n");
         else command_run(args);
+    } else if (strcmp(cmd_lower, "write") == 0) {
+        if (input_buffer_index <= 6) printf("\nUsage: write <filename> <text>\n");
+        else command_write(input_buffer + 6);
     } else {
         printf("\nUnknown command: %s\n", input_buffer);
         printf("Type 'help' for available commands.\n");
@@ -246,7 +249,7 @@ void shell_handle_tab(void) {
         "help", "clear", "reboot", "shutdown", "version",
         "echo", "history", "status", "trap",
         "color", "colors", "fg", "bg", "reset",
-        "pwd", "cd", "ls", "mkdir", "rm", "touch", "cat", "run",
+        "pwd", "cd", "ls", "mkdir", "rm", "touch", "cat", "run", "write",
         NULL
     };
     
