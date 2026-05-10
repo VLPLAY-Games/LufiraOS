@@ -20,11 +20,13 @@ $(foreach tool,$(REQUIRED_TOOLS),\
 
 $(shell mkdir -p $(BUILD_DIR) \
     $(BUILD_DIR)/boot \
+    $(BUILD_DIR)/kernel/lib \
     $(BUILD_DIR)/kernel/drivers/console \
     $(BUILD_DIR)/kernel/drivers/keyboard \
     $(BUILD_DIR)/kernel/drivers/mouse \
     $(BUILD_DIR)/kernel/drivers/disk \
     $(BUILD_DIR)/kernel/shell \
+	$(BUILD_DIR)/kernel/shell/commands \
     $(BUILD_DIR)/kernel/system/cpu \
     $(BUILD_DIR)/kernel/system/mm \
     $(BUILD_DIR)/kernel/fs/fat)
@@ -52,12 +54,16 @@ BOOTLOADER_OBJECTS := $(patsubst $(BOOTLOADER_DIR)/%.c,$(BUILD_DIR)/boot/%.o,$(B
 
 KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/kernel.c \
+    $(KERNEL_DIR)/lib/string.c \
+    $(KERNEL_DIR)/lib/cpu.c \
     $(KERNEL_DIR)/drivers/console/console.c \
     $(KERNEL_DIR)/drivers/keyboard/keyboard.c \
     $(KERNEL_DIR)/drivers/mouse/mouse.c \
     $(KERNEL_DIR)/drivers/disk/disk.c \
     $(KERNEL_DIR)/shell/shell.c \
-    $(KERNEL_DIR)/shell/commands.c \
+    $(KERNEL_DIR)/shell/commands/system.c \
+    $(KERNEL_DIR)/shell/commands/colors.c \
+    $(KERNEL_DIR)/shell/commands/filesystem.c \
     $(KERNEL_DIR)/system/cpu/gdt.c \
     $(KERNEL_DIR)/system/cpu/idt.c \
     $(KERNEL_DIR)/system/cpu/irq.c \
