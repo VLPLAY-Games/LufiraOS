@@ -1,22 +1,7 @@
 #pragma once
 
 #include "drivers/console/console.h"
-
-// Цвета для логов
-#define LOG_COLOR_OK        COLOR_LIGHT_GREEN     // ярко-зелёный
-#define LOG_COLOR_FAIL      COLOR_LIGHT_RED       // ярко-красный
-#define LOG_COLOR_WARN      COLOR_YELLOW          // жёлтый
-#define LOG_COLOR_INFO      COLOR_WHITE           // белый
-#define LOG_COLOR_PENDING   COLOR_LIGHT_CYAN      // голубой для статуса ожидания
-#define LOG_COLOR_HEADER    COLOR_LIGHT_MAGENTA
-#define LOG_COLOR_DIM       COLOR_DARK_GRAY       // тёмно-серый для INFO
-
-// Цвета для SYSTEM STATUS
-#define STATUS_READY        COLOR_LIGHT_GREEN     // зелёный для READY
-#define STATUS_NOT_READY    COLOR_LIGHT_RED       // красный для NOT DETECTED
-
-// Для ярлыков (Labels) в SYSTEM STATUS
-#define LOG_COLOR_LABEL     COLOR_LIGHT_CYAN      // голубой для подписей
+#include "lib/colors.h"
 
 // ========== МАКРОСЫ СТАТУСОВ ==========
 

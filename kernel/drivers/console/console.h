@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "bootinfo.h"
+#include "lib/colors.h"
 
 // Глобальные переменные состояния консоли
 extern uint32_t current_x;
@@ -22,27 +23,6 @@ extern int cursor_visible;
 extern int cursor_enabled;
 extern uint32_t cursor_blink_counter;
 extern uint32_t cursor_blink_rate;
-
-// Цветовая палитра - 16 стандартных цветов
-typedef enum {
-    COLOR_BLACK = 0,
-    COLOR_BLUE,
-    COLOR_GREEN,
-    COLOR_CYAN,
-    COLOR_RED,
-    COLOR_MAGENTA,
-    COLOR_BROWN,
-    COLOR_LIGHT_GRAY,
-    COLOR_DARK_GRAY,
-    COLOR_LIGHT_BLUE,
-    COLOR_LIGHT_GREEN,
-    COLOR_LIGHT_CYAN,
-    COLOR_LIGHT_RED,
-    COLOR_LIGHT_MAGENTA,
-    COLOR_YELLOW,
-    COLOR_WHITE,
-    COLOR_RGB // Для пользовательских RGB цветов
-} ConsoleColor;
 
 // Структура для хранения цветовых пар (текст/фон)
 typedef struct {

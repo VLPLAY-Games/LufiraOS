@@ -2,6 +2,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include "console.h"
+#include "lib/colors.h"
 
 // Глобальные переменные состояния консоли
 uint32_t current_x = 0;
