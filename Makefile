@@ -83,6 +83,7 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/system/syscall/syscall.c \
 	$(KERNEL_DIR)/system/elf/elf.c \
 	$(KERNEL_DIR)/fs/vfs/vfs.c \
+	$(KERNEL_DIR)/fs/fat/fat_vfs.c \
     $(KERNEL_DIR)/fs/fat/fat.c
 
 KERNEL_ASM_SOURCES := \
