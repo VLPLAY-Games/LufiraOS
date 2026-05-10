@@ -10,9 +10,11 @@
 #include "shell/shell.h"
 #include "system/cpu/gdt.h"
 #include "system/cpu/idt.h"
+#include "system/cpu/tss.h"
 #include "fs/fat/fat.h"
 #include "system/cpu/irq.h"
 #include "system/acpi/acpi.h"
+#include "system/process/process.h"
 #include "log.h"
 
 
@@ -51,6 +53,48 @@ static void pic_remap(void) {
 
 fat_fs_t fatfs;   // глобальная файловая система (для shell)
 
+// Тестовая задача 1
+static void test_task_1(void) {
+    int counter = 0;
+    while (1) {
+        set_foreground_color(COLOR_LIGHT_GREEN);
+        printf("[Task 1] Counter: %d\n", counter++);
+        set_foreground_color(COLOR_WHITE);
+        
+        // Добровольно отдаём управление
+        for (volatile int i = 0; i < 5000000; i++) {
+            asm volatile("nop");
+        }
+        
+        // Выходим после 5 итераций для теста
+        if (counter >= 5) {
+            printf("[Task 1] Done, exiting\n");
+            process_exit();
+        }
+    }
+}
+
+// Тестовая задача 2
+static void test_task_2(void) {
+    int counter = 0;
+    while (1) {
+        set_foreground_color(COLOR_LIGHT_CYAN);
+        printf("[Task 2] Counter: %d\n", counter++);
+        set_foreground_color(COLOR_WHITE);
+        
+        // Добровольно отдаём управление
+        for (volatile int i = 0; i < 5000000; i++) {
+            asm volatile("nop");
+        }
+        
+        // Выходим после 3 итераций для теста
+        if (counter >= 3) {
+            printf("[Task 2] Done, exiting\n");
+            process_exit();
+        }
+    }
+}
+
 // --- Точка входа ядра ---
 __attribute__((section(".text.prologue")))
 void _start(BootInfo* bi) {
@@ -62,6 +106,10 @@ void _start(BootInfo* bi) {
     LOG_PENDING("Initializing GDT...");
     gdt_init();
     LOG_DONE_OK("GDT initialized");
+    
+    LOG_PENDING("Initializing TSS...");
+    tss_init();
+    LOG_DONE_OK("TSS initialized");
     
     LOG_PENDING("Initializing IDT...");
     idt_init();
@@ -100,6 +148,11 @@ void _start(BootInfo* bi) {
     } else {
         LOG_WARN("No RSDP found, ACPI disabled");
     }
+
+    // ========== ИНИЦИАЛИЗАЦИЯ ПРОЦЕССОВ ==========
+    LOG_PENDING("Initializing process manager...");
+    process_init();
+    LOG_DONE_OK("Process manager initialized");
 
     // ========== ИНФОРМАЦИЯ О ЗАГРУЗКЕ ==========
     LOG_INFO_LINE("");
@@ -147,7 +200,7 @@ void _start(BootInfo* bi) {
     
     asm volatile("sti");
 
-    // ========== ЗАГОЛОВОК ЯДРА (киберпанк) ==========
+    // ========== ЗАГОЛОВОК ЯДРА ==========
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
     printf("================================================\n");
@@ -155,7 +208,7 @@ void _start(BootInfo* bi) {
     printf("================================================\n");
     set_foreground_color(LOG_COLOR_INFO);
     
-    // ========== СИСТЕМНАЯ ИНФОРМАЦИЯ (киберпанк) ==========
+    // ========== СИСТЕМНАЯ ИНФОРМАЦИЯ ==========
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
     printf("SYSTEM INFORMATION:\n");
@@ -164,7 +217,7 @@ void _start(BootInfo* bi) {
     printf("  Build date:   %s\n", __DATE__);
     printf("  Build time:   %s\n", __TIME__);
 
-    // ========== СТАТУС СИСТЕМЫ (цветной: зелёный/красный) ==========
+    // ========== СТАТУС СИСТЕМЫ ==========
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
     printf("SYSTEM STATUS:\n");
@@ -179,9 +232,31 @@ void _start(BootInfo* bi) {
     printf("  Memory manager: INITIALIZED\n");
     printf("  Interrupts: ENABLED\n");
     printf("  Heap base: 0x%lx\n", KERNEL_HEAP_START);
+    printf("  Process manager: INITIALIZED\n");
     set_foreground_color(LOG_COLOR_INFO);
 
-    // ========== ПРИГЛАШЕНИЕ (киберпанк) ==========
+    // ========== ЗАПУСК ТЕСТОВЫХ ЗАДАЧ ==========
+    printf("\n");
+    set_foreground_color(LOG_COLOR_HEADER);
+    printf("STARTING TEST PROCESSES:\n");
+    set_foreground_color(LOG_COLOR_INFO);
+    
+    process_t *task1 = process_create("test_task_1", test_task_1);
+    process_t *task2 = process_create("test_task_2", test_task_2);
+    
+    if (task1 && task2) {
+        printf("\nBoth test tasks created successfully!\n");
+        printf("Manual scheduling demo starting...\n\n");
+        
+        // Ручное переключение для теста
+        switch_to_process(task1);
+        
+        // Сюда мы вернёмся когда task1 вызовет process_exit()
+    } else {
+        printf("\nFailed to create test tasks!\n");
+    }
+
+    // ========== ПРИГЛАШЕНИЕ ==========
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
     printf("================================================\n");
@@ -192,6 +267,7 @@ void _start(BootInfo* bi) {
     show_prompt();
     draw_cursor();
 
+    // Основной цикл
     while (1) {
         asm volatile("hlt");
     }
