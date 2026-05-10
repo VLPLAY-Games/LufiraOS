@@ -16,6 +16,7 @@
 #include "system/acpi/acpi.h"
 #include "system/process/process.h"
 #include "system/timer/pit.h"
+#include "system/syscall/syscall.h"
 #include "log.h"
 
 
@@ -28,7 +29,6 @@ static inline void outb(uint16_t port, uint8_t val) {
     asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 
-// PIC
 #define PIC1         0x20
 #define PIC2         0xA0
 #define PIC1_COMMAND PIC1
@@ -53,6 +53,67 @@ static void pic_remap(void) {
 
 fat_fs_t fatfs;
 
+// Демонстрация системного вызова
+static void test_syscall_task(void) {
+    const char *msg = "[Syscall] Hello from sys_write!\n";
+    
+    // Вызов sys_write через syscall инструкцию
+    // SYS_WRITE = 0, fd = 0 (stdout), buffer = msg, length = strlen(msg)
+    asm volatile(
+        "movq %[sys_num], %%rax\n"
+        "movq %[fd], %%rdi\n"
+        "movq %[buffer], %%rsi\n"
+        "movq %[length], %%rdx\n"
+        "syscall\n"
+        :
+        : [sys_num] "r"(0ULL),     // SYS_WRITE
+          [fd] "r"(0ULL),           // stdout
+          [buffer] "r"((uint64_t)msg),
+          [length] "r"(30ULL)
+        : "rax", "rdi", "rsi", "rdx", "rcx", "r11", "memory"
+    );
+    
+    // Получаем PID через syscall
+    uint64_t pid;
+    asm volatile(
+        "movq %[sys_num], %%rax\n"
+        "syscall\n"
+        "movq %%rax, %[result]\n"
+        : [result] "=r"(pid)
+        : [sys_num] "r"(3ULL)  // SYS_GETPID
+        : "rax", "rcx", "r11", "memory"
+    );
+    
+    printf("[Syscall] My PID is %u\n", (uint32_t)pid);
+    
+    // Получаем тики
+    uint64_t ticks;
+    asm volatile(
+        "movq %[sys_num], %%rax\n"
+        "syscall\n"
+        "movq %%rax, %[result]\n"
+        : [result] "=r"(ticks)
+        : [sys_num] "r"(5ULL)  // SYS_GETTICK
+        : "rax", "rcx", "r11", "memory"
+    );
+    
+    printf("[Syscall] Current tick: %u\n", (uint32_t)ticks);
+    
+    // Выходим через syscall
+    asm volatile(
+        "movq %[sys_num], %%rax\n"
+        "movq %[code], %%rdi\n"
+        "syscall\n"
+        :
+        : [sys_num] "r"(2ULL),  // SYS_EXIT
+          [code] "r"(0ULL)
+        : "rax", "rdi", "rcx", "r11", "memory"
+    );
+    
+    // Сюда не должны попасть
+    while(1) __asm__("hlt");
+}
+
 static void test_task_1(void) {
     int counter = 0;
     while (1) {
@@ -60,10 +121,7 @@ static void test_task_1(void) {
         printf("[Task 1] Counter: %d, Ticks: %u\n", counter, (uint32_t)pit_get_ticks());
         set_foreground_color(COLOR_WHITE);
         counter++;
-        if (counter >= 10) {
-            printf("[Task 1] Done, exiting\n");
-            process_exit();
-        }
+        if (counter >= 10) process_exit();
     }
 }
 
@@ -74,23 +132,7 @@ static void test_task_2(void) {
         printf("[Task 2] Counter: %d, Ticks: %u\n", counter, (uint32_t)pit_get_ticks());
         set_foreground_color(COLOR_WHITE);
         counter++;
-        if (counter >= 10) {
-            printf("[Task 2] Done, exiting\n");
-            process_exit();
-        }
-    }
-}
-
-static void test_task_3(void) {
-    uint64_t last_ticks = 0;
-    while (1) {
-        uint64_t current_ticks = pit_get_ticks();
-        if (current_ticks - last_ticks >= 50) {
-            set_foreground_color(COLOR_YELLOW);
-            printf("[Heart] Beat at tick %u\n", (uint32_t)current_ticks);
-            set_foreground_color(COLOR_WHITE);
-            last_ticks = current_ticks;
-        }
+        if (counter >= 10) process_exit();
     }
 }
 
@@ -111,7 +153,6 @@ static void shell_task(void) {
     }
 }
 
-// --- Точка входа ядра ---
 __attribute__((section(".text.prologue")))
 void _start(BootInfo* bi) {
     asm volatile ("cli");
@@ -146,8 +187,6 @@ void _start(BootInfo* bi) {
         } else {
             LOG_DONE_FAIL("FAT mount failed");
         }
-    } else {
-        LOG_FAIL("No FAT image provided");
     }
 
     if (bi->RsdpAddress) {
@@ -157,8 +196,6 @@ void _start(BootInfo* bi) {
         } else {
             LOG_DONE_WARN("ACPI initialization failed");
         }
-    } else {
-        LOG_WARN("No RSDP found, ACPI disabled");
     }
 
     LOG_PENDING("Initializing process manager...");
@@ -169,16 +206,10 @@ void _start(BootInfo* bi) {
     pit_init();
     LOG_DONE_OK("PIT initialized at %d Hz", PIT_FREQUENCY);
 
-    LOG_INFO_LINE("");
-    LOG_INFO_LINE("Boot Information");
-    LOG_INFO_LINE("Kernel base: 0x%lx", bi->KernelBase);
-    LOG_INFO_LINE("Kernel size: %u KB", (uint32_t)(bi->KernelSize / 1024));
-    LOG_INFO_LINE("Total memory: %u MB", (uint32_t)(bi->TotalMemory / (1024 * 1024)));
-
-    LOG_INFO_LINE("");
-    LOG_INFO_LINE("Display Information");
-    LOG_INFO_LINE("Framebuffer: 0x%lx", bi->FrameBufferBase);
-    LOG_INFO_LINE("Resolution: %dx%d", bi->HorizontalResolution, bi->VerticalResolution);
+    // Инициализируем системные вызовы
+    LOG_PENDING("Initializing syscalls...");
+    syscall_init();
+    LOG_DONE_OK("Syscalls initialized");
 
     LOG_PENDING("Initializing keyboard...");
     keyboard_init();
@@ -197,7 +228,7 @@ void _start(BootInfo* bi) {
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
     printf("================================================\n");
-    printf("     LufiraOS Kernel v0.4                        \n");
+    printf("     LufiraOS Kernel v0.5 (with Syscalls!)      \n");
     printf("================================================\n");
     set_foreground_color(LOG_COLOR_INFO);
     
@@ -205,11 +236,10 @@ void _start(BootInfo* bi) {
     set_foreground_color(LOG_COLOR_HEADER);
     printf("SYSTEM STATUS:\n");
     
-    LOG_STATUS_LINE("Console", 1, "READY (256 colors)");
-    LOG_STATUS_LINE("Keyboard", keyboard_is_initialized(), 
-        keyboard_is_initialized() ? "READY" : "NOT DETECTED");
-    LOG_STATUS_LINE("Mouse", mouse_is_initialized(),
-        mouse_is_initialized() ? "READY" : "NOT DETECTED");
+    LOG_STATUS_LINE("Console", 1, "READY");
+    LOG_STATUS_LINE("Keyboard", keyboard_is_initialized(), keyboard_is_initialized() ? "READY" : "NOT FOUND");
+    LOG_STATUS_LINE("Mouse", mouse_is_initialized(), mouse_is_initialized() ? "READY" : "NOT FOUND");
+    LOG_STATUS_LINE("Syscalls", 1, "ACTIVE (6 syscalls)");
     
     set_foreground_color(STATUS_READY);
     printf("  Memory manager: INITIALIZED\n");
@@ -224,10 +254,10 @@ void _start(BootInfo* bi) {
     
     process_create("test_task_1", test_task_1);
     process_create("test_task_2", test_task_2);
-    process_create("heartbeat", test_task_3);
+    process_create("syscall_demo", test_syscall_task);
     process_create("shell", shell_task);
     
-    printf("\nAll processes created! Preemptive scheduling active.\n");
+    printf("\nAll processes created!\n");
     
     schedule();
     
