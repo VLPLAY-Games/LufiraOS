@@ -184,8 +184,7 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "colors") == 0) {
         command_colors();
     } else if (strcmp(cmd_lower, "reset") == 0) {
-        reset_colors();
-        printf("\nColors reset to default (white on black)\n");
+        command_reset();
     } else if (strcmp(cmd_lower, "color") == 0) {
         command_color();
     } else if (strcmp(cmd_lower, "fg") == 0) {
@@ -193,8 +192,7 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "bg") == 0) {
         command_bg();
     } else if (strcmp(cmd_lower, "echo") == 0) {
-        if (*args == '\0') printf("\nUsage: echo <text>\n");
-        else printf("\n%s\n", args);
+        command_echo(args);
     } else if (strcmp(cmd_lower, "status") == 0) {
         command_status();
     } else if (strcmp(cmd_lower, "trap") == 0) {
@@ -202,13 +200,10 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "pwd") == 0) {
         printf("\n%s\n", cwd_path);
     } else if (strcmp(cmd_lower, "cd") == 0) {
-        if (*args == '\0') {
-            printf("\nUsage: cd <directory>\n");
-        } else {
-            command_cd(args);
-        }
+        if (*args == '\0') printf("\nUsage: cd <directory>\n");
+        else command_cd(args);
     } else if (strcmp(cmd_lower, "ls") == 0) {
-        command_ls(args);   // передаём аргумент (-l или пусто)
+        command_ls(args);
     } else if (strcmp(cmd_lower, "mkdir") == 0) {
         if (*args == '\0') printf("\nUsage: mkdir <name>\n");
         else command_mkdir(args);
@@ -218,26 +213,8 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "touch") == 0) {
         command_touch(args);
     } else if (strcmp(cmd_lower, "cat") == 0) {
-        if (input_buffer_index <= 4) {
-            printf("\nUsage: cat <filename>\n");
-        } else {
-            const char *fname = input_buffer + 4;
-            while (*fname == ' ') fname++;
-            if (*fname == '\0') printf("\nUsage: cat <filename>\n");
-            else {
-                uint32_t fsize;
-                if (fat_open(&fatfs, fname, &fsize) == 0) {
-                    static uint8_t file_buf[4096];
-                    uint32_t to_read = fsize > sizeof(file_buf) ? sizeof(file_buf) : fsize;
-                    int br = fat_read_file(&fatfs, fname, file_buf, to_read);
-                    if (br > 0) {
-                        printf("\n--- %s (%u bytes) ---\n", fname, fsize);
-                        for (int i=0; i<br; i++) put_char(file_buf[i]);
-                        printf("\n--- end ---\n");
-                    } else printf("\nError reading file.\n");
-                } else printf("\nFile not found: %s\n", fname);
-            }
-        }
+        if (input_buffer_index <= 4) printf("\nUsage: cat <filename>\n");
+        else command_cat(input_buffer + 4);
     } else {
         printf("\nUnknown command: %s\n", input_buffer);
         printf("Type 'help' for available commands.\n");

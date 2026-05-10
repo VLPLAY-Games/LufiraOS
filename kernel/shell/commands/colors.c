@@ -81,3 +81,8 @@ void command_bg(void) {
         printf("\nBackground color set to #%06X (~%s)\n", rgb, get_color_name(closest));
     } else printf("\nError: Invalid color format\n");
 }
+
+void command_reset(void) {
+    reset_colors();
+    printf("\nColors reset to default (white on black)\n");
+}

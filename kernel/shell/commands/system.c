@@ -73,3 +73,8 @@ void command_trap(void) {
     else if (token_equals(args, "hlt")) { printf("\nHalting CPU.\n"); asm volatile ("hlt"); }
     else printf("\nUnknown trap: %s\n", args);
 }
+
+void command_echo(const char* args) {
+    if (*args == '\0') printf("\nUsage: echo <text>\n");
+    else printf("\n%s\n", args);
+}
