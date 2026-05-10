@@ -1,4 +1,4 @@
-#include <stdint.h>
+#include "lib/types.h"
 #include "keyboard.h"
 #include "shell/shell.h"
 #include "drivers/console/console.h"

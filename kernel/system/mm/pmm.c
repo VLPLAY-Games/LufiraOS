@@ -1,7 +1,7 @@
 #include "pmm.h"
 #include "drivers/console/console.h"
-#include <stddef.h>
-#include <stdint.h>
+#include "lib/stddef.h"
+#include "lib/types.h"
 #include "log.h"
 
 #define PAGE_SIZE 4096

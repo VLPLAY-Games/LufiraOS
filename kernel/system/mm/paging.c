@@ -1,8 +1,8 @@
 #include "paging.h"
 #include "pmm.h"
 #include "bootinfo.h"
-#include <stddef.h>
-#include <stdint.h>
+#include "lib/stddef.h"
+#include "lib/types.h"
 #include "log.h"
 
 typedef uint64_t pt_entry_t;

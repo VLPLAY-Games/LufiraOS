@@ -1,7 +1,7 @@
 #pragma once
 
-#include <stdint.h>
-#include <stddef.h>
+#include "lib/types.h"
+#include "lib/stddef.h"
 
 // EFI-совместимый дескриптор памяти (из bootloader)
 typedef struct {

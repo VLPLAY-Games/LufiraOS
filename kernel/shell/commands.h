@@ -1,6 +1,6 @@
 #pragma once
 
-#include <stdint.h>
+#include "lib/types.h"
 
 int atoi(const char* str);
 int hex_to_int(const char* hex);

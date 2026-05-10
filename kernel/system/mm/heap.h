@@ -1,6 +1,6 @@
 #pragma once
 
-#include <stddef.h>
+#include "lib/stddef.h"
 
 #define KERNEL_HEAP_START 0xFFFF900000000000ULL
 

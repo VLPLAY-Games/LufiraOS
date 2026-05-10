@@ -1,5 +1,5 @@
-#include <stdint.h>
-#include <stdarg.h>
+#include "lib/types.h"
+#include "lib/stdarg.h"
 #include "bootinfo.h"
 #include "system/mm/pmm.h"
 #include "system/mm/paging.h"

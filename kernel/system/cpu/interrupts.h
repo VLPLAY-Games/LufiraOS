@@ -1,6 +1,6 @@
 #pragma once
 
-#include <stdint.h>
+#include "lib/types.h"
 
 #if defined(__x86_64__) && defined(__GNUC__)
 #define FORCE_ALIGN_ARG_POINTER __attribute__((force_align_arg_pointer))

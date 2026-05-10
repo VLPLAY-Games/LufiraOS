@@ -1,6 +1,6 @@
 #pragma once
 
-#include <stdint.h>
+#include "lib/types.h"
 
 void mouse_init(void);
 void mouse_irq_handler(void);

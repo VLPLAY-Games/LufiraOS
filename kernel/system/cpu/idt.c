@@ -2,8 +2,8 @@
 #include "interrupts.h"
 #include "irq.h"
 #include "drivers/console/console.h"
-#include <stdint.h>
-#include <stddef.h>
+#include "lib/types.h"
+#include "lib/stddef.h"
 
 extern void (*isr_stub_table[])(void);
 extern void isr_default(void);

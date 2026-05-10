@@ -1,5 +1,5 @@
 #include "gdt.h"
-#include <stdint.h>
+#include "lib/types.h"
 
 typedef struct __attribute__((packed)) {
     uint16_t limit_low;

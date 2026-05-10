@@ -1,7 +1,7 @@
 #pragma once
 
-#include <stdint.h>
-#include <stddef.h>
+#include "lib/types.h"
+#include "lib/stddef.h"
 #include "bootinfo.h"
 #include "drivers/console/console.h"
 

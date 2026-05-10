@@ -1,7 +1,7 @@
 #include "heap.h"
 #include "paging.h"
 #include "pmm.h"
-#include <stdint.h>
+#include "lib/types.h"
 #include "log.h"
 
 #define KERNEL_HEAP_START   0xFFFF900000000000ULL

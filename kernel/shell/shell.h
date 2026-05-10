@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../drivers/console/console.h"
-#include "../drivers/keyboard/keyboard.h"
+#include "drivers/console/console.h"
+#include "drivers/keyboard/keyboard.h"
 
 // Прототипы функций
 void show_prompt(void);

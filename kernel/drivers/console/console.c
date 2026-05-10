@@ -1,6 +1,6 @@
-#include <stdint.h>
-#include <stdarg.h>
-#include <stddef.h>
+#include "lib/types.h"
+#include "lib/stdarg.h"
+#include "lib/stddef.h"
 #include "console.h"
 #include "lib/colors.h"
 

@@ -2,7 +2,7 @@
 #include "drivers/disk/disk.h"
 #include "system/mm/heap.h"
 #include "drivers/console/console.h"
-#include <stddef.h>
+#include "lib/stddef.h"
 
 static void* memcpy(void* dest, const void* src, unsigned int n) {
     char* d = (char*)dest;

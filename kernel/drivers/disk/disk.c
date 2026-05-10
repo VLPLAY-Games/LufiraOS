@@ -1,5 +1,5 @@
 #include "disk.h"
-#include <stdint.h>
+#include "lib/types.h"
 
 #define ATA_PRIMARY_IO  0x1F0
 #define ATA_DATA        0x1F0
