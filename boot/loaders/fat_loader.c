@@ -1,5 +1,5 @@
 #include "fat_loader.h"
-#include "../ui/utils.h"
+#include "ui/utils.h"
 
 VOID LoadFATImage(EFI_BLOCK_IO_PROTOCOL *BlockIo, BootInfo *bi, BOOLEAN showProgress) {
     if (!BlockIo || !BlockIo->Media) {

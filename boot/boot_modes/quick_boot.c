@@ -1,11 +1,11 @@
 #include "quick_boot.h"
-#include "../ui/utils.h"
-#include "../system/memory.h"
-#include "../system/graphics.h"
-#include "../system/tables.h"
-#include "../loaders/fat_loader.h"
-#include "../system/exit_boot.h"
-#include "../loaders/kernel_loader.h"
+#include "ui/utils.h"
+#include "system/memory.h"
+#include "system/graphics.h"
+#include "system/tables.h"
+#include "loaders/fat_loader.h"
+#include "system/exit_boot.h"
+#include "loaders/kernel_loader.h"
 
 VOID QuickBoot(BootInfo *bi, EFI_HANDLE ImageHandle, BOOLEAN keepLogo, BOOLEAN animateSpinner) {
     UINTN cols, rows;

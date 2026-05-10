@@ -30,6 +30,7 @@ $(shell mkdir -p $(BUILD_DIR) \
     $(BUILD_DIR)/kernel/fs/fat)
 
 BOOTLOADER_CFLAGS := -I$(EFI_INC) -I$(EFI_INC_ARCH) \
+                     -I$(BOOTLOADER_DIR) \
                      -fpic -ffreestanding -fno-stack-protector \
                      -fshort-wchar -mno-red-zone -Wall \
                      -DEFI_FUNCTION_WRAPPER -std=gnu11
