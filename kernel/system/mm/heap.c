@@ -1,7 +1,6 @@
 #include "heap.h"
 #include "paging.h"
 #include "pmm.h"
-#include "drivers/console/console.h"
 #include <stdint.h>
 #include "log.h"
 

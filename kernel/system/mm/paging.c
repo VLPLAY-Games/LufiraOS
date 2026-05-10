@@ -1,6 +1,6 @@
 #include "paging.h"
 #include "pmm.h"
-#include "drivers/console/console.h"
+#include "bootinfo.h"
 #include <stddef.h>
 #include <stdint.h>
 #include "log.h"
