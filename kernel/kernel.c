@@ -12,6 +12,7 @@
 #include "system/cpu/idt.h"
 #include "fs/fat/fat.h"
 #include "system/cpu/irq.h"
+#include "system/acpi/acpi.h"
 #include "log.h"
 
 
@@ -86,6 +87,18 @@ void _start(BootInfo* bi) {
         }
     } else {
         LOG_FAIL("No FAT image provided");
+    }
+
+    // ========== ACPI ==========
+    if (bi->RsdpAddress) {
+        LOG_PENDING("Initializing ACPI...");
+        if (acpi_init(bi->RsdpAddress) == 0) {
+            LOG_DONE_OK("ACPI initialized");
+        } else {
+            LOG_DONE_WARN("ACPI initialization failed");
+        }
+    } else {
+        LOG_WARN("No RSDP found, ACPI disabled");
     }
 
     // ========== ИНФОРМАЦИЯ О ЗАГРУЗКЕ ==========

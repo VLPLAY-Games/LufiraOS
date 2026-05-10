@@ -29,6 +29,7 @@ $(shell mkdir -p $(BUILD_DIR) \
 	$(BUILD_DIR)/kernel/shell/commands \
     $(BUILD_DIR)/kernel/system/cpu \
     $(BUILD_DIR)/kernel/system/mm \
+	$(BUILD_DIR)/kernel/system/acpi \
     $(BUILD_DIR)/kernel/fs/fat)
 
 BOOTLOADER_CFLAGS := -I$(EFI_INC) -I$(EFI_INC_ARCH) \
@@ -70,6 +71,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/system/mm/pmm.c \
     $(KERNEL_DIR)/system/mm/paging.c \
     $(KERNEL_DIR)/system/mm/heap.c \
+	$(KERNEL_DIR)/system/acpi/acpi.c \
     $(KERNEL_DIR)/fs/fat/fat.c
 
 KERNEL_ASM_SOURCES := \
