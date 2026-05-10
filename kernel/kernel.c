@@ -244,25 +244,25 @@ void _start(BootInfo* bi) {
     LOG_STATUS_LINE("Console", 1, "READY");
     LOG_STATUS_LINE("Keyboard", keyboard_is_initialized(), keyboard_is_initialized() ? "READY" : "NOT FOUND");
     LOG_STATUS_LINE("Mouse", mouse_is_initialized(), mouse_is_initialized() ? "READY" : "NOT FOUND");
-    LOG_STATUS_LINE("Syscalls", 1, "ACTIVE (6 syscalls)");
+    LOG_STATUS_LINE("Syscalls", 1, "ACTIVE (16 syscalls)");
+    LOG_STATUS_LINE("VFS", 1, "READY");
     
     set_foreground_color(STATUS_READY);
     printf("  Memory manager: INITIALIZED\n");
     printf("  Scheduler: PREEMPTIVE (%d Hz)\n", PIT_FREQUENCY);
     printf("  Process manager: INITIALIZED\n");
+    printf("  FAT filesystem: MOUNTED\n");
     set_foreground_color(LOG_COLOR_INFO);
 
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
-    printf("STARTING PROCESSES:\n");
+    printf("STARTING SHELL:\n");
     set_foreground_color(LOG_COLOR_INFO);
     
-    process_create("test_task_1", test_task_1);
-    process_create("test_task_2", test_task_2);
-    process_create("syscall_demo", test_syscall_task);
+    // Только shell процесс — всё остальное по требованию
     process_create("shell", shell_task);
     
-    printf("\nAll processes created!\n");
+    printf("\nSystem ready!\n");
     
     schedule();
     
