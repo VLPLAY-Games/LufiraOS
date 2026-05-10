@@ -26,8 +26,9 @@ typedef struct process {
     char name[32];
     process_state_t state;
     process_context_t context;
-    uint64_t stack_base;
+    uint64_t stack_base;       // User stack (Ring 3)
     uint64_t stack_size;
+    uint64_t ring0_stack;      // Kernel stack (Ring 0)
     uint64_t page_table;
     struct process *next;
 } process_t;

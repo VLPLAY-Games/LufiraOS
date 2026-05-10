@@ -2,6 +2,7 @@
 #include "system/mm/heap.h"
 #include "system/mm/pmm.h"
 #include "system/mm/paging.h"
+#include "system/cpu/gdt.h"
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
 
@@ -16,11 +17,30 @@ process_t *current_process = NULL;
 static uint32_t next_pid = 1;
 static process_t *idle_process = NULL;
 
+// Стек Ring 0 для каждого процесса (для syscall'ов и прерываний)
+static uint64_t allocate_ring0_stack(process_t *proc) {
+    size_t num_pages = 4;  // 16 KB
+    uint64_t first_phys = pmm_alloc_page();
+    if (!first_phys) return 0;
+    
+    for (size_t i = 1; i < num_pages; i++) {
+        uint64_t phys = pmm_alloc_page();
+        if (!phys || phys != first_phys + i * PAGE_SIZE) {
+            if (phys) pmm_free_page(phys);
+            for (size_t j = 0; j < i; j++) {
+                pmm_free_page(first_phys + j * PAGE_SIZE);
+            }
+            return 0;
+        }
+    }
+    
+    return first_phys + num_pages * PAGE_SIZE;
+}
+
 static void idle_thread(void) {
     while (1) __asm__("hlt");
 }
 
-// Копирование kernel space во все новые PML4
 static uint64_t create_address_space(uint64_t kernel_pml4_phys) {
     uint64_t new_pml4_phys = pmm_alloc_page();
     if (!new_pml4_phys) return 0;
@@ -28,8 +48,7 @@ static uint64_t create_address_space(uint64_t kernel_pml4_phys) {
     uint64_t *new_pml4 = (uint64_t*)new_pml4_phys;
     uint64_t *kernel_pml4 = (uint64_t*)kernel_pml4_phys;
     
-    // Копируем ВСЕ записи из ядерного PML4
-    // Это даст процессу доступ к identity mapped памяти (включая ядро, стеки, фреймбуфер)
+    // Копируем все записи из ядерного PML4
     for (int i = 0; i < 512; i++) {
         new_pml4[i] = kernel_pml4[i];
     }
@@ -46,6 +65,7 @@ void process_init(void) {
     idle_process->stack_base = 0;
     idle_process->stack_size = 0;
     idle_process->next = NULL;
+    idle_process->ring0_stack = 0;
     
     const char *name = "idle";
     for (int i = 0; i < 31 && name[i]; i++) idle_process->name[i] = name[i];
@@ -59,35 +79,35 @@ void process_init(void) {
     printf("[PROCESS] Process manager initialized\n");
 }
 
-static uint64_t allocate_stack(size_t size, uint64_t pml4_phys) {
+static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys) {
     size_t num_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     
-    // Временно переключаемся на адресное пространство процесса
     uint64_t old_cr3;
     asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
     asm volatile("mov %0, %%cr3" : : "r"(pml4_phys) : "memory");
     
-    uint64_t first_phys = pmm_alloc_page();
-    if (!first_phys) {
-        asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
-        return 0;
-    }
+    // Выделяем стек в userspace-адресе (0x0000700000000000)
+    uint64_t stack_virt = 0x0000700000000000ULL;
     
-    for (size_t i = 1; i < num_pages; i++) {
+    for (size_t i = 0; i < num_pages; i++) {
         uint64_t phys = pmm_alloc_page();
         if (!phys) {
+            // Освобождаем выделенные
             for (size_t j = 0; j < i; j++) {
-                pmm_free_page(first_phys + j * PAGE_SIZE);
+                uint64_t v = stack_virt + j * PAGE_SIZE;
+                uint64_t p = get_physical_address(v);
+                if (p) {
+                    unmap_page(v);
+                    pmm_free_page(p);
+                }
             }
             asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
             return 0;
         }
         
-        if (phys != first_phys + i * PAGE_SIZE) {
+        uint64_t virt = stack_virt + i * PAGE_SIZE;
+        if (map_page(virt, phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER) != 0) {
             pmm_free_page(phys);
-            for (size_t j = 0; j < i; j++) {
-                pmm_free_page(first_phys + j * PAGE_SIZE);
-            }
             asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
             return 0;
         }
@@ -95,7 +115,7 @@ static uint64_t allocate_stack(size_t size, uint64_t pml4_phys) {
     
     asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
     
-    return first_phys + num_pages * PAGE_SIZE;
+    return stack_virt + num_pages * PAGE_SIZE;
 }
 
 process_t* process_create(const char *name, void (*entry)(void)) {
@@ -108,11 +128,9 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
     proc->name[31] = '\0';
     
-    // Получаем текущий PML4
     uint64_t kernel_pml4;
     asm volatile("mov %%cr3, %0" : "=r"(kernel_pml4));
     
-    // Создаём копию адресного пространства
     uint64_t new_pml4 = create_address_space(kernel_pml4);
     if (!new_pml4) {
         kfree(proc);
@@ -120,19 +138,35 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     }
     proc->page_table = new_pml4;
     
-    // Выделяем стек в НОВОМ адресном пространстве
-    proc->stack_size = 16384;
-    proc->stack_base = allocate_stack(proc->stack_size, new_pml4);
-    if (!proc->stack_base) {
+    // Выделяем Ring 0 стек (для обработчиков прерываний и syscall)
+    proc->ring0_stack = allocate_ring0_stack(proc);
+    if (!proc->ring0_stack) {
         pmm_free_page(new_pml4);
         kfree(proc);
         return NULL;
     }
     
+    // Выделяем пользовательский стек (в userspace-адресе)
+    proc->stack_size = 16384;
+    proc->stack_base = allocate_user_stack(proc->stack_size, new_pml4);
+    if (!proc->stack_base) {
+        pmm_free_page(new_pml4);
+        // Освободить ring0_stack
+        uint64_t r0_start = proc->ring0_stack - 16384;
+        for (int i = 0; i < 4; i++) {
+            pmm_free_page(r0_start + i * PAGE_SIZE);
+        }
+        kfree(proc);
+        return NULL;
+    }
+    
+    // Устанавливаем RSP0 в TSS (указатель на Ring 0 стек)
+    tss_set_rsp0(proc->ring0_stack);
+    
     // Инициализируем контекст
     memset(&proc->context, 0, sizeof(process_context_t));
     
-    // Стек уже выделен, записываем в него через временное переключение
+    // Заполняем стек пользователя
     uint64_t old_cr3;
     asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
     asm volatile("mov %0, %%cr3" : : "r"(new_pml4) : "memory");
@@ -146,9 +180,9 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     stack_ptr = (uint64_t*)rsp;
     *stack_ptr = (uint64_t)entry;
     
-    rsp -= 16;
-    stack_ptr = (uint64_t*)(rsp + 8);
-    *stack_ptr = 0x202;
+    rsp -= 8;
+    stack_ptr = (uint64_t*)rsp;
+    *stack_ptr = 0x202;  // RFLAGS с IF=1
     
     asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
     
@@ -171,7 +205,8 @@ process_t* process_create(const char *name, void (*entry)(void)) {
         proc->next = process_list;
     }
     
-    printf("[PROCESS] Created '%s' (PID %u, CR3: 0x%lx)\n", name, proc->pid, new_pml4);
+    printf("[PROCESS] Created '%s' (PID %u, Ring 3, user stack: 0x%lx)\n", 
+           name, proc->pid, proc->stack_base);
     
     return proc;
 }
@@ -183,6 +218,7 @@ void process_exit(void) {
     asm volatile("cli");
     current_process->state = PROCESS_TERMINATED;
     
+    // Освобождаем пользовательский стек
     if (current_process->stack_base > 0 && current_process->stack_size > 0) {
         uint64_t stack_start = current_process->stack_base - current_process->stack_size;
         size_t num_pages = current_process->stack_size / PAGE_SIZE;
@@ -192,13 +228,26 @@ void process_exit(void) {
         asm volatile("mov %0, %%cr3" : : "r"(current_process->page_table) : "memory");
         
         for (size_t i = 0; i < num_pages; i++) {
-            pmm_free_page(stack_start + i * PAGE_SIZE);
+            uint64_t virt = stack_start + i * PAGE_SIZE;
+            uint64_t phys = get_physical_address(virt);
+            if (phys) {
+                unmap_page(virt);
+                pmm_free_page(phys);
+            }
         }
         
         asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
     }
     
-    // Освобождаем PML4 процесса
+    // Освобождаем Ring 0 стек
+    if (current_process->ring0_stack > 0) {
+        uint64_t r0_start = current_process->ring0_stack - 16384;
+        for (int i = 0; i < 4; i++) {
+            pmm_free_page(r0_start + i * PAGE_SIZE);
+        }
+    }
+    
+    // Освобождаем PML4
     if (current_process->page_table != idle_process->page_table) {
         pmm_free_page(current_process->page_table);
     }
@@ -232,6 +281,11 @@ void schedule(void) {
     }
     
     if (next == current_process) return;
+    
+    // Устанавливаем RSP0 в TSS для нового процесса
+    if (next->ring0_stack > 0) {
+        tss_set_rsp0(next->ring0_stack);
+    }
     
     switch_to_process(next);
 }

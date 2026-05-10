@@ -2,11 +2,10 @@
 #include "drivers/console/console.h"
 #include "system/process/process.h"
 #include "system/timer/pit.h"
+#include "system/cpu/gdt.h"
 
-// Таблица системных вызовов
 typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
-// Реализации системных вызовов
 static uint64_t sys_write(uint64_t fd, uint64_t buffer, uint64_t length, 
                           uint64_t unused1, uint64_t unused2) {
     (void)fd;
@@ -34,8 +33,6 @@ static uint64_t sys_read(uint64_t fd, uint64_t buffer, uint64_t length,
     (void)length;
     (void)unused1;
     (void)unused2;
-    
-    // Пока не реализовано
     return 0;
 }
 
@@ -47,50 +44,32 @@ static uint64_t sys_exit(uint64_t exit_code, uint64_t unused1, uint64_t unused2,
     (void)unused3;
     (void)unused4;
     
-    printf("\n[SYSCALL] Process %u called exit(%u)\n", 
+    printf("\n[SYSCALL] Process %u exit(%u)\n", 
            current_process->pid, (uint32_t)exit_code);
     
     process_exit();
-    
-    // Никогда не возвращаемся
     while (1) __asm__("hlt");
 }
 
 static uint64_t sys_getpid(uint64_t unused1, uint64_t unused2, uint64_t unused3,
                            uint64_t unused4, uint64_t unused5) {
-    (void)unused1;
-    (void)unused2;
-    (void)unused3;
-    (void)unused4;
-    (void)unused5;
-    
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4; (void)unused5;
     return current_process ? current_process->pid : 0;
 }
 
 static uint64_t sys_yield(uint64_t unused1, uint64_t unused2, uint64_t unused3,
                           uint64_t unused4, uint64_t unused5) {
-    (void)unused1;
-    (void)unused2;
-    (void)unused3;
-    (void)unused4;
-    (void)unused5;
-    
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4; (void)unused5;
     schedule();
     return 0;
 }
 
 static uint64_t sys_gettick(uint64_t unused1, uint64_t unused2, uint64_t unused3,
                             uint64_t unused4, uint64_t unused5) {
-    (void)unused1;
-    (void)unused2;
-    (void)unused3;
-    (void)unused4;
-    (void)unused5;
-    
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4; (void)unused5;
     return pit_get_ticks();
 }
 
-// Таблица системных вызовов
 static syscall_fn_t syscall_table[256] = {
     [SYS_WRITE]   = sys_write,
     [SYS_READ]    = sys_read,
@@ -100,13 +79,15 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_GETTICK] = sys_gettick,
 };
 
-// Инициализация syscall (настройка MSR)
 void syscall_init(void) {
     // Настраиваем STAR MSR (0xC0000081)
     // Биты 47:32 - селектор для kernel CS (0x08)
-    // Биты 63:48 - селектор для user CS (будет 0x1B когда сделаем Ring 3)
-    // Пока используем тот же селектор что и для ядра (0x08)
-    uint64_t star = ((uint64_t)0x08 << 32) | ((uint64_t)0x08 << 48);
+    // Биты 63:48 - селектор для user CS (0x28 | 3 = 0x2B)
+    // На самом деле, при возврате через sysretq:
+    //   CS = (STAR[63:48] + 16) | 3 = (0x28 + 0x10) | 3 = 0x3B
+    //   SS = (STAR[63:48] + 8) | 3  = (0x28 + 0x08) | 3 = 0x33
+    uint64_t star = ((uint64_t)GDT_KERNEL_CODE << 32) | 
+                    ((uint64_t)GDT_USER_CODE << 48);
     asm volatile("wrmsr" : : "c"(0xC0000081), "a"((uint32_t)star), 
                  "d"((uint32_t)(star >> 32)));
     
@@ -118,22 +99,23 @@ void syscall_init(void) {
     
     // Настраиваем FMASK MSR (0xC0000084) - маска для RFLAGS
     // Очищаем IF (бит 9) при входе в syscall
-    uint64_t fmask = 0x200;  // Clear interrupt flag
+    uint64_t fmask = 0x200;
     asm volatile("wrmsr" : : "c"(0xC0000084), "a"((uint32_t)fmask),
                  "d"((uint32_t)(fmask >> 32)));
     
-    // Включаем SCE (System Call Extension) в EFER MSR
+    // Включаем SCE в EFER MSR
     uint64_t efer;
-    asm volatile("rdmsr" : "=a"(*(uint32_t*)&efer), "=d"(*((uint32_t*)&efer + 1)) 
-                 : "c"(0xC0000080));
+    uint32_t efer_low, efer_high;
+    asm volatile("rdmsr" : "=a"(efer_low), "=d"(efer_high) : "c"(0xC0000080));
+    efer = ((uint64_t)efer_high << 32) | efer_low;
     efer |= 1;  // SCE bit
-    asm volatile("wrmsr" : : "c"(0xC0000080), "a"((uint32_t)efer),
-                 "d"((uint32_t)(efer >> 32)));
+    efer_low = (uint32_t)efer;
+    efer_high = (uint32_t)(efer >> 32);
+    asm volatile("wrmsr" : : "c"(0xC0000080), "a"(efer_low), "d"(efer_high));
     
-    printf("[SYSCALL] System call interface initialized\n");
+    printf("[SYSCALL] System calls initialized (Ring 0/3 ready)\n");
 }
 
-// Обработчик системного вызова (вызывается из ассемблера)
 uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_t arg2,
                          uint64_t arg3, uint64_t arg4, uint64_t arg5) {
     if (syscall_num >= 256 || !syscall_table[syscall_num]) {
