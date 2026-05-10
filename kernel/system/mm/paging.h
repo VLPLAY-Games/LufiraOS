@@ -13,19 +13,21 @@
 #define PAGE_PCD             0x010
 #define PAGE_ACCESSED        0x020
 #define PAGE_DIRTY           0x040
-#define PAGE_HUGE            0x080   // PS bit for 2MB/1GB pages
+#define PAGE_HUGE            0x080
 #define PAGE_GLOBAL          0x100
-#define PAGE_NX              (1ULL << 63)   // NX bit, if supported
+#define PAGE_NX              (1ULL << 63)
 
-// Инициализация страничной адресации (identity mapping всей физической памяти)
+// Инициализация страничной адресации
 void paging_init(BootInfo* bi);
 
 // Отобразить виртуальную страницу на физический адрес
-// Возвращает 0 при успехе, -1 при ошибке.
 int map_page(uint64_t virt, uint64_t phys, uint64_t flags);
 
 // Снять отображение
 void unmap_page(uint64_t virt);
 
-// Получить физический адрес по виртуальному (0 при ошибке)
+// Получить физический адрес по виртуальному
 uint64_t get_physical_address(uint64_t virt);
+
+// Получить физический адрес текущего PML4
+uint64_t get_current_pml4(void);

@@ -31,7 +31,7 @@ typedef struct process {
     process_context_t context;      // Saved context
     uint64_t stack_base;            // Base of kernel stack
     uint64_t stack_size;            // Size of kernel stack
-    uint64_t page_table;            // CR3 value for this process
+    uint64_t page_table;            // CR3 value for this process (физический адрес PML4)
     struct process *next;           // Next process in list
 } process_t;
 

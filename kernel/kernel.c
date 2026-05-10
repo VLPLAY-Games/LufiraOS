@@ -19,7 +19,6 @@
 #include "log.h"
 
 
-// Базовые функции для портов
 static inline uint8_t inb(uint16_t port) {
     uint8_t ret;
     asm volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
@@ -42,28 +41,25 @@ static inline void outb(uint16_t port, uint8_t val) {
 static void pic_remap(void) {
     outb(PIC1_COMMAND, ICW1_INIT | ICW1_ICW4);
     outb(PIC2_COMMAND, ICW1_INIT | ICW1_ICW4);
-    outb(PIC1_DATA, 0x20);    // master offset
-    outb(PIC2_DATA, 0x28);    // slave offset
-    outb(PIC1_DATA, 0x04);    // tell master about slave at IRQ2
-    outb(PIC2_DATA, 0x02);    // tell slave its cascade identity
-    outb(PIC1_DATA, 0x01);    // ICW4
-    outb(PIC2_DATA, 0x01);    // ICW4
-    outb(PIC1_DATA, 0xFF);    // mask all IRQs on master
-    outb(PIC2_DATA, 0xFF);    // mask all IRQs on slave
+    outb(PIC1_DATA, 0x20);
+    outb(PIC2_DATA, 0x28);
+    outb(PIC1_DATA, 0x04);
+    outb(PIC2_DATA, 0x02);
+    outb(PIC1_DATA, 0x01);
+    outb(PIC2_DATA, 0x01);
+    outb(PIC1_DATA, 0xFF);
+    outb(PIC2_DATA, 0xFF);
 }
 
-fat_fs_t fatfs;   // глобальная файловая система (для shell)
+fat_fs_t fatfs;
 
-// Тестовая задача 1
 static void test_task_1(void) {
     int counter = 0;
     while (1) {
         set_foreground_color(COLOR_LIGHT_GREEN);
         printf("[Task 1] Counter: %d, Ticks: %u\n", counter, (uint32_t)pit_get_ticks());
         set_foreground_color(COLOR_WHITE);
-        
         counter++;
-        
         if (counter >= 10) {
             printf("[Task 1] Done, exiting\n");
             process_exit();
@@ -71,16 +67,13 @@ static void test_task_1(void) {
     }
 }
 
-// Тестовая задача 2
 static void test_task_2(void) {
     int counter = 0;
     while (1) {
         set_foreground_color(COLOR_LIGHT_CYAN);
         printf("[Task 2] Counter: %d, Ticks: %u\n", counter, (uint32_t)pit_get_ticks());
         set_foreground_color(COLOR_WHITE);
-        
         counter++;
-        
         if (counter >= 10) {
             printf("[Task 2] Done, exiting\n");
             process_exit();
@@ -88,7 +81,6 @@ static void test_task_2(void) {
     }
 }
 
-// Тестовая задача 3 (heartbeat)
 static void test_task_3(void) {
     uint64_t last_ticks = 0;
     while (1) {
@@ -102,9 +94,7 @@ static void test_task_3(void) {
     }
 }
 
-// Главная задача (шелл)
 static void shell_task(void) {
-    // Выводим приглашение
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
     printf("================================================\n");
@@ -115,13 +105,9 @@ static void shell_task(void) {
     show_prompt();
     draw_cursor();
 
-    // Основной цикл
     while (1) {
-        asm volatile("sti");  // Разрешаем прерывания
-        asm volatile("hlt");  // Ждём прерываний
-        asm volatile("cli");  // Запрещаем прерывания на время обновления
-        
-        update_cursor();      // Обновляем мигание курсора
+        asm volatile("sti");
+        asm volatile("hlt");
     }
 }
 
@@ -132,7 +118,6 @@ void _start(BootInfo* bi) {
 
     initialize_console(bi);
     
-    // ========== РАННЯЯ ИНИЦИАЛИЗАЦИЯ ==========
     LOG_PENDING("Initializing GDT...");
     gdt_init();
     LOG_DONE_OK("GDT initialized");
@@ -149,13 +134,11 @@ void _start(BootInfo* bi) {
     pic_remap();
     LOG_DONE_OK("PIC remapped");
 
-    // ========== МЕНЕДЖЕРЫ ПАМЯТИ ==========
     pmm_init(bi->MemoryMap, bi->MemoryMapSize, bi->MemoryMapDescriptorSize,
                 bi->KernelBase, bi->KernelSize);
     paging_init(bi);
     heap_init();
 
-    // ========== ФАЙЛОВАЯ СИСТЕМА ==========
     if (bi->FATImageBase && bi->FATImageSize) {
         LOG_PENDING("Mounting FAT filesystem...");
         if (fat_init(&fatfs, (void*)bi->FATImageBase, bi->FATImageSize) == 0) {
@@ -167,7 +150,6 @@ void _start(BootInfo* bi) {
         LOG_FAIL("No FAT image provided");
     }
 
-    // ========== ACPI ==========
     if (bi->RsdpAddress) {
         LOG_PENDING("Initializing ACPI...");
         if (acpi_init(bi->RsdpAddress) == 0) {
@@ -179,78 +161,46 @@ void _start(BootInfo* bi) {
         LOG_WARN("No RSDP found, ACPI disabled");
     }
 
-    // ========== ИНИЦИАЛИЗАЦИЯ ПРОЦЕССОВ ==========
     LOG_PENDING("Initializing process manager...");
     process_init();
     LOG_DONE_OK("Process manager initialized");
 
-    // ========== ИНИЦИАЛИЗАЦИЯ ТАЙМЕРА ==========
     LOG_PENDING("Initializing PIT...");
     pit_init();
     LOG_DONE_OK("PIT initialized at %d Hz", PIT_FREQUENCY);
 
-    // ========== ИНФОРМАЦИЯ О ЗАГРУЗКЕ ==========
     LOG_INFO_LINE("");
     LOG_INFO_LINE("Boot Information");
     LOG_INFO_LINE("Kernel base: 0x%lx", bi->KernelBase);
     LOG_INFO_LINE("Kernel size: %u KB", (uint32_t)(bi->KernelSize / 1024));
     LOG_INFO_LINE("Total memory: %u MB", (uint32_t)(bi->TotalMemory / (1024 * 1024)));
-    LOG_INFO_LINE("Memory map size: %u bytes", (uint32_t)bi->MemoryMapSize);
-    LOG_INFO_LINE("Descriptor size: %u bytes", bi->MemoryMapDescriptorSize);
-    if (bi->RsdpAddress)
-        LOG_INFO_LINE("RSDP: 0x%lx", bi->RsdpAddress);
-    if (bi->SmbiosAddress)
-        LOG_INFO_LINE("SMBIOS: 0x%lx", bi->SmbiosAddress);
 
-    // ========== ДИСПЛЕЙ ==========
     LOG_INFO_LINE("");
     LOG_INFO_LINE("Display Information");
     LOG_INFO_LINE("Framebuffer: 0x%lx", bi->FrameBufferBase);
-    LOG_INFO_LINE("Framebuffer size: %u KB", (uint32_t)(bi->FrameBufferSize / 1024));
     LOG_INFO_LINE("Resolution: %dx%d", bi->HorizontalResolution, bi->VerticalResolution);
-    LOG_INFO_LINE("Pixel format: %s", (bi->PixelFormat == 0) ? "RGB" : "BGR");
-    LOG_INFO_LINE("Scanline pixels: %d", bi->PixelsPerScanLine);
-    LOG_INFO_LINE("Console grid: %dx%d chars", screen_width_chars, screen_height_chars);
 
-    // ========== ИНИЦИАЛИЗАЦИЯ УСТРОЙСТВ ==========
     LOG_PENDING("Initializing keyboard...");
     keyboard_init();
-    if (keyboard_is_initialized()) {
-        LOG_DONE_OK("Keyboard initialized");
-    } else {
-        LOG_DONE_FAIL("Keyboard not detected");
-    }
+    LOG_DONE_OK("Keyboard %s", keyboard_is_initialized() ? "ready" : "not found");
     
     LOG_PENDING("Initializing mouse...");
     mouse_init();
-    if (mouse_is_initialized()) {
-        LOG_DONE_OK("Mouse initialized");
-    } else {
-        LOG_DONE_WARN("Mouse not detected");
-    }
+    LOG_DONE_OK("Mouse %s", mouse_is_initialized() ? "ready" : "not found");
     
     LOG_PENDING("Enabling interrupts...");
     irq_init();
     LOG_DONE_OK("Interrupts enabled");
+    
+    asm volatile("sti");
 
-    // ========== ЗАГОЛОВОК ЯДРА ==========
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
     printf("================================================\n");
-    printf("     LufiraOS Kernel v0.3 (Preemptive)          \n");
+    printf("     LufiraOS Kernel v0.4                        \n");
     printf("================================================\n");
     set_foreground_color(LOG_COLOR_INFO);
     
-    // ========== СИСТЕМНАЯ ИНФОРМАЦИЯ ==========
-    printf("\n");
-    set_foreground_color(LOG_COLOR_HEADER);
-    printf("SYSTEM INFORMATION:\n");
-    set_foreground_color(LOG_COLOR_INFO);
-    printf("  Architecture: x86_64\n");
-    printf("  Build date:   %s\n", __DATE__);
-    printf("  Build time:   %s\n", __TIME__);
-
-    // ========== СТАТУС СИСТЕМЫ ==========
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
     printf("SYSTEM STATUS:\n");
@@ -267,31 +217,19 @@ void _start(BootInfo* bi) {
     printf("  Process manager: INITIALIZED\n");
     set_foreground_color(LOG_COLOR_INFO);
 
-    // ========== ЗАПУСК ТЕСТОВЫХ ЗАДАЧ ==========
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
     printf("STARTING PROCESSES:\n");
     set_foreground_color(LOG_COLOR_INFO);
     
-    // Создаём тестовые задачи
     process_create("test_task_1", test_task_1);
     process_create("test_task_2", test_task_2);
     process_create("heartbeat", test_task_3);
-    
-    // Создаём процесс для шелла (основной поток)
     process_create("shell", shell_task);
     
     printf("\nAll processes created! Preemptive scheduling active.\n");
-    printf("Tasks will automatically switch every %d ms\n\n", 1000/PIT_FREQUENCY);
     
-    // Запускаем прерывания и уходим в планировщик
-    asm volatile("sti");
-    
-    // Переключаемся на первый процесс (это переведёт основной поток в планировщик)
     schedule();
     
-    // Сюда мы никогда не попадём
-    while (1) {
-        asm volatile("hlt");
-    }
+    while (1) __asm__("hlt");
 }
