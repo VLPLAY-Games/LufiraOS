@@ -361,3 +361,190 @@ void command_write(const char *filename) {
         printf("Error writing file!\n");
     }
 }
+
+// cp - копирование файла
+void command_cp(const char *args) {
+    if (!args || *args == '\0') {
+        printf("\nUsage: cp <source> <destination>\n");
+        return;
+    }
+    
+    // Находим исходный файл
+    const char *src = args;
+    while (*src == ' ') src++;
+    
+    const char *dst = src;
+    while (*dst && *dst != ' ') dst++;
+    if (*dst == ' ') {
+        dst++;
+        while (*dst == ' ') dst++;
+    }
+    
+    if (*src == '\0' || *dst == '\0') {
+        printf("\nUsage: cp <source> <destination>\n");
+        return;
+    }
+    
+    // Копируем имена
+    char src_name[256], dst_name[256];
+    int i = 0;
+    while (src[i] && src[i] != ' ' && i < 255) { src_name[i] = src[i]; i++; }
+    src_name[i] = '\0';
+    
+    i = 0;
+    while (dst[i] && dst[i] != ' ' && i < 255) { dst_name[i] = dst[i]; i++; }
+    dst_name[i] = '\0';
+    
+    // Читаем исходный файл
+    uint32_t fsize;
+    if (fat_open(&fatfs, src_name, &fsize) != 0) {
+        printf("\ncp: source file not found: %s\n", src_name);
+        return;
+    }
+    
+    uint8_t *buf = (uint8_t *)kmalloc(fsize);
+    if (!buf) {
+        printf("\ncp: not enough memory\n");
+        return;
+    }
+    
+    int br = fat_read_file(&fatfs, src_name, buf, fsize);
+    if (br <= 0) {
+        printf("\ncp: error reading source file\n");
+        kfree(buf);
+        return;
+    }
+    
+    // Записываем в целевой файл
+    fat_create_file(&fatfs, 0, dst_name);
+    int result = fat_write_file(&fatfs, dst_name, buf, fsize);
+    
+    if (result == 0) {
+        printf("\nCopied '%s' to '%s' (%u bytes)\n", src_name, dst_name, fsize);
+    } else {
+        printf("\ncp: error writing destination file\n");
+    }
+    
+    kfree(buf);
+}
+
+// mv - перемещение/переименование файла
+void command_mv(const char *args) {
+    if (!args || *args == '\0') {
+        printf("\nUsage: mv <source> <destination>\n");
+        return;
+    }
+    
+    const char *src = args;
+    while (*src == ' ') src++;
+    
+    const char *dst = src;
+    while (*dst && *dst != ' ') dst++;
+    if (*dst == ' ') {
+        dst++;
+        while (*dst == ' ') dst++;
+    }
+    
+    if (*src == '\0' || *dst == '\0') {
+        printf("\nUsage: mv <source> <destination>\n");
+        return;
+    }
+    
+    char src_name[256], dst_name[256];
+    int i = 0;
+    while (src[i] && src[i] != ' ' && i < 255) { src_name[i] = src[i]; i++; }
+    src_name[i] = '\0';
+    
+    i = 0;
+    while (dst[i] && dst[i] != ' ' && i < 255) { dst_name[i] = dst[i]; i++; }
+    dst_name[i] = '\0';
+    
+    // Копируем файл
+    uint32_t fsize;
+    if (fat_open(&fatfs, src_name, &fsize) != 0) {
+        printf("\nmv: source file not found: %s\n", src_name);
+        return;
+    }
+    
+    uint8_t *buf = (uint8_t *)kmalloc(fsize);
+    if (!buf) {
+        printf("\nmv: not enough memory\n");
+        return;
+    }
+    
+    int br = fat_read_file(&fatfs, src_name, buf, fsize);
+    if (br <= 0) {
+        printf("\nmv: error reading source file\n");
+        kfree(buf);
+        return;
+    }
+    
+    fat_create_file(&fatfs, 0, dst_name);
+    fat_write_file(&fatfs, dst_name, buf, fsize);
+    
+    // Удаляем исходный
+    fat_rm(&fatfs, 0, src_name);
+    
+    printf("\nMoved '%s' to '%s' (%u bytes)\n", src_name, dst_name, fsize);
+    
+    kfree(buf);
+}
+
+// rename - переименование
+void command_rename(const char *args) {
+    command_mv(args);  // rename = mv
+}
+
+// edit - простой редактор (дописывает строку в файл)
+void command_edit(const char *args) {
+    if (!args || *args == '\0') {
+        printf("\nUsage: edit <filename> <text>\n");
+        printf("Appends text to file (with newline)\n");
+        return;
+    }
+    
+    const char *filename = args;
+    while (*filename == ' ') filename++;
+    
+    const char *text = filename;
+    while (*text && *text != ' ') text++;
+    if (*text == ' ') {
+        text++;
+        while (*text == ' ') text++;
+    }
+    
+    if (*text == '\0') {
+        printf("\nUsage: edit <filename> <text>\n");
+        return;
+    }
+    
+    char fname[256];
+    int i = 0;
+    while (filename[i] && filename[i] != ' ' && i < 255) { fname[i] = filename[i]; i++; }
+    fname[i] = '\0';
+    
+    // Проверяем существует ли файл
+    uint32_t fsize;
+    if (fat_open(&fatfs, fname, &fsize) != 0) {
+        fat_create_file(&fatfs, 0, fname);
+    }
+    
+    // Создаём строку с текстом + \n
+    int tlen = 0;
+    while (text[tlen]) tlen++;
+    
+    char *buf = (char *)kmalloc(tlen + 2);
+    for (int j = 0; j < tlen; j++) buf[j] = text[j];
+    buf[tlen] = '\n';
+    buf[tlen + 1] = '\0';
+    
+    int result = fat_append_file(&fatfs, fname, buf, tlen + 1);
+    
+    if (result == 0) {
+        printf("\nAppended to '%s' (%d bytes)\n", fname, tlen + 1);
+    } else {
+        printf("\nError appending to file\n");
+    }
+    
+    kfree(buf);
+}

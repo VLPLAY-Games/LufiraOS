@@ -221,6 +221,18 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "write") == 0) {
         if (input_buffer_index <= 6) printf("\nUsage: write <filename> <text>\n");
         else command_write(input_buffer + 6);
+    } else if (strcmp(cmd_lower, "cp") == 0) {
+        if (*args == '\0') printf("\nUsage: cp <source> <destination>\n");
+        else command_cp(args);
+    } else if (strcmp(cmd_lower, "mv") == 0) {
+        if (*args == '\0') printf("\nUsage: mv <source> <destination>\n");
+        else command_mv(args);
+    } else if (strcmp(cmd_lower, "rename") == 0) {
+        if (*args == '\0') printf("\nUsage: rename <old> <new>\n");
+        else command_rename(args);
+    } else if (strcmp(cmd_lower, "edit") == 0) {
+        if (*args == '\0') printf("\nUsage: edit <filename> <text>\n");
+        else command_edit(args);
     } else {
         printf("\nUnknown command: %s\n", input_buffer);
         printf("Type 'help' for available commands.\n");
