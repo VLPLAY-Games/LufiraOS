@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdarg.h>
+#include "bootinfo.h"
 #include "system/mm/pmm.h"
 #include "system/mm/paging.h"
 #include "system/mm/heap.h"
@@ -11,7 +12,7 @@
 #include "system/cpu/idt.h"
 #include "fs/fat/fat.h"
 #include "system/cpu/irq.h"
-#include "system/log.h"
+#include "log.h"
 
 
 // Базовые функции для портов

@@ -1,9 +1,9 @@
 #include "paging.h"
 #include "pmm.h"
-#include "../../drivers/console/console.h"
+#include "drivers/console/console.h"
 #include <stddef.h>
 #include <stdint.h>
-#include "../log.h"
+#include "log.h"
 
 typedef uint64_t pt_entry_t;
 // Указатели на таблицы страниц (все в identity-mapped памяти)

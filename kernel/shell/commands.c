@@ -1,7 +1,7 @@
 #include "commands.h"
-#include "../drivers/console/console.h"
-#include "../shell/shell.h"
-#include "../fs/fat/fat.h"
+#include "drivers/console/console.h"
+#include "shell.h"
+#include "fs/fat/fat.h"
 
 extern fat_fs_t fatfs;
 extern char cwd_path[256];
