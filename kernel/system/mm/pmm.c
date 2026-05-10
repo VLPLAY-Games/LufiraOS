@@ -1,8 +1,8 @@
 #include "pmm.h"
-#include "../drivers/console.h"   // для printf
+#include "../../drivers/console/console.h"
 #include <stddef.h>
 #include <stdint.h>
-#include "system/log.h"
+#include "../log.h"
 
 #define PAGE_SIZE 4096
 #define BITMAP_ENTRY_SIZE 8

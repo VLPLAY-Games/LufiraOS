@@ -51,22 +51,22 @@ BOOTLOADER_OBJECTS := $(patsubst $(BOOTLOADER_DIR)/%.c,$(BUILD_DIR)/boot/%.o,$(B
 
 KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/kernel.c \
-    $(KERNEL_DIR)/drivers/console.c \
-    $(KERNEL_DIR)/drivers/keyboard.c \
-	$(KERNEL_DIR)/drivers/mouse.c \
+    $(KERNEL_DIR)/drivers/console/console.c \
+    $(KERNEL_DIR)/drivers/keyboard/keyboard.c \
+    $(KERNEL_DIR)/drivers/mouse/mouse.c \
+    $(KERNEL_DIR)/drivers/disk/disk.c \
     $(KERNEL_DIR)/shell/shell.c \
-    $(KERNEL_DIR)/system/commands.c \
-    $(KERNEL_DIR)/system/gdt.c \
-    $(KERNEL_DIR)/system/idt.c \
-    $(KERNEL_DIR)/system/irq.c \
-	$(KERNEL_DIR)/system/disk.c \
-    $(KERNEL_DIR)/fs/fat.c \
-	$(KERNEL_DIR)/system/pmm.c \
-    $(KERNEL_DIR)/system/paging.c \
-    $(KERNEL_DIR)/system/heap.c
+    $(KERNEL_DIR)/shell/commands.c \
+    $(KERNEL_DIR)/system/cpu/gdt.c \
+    $(KERNEL_DIR)/system/cpu/idt.c \
+    $(KERNEL_DIR)/system/cpu/irq.c \
+    $(KERNEL_DIR)/system/mm/pmm.c \
+    $(KERNEL_DIR)/system/mm/paging.c \
+    $(KERNEL_DIR)/system/mm/heap.c \
+    $(KERNEL_DIR)/fs/fat/fat.c
 
 KERNEL_ASM_SOURCES := \
-    $(KERNEL_DIR)/system/interrupts.S
+    $(KERNEL_DIR)/system/cpu/interrupts.S
 
 KERNEL_C_OBJECTS := $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/kernel/%.o,$(KERNEL_C_SOURCES))
 KERNEL_ASM_OBJECTS := $(patsubst $(KERNEL_DIR)/%.S,$(BUILD_DIR)/kernel/%.o,$(KERNEL_ASM_SOURCES))

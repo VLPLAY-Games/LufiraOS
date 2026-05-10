@@ -1,7 +1,7 @@
 #include <stdint.h>
 #include "keyboard.h"
-#include "../shell/shell.h"
-#include "../drivers/console.h"
+#include "../../shell/shell.h"
+#include "../console/console.h"
 
 // Порт клавиатуры
 #define KEYBOARD_DATA_PORT 0x60

@@ -1,7 +1,7 @@
 #include "irq.h"
-#include "../drivers/console.h"
-#include "../drivers/keyboard.h"
-#include "../drivers/mouse.h"
+#include "../../drivers/console/console.h"
+#include "../../drivers/keyboard/keyboard.h"
+#include "../../drivers/mouse/mouse.h"
 
 // Прямая работа с портами PIC
 static inline uint8_t inb(uint16_t port) {

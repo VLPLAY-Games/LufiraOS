@@ -1,9 +1,9 @@
 #include "heap.h"
 #include "paging.h"
 #include "pmm.h"
-#include "../drivers/console.h"
+#include "../../drivers/console/console.h"
 #include <stdint.h>
-#include "system/log.h"
+#include "../log.h"
 
 #define KERNEL_HEAP_START   0xFFFF900000000000ULL
 #define KERNEL_HEAP_INITIAL_SIZE   (4 * 1024 * 1024)   // 4 MB

@@ -1,16 +1,16 @@
 #include <stdint.h>
 #include <stdarg.h>
-#include "system/pmm.h"
-#include "system/paging.h"
-#include "system/heap.h"
-#include "drivers/keyboard.h"
-#include "drivers/mouse.h"
-#include "drivers/console.h"
+#include "system/mm/pmm.h"
+#include "system/mm/paging.h"
+#include "system/mm/heap.h"
+#include "drivers/keyboard/keyboard.h"
+#include "drivers/mouse/mouse.h"
+#include "drivers/console/console.h"
 #include "shell/shell.h"
-#include "system/gdt.h"
-#include "system/idt.h"
-#include "fs/fat.h"
-#include "system/irq.h"
+#include "system/cpu/gdt.h"
+#include "system/cpu/idt.h"
+#include "fs/fat/fat.h"
+#include "system/cpu/irq.h"
 #include "system/log.h"
 
 

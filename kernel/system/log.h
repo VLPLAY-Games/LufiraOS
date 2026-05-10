@@ -1,7 +1,7 @@
 #ifndef LOG_H
 #define LOG_H
 
-#include "../drivers/console.h"
+#include "../drivers/console/console.h"
 
 // Цвета для логов
 #define LOG_COLOR_OK        COLOR_LIGHT_GREEN     // ярко-зелёный

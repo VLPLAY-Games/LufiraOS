@@ -1,8 +1,8 @@
 #include "shell.h"
-#include "../system/commands.h"
-#include "../drivers/console.h"
-#include "../drivers/keyboard.h"
-#include "../fs/fat.h"
+#include "commands.h"
+#include "../drivers/console/console.h"
+#include "../drivers/keyboard/keyboard.h"
+#include "../fs/fat/fat.h"
 
 extern fat_fs_t fatfs;
 

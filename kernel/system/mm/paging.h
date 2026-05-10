@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "../drivers/console.h"
+#include "../../drivers/console/console.h"
 
 #define PAGE_SIZE            4096
 #define PAGE_PRESENT         0x001

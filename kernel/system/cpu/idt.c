@@ -1,7 +1,7 @@
 #include "idt.h"
 #include "interrupts.h"
-#include "irq.h"                       // <-- добавлено
-#include "drivers/console.h"
+#include "irq.h"
+#include "../../drivers/console/console.h"
 #include <stdint.h>
 #include <stddef.h>
 

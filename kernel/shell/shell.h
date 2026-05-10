@@ -1,8 +1,8 @@
 #ifndef SHELL_H
 #define SHELL_H
 
-#include "../drivers/console.h"
-#include "../drivers/keyboard.h"
+#include "../drivers/console/console.h"
+#include "../drivers/keyboard/keyboard.h"
 
 // Прототипы функций
 void show_prompt(void);
