@@ -33,6 +33,7 @@ $(shell mkdir -p $(BUILD_DIR) \
 	$(BUILD_DIR)/kernel/system/timer \
 	$(BUILD_DIR)/kernel/system/process \
 	$(BUILD_DIR)/kernel/system/syscall \
+	$(BUILD_DIR)/kernel/system/elf \
     $(BUILD_DIR)/kernel/fs/fat)
 
 BOOTLOADER_CFLAGS := -I$(EFI_INC) -I$(EFI_INC_ARCH) \
@@ -79,6 +80,7 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/system/timer/pit.c \
     $(KERNEL_DIR)/system/process/process.c \
 	$(KERNEL_DIR)/system/syscall/syscall.c \
+	$(KERNEL_DIR)/system/elf/elf.c \
     $(KERNEL_DIR)/fs/fat/fat.c
 
 KERNEL_ASM_SOURCES := \

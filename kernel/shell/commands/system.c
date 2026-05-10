@@ -32,6 +32,7 @@ void command_help(void) {
     printf(" rm <name> - Remove file or empty directory\n");
     printf(" cat <file> - Display file content\n");
     printf(" touch <filename> - Create empty file\n");
+    printf(" run <file> - Execute ELF program from disk\n");
 }
 
 void command_clear(void) { clear_screen(); show_prompt(); }

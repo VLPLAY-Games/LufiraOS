@@ -2,6 +2,8 @@
 #include "drivers/console/console.h"
 #include "../shell.h"
 #include "fs/fat/fat.h"
+#include "system/elf/elf.h"
+#include "system/process/process.h"
 
 extern fat_fs_t fatfs;
 extern char cwd_path[256];
@@ -272,4 +274,44 @@ void command_cat(const char* filename) {
             printf("\n--- end ---\n");
         } else printf("\nError reading file.\n");
     } else printf("\nFile not found: %s\n", filename);
+}
+
+// run - запуск ELF файла
+void command_run(const char *filename) {
+    if (!filename || *filename == '\0') {
+        printf("\nUsage: run <filename>\n");
+        printf("Example: run hello.elf\n");
+        return;
+    }
+    
+    // Открываем файл
+    uint32_t fsize;
+    if (fat_open(&fatfs, filename, &fsize) != 0) {
+        printf("\nFile not found: %s\n", filename);
+        return;
+    }
+    
+    // Выделяем буфер для файла
+    uint8_t *file_buf = (uint8_t *)kmalloc(fsize);
+    if (!file_buf) {
+        printf("\nNot enough memory to load %s (%u bytes)\n", filename, fsize);
+        return;
+    }
+    
+    // Читаем файл
+    int br = fat_read_file(&fatfs, filename, file_buf, fsize);
+    if (br <= 0) {
+        printf("\nError reading file: %s\n", filename);
+        kfree(file_buf);
+        return;
+    }
+    
+    printf("\nLoading ELF: %s (%u bytes)...\n", filename, fsize);
+    
+    // Запускаем ELF
+    if (elf_exec(file_buf, fsize, filename) == 0) {
+        printf("Process started!\n");
+    }
+    
+    // Не освобождаем буфер - он используется процессом
 }
