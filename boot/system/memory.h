@@ -1,5 +1,4 @@
-#ifndef MEMORY_H
-#define MEMORY_H
+#pragma once
 
 #include <efi.h>
 #include <efilib.h>
@@ -7,5 +6,3 @@
 
 VOID ReadMemoryMap(BootInfo *bi);
 UINT64 CalculateTotalRAM(EFI_MEMORY_DESCRIPTOR *MemoryMap, UINTN MemoryMapSize, UINTN DescriptorSize);
-
-#endif

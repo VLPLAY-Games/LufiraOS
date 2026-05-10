@@ -1,5 +1,4 @@
-#ifndef QUICKBOOT_H
-#define QUICKBOOT_H
+#pragma once
 
 #include <efi.h>
 #include <efilib.h>
@@ -7,5 +6,3 @@
 #include "../ui/splash.h"
 
 VOID QuickBoot(BootInfo *bi, EFI_HANDLE ImageHandle, BOOLEAN keepLogo, BOOLEAN animateSpinner);
-
-#endif

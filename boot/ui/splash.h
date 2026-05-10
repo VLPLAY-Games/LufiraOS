@@ -1,11 +1,7 @@
-#ifndef SPLASH_H
-#define SPLASH_H
+#pragma once
 
 #include <efi.h>
 #include <efilib.h>
-
-typedef enum { MODE_NORMAL, MODE_DEBUG, MODE_SAFE } BootMode;
+#include "../bootinfo.h"
 
 VOID ShowSplash(BootMode mode);
-
-#endif

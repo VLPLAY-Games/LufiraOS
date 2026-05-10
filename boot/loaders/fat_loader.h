@@ -1,5 +1,4 @@
-#ifndef FATLOADER_H
-#define FATLOADER_H
+#pragma once
 
 #include <efi.h>
 #include <efilib.h>
@@ -7,5 +6,3 @@
 
 VOID LoadFATImage(EFI_BLOCK_IO_PROTOCOL *BlockIo, BootInfo *bi, BOOLEAN showProgress);
 EFI_STATUS GetBlockIO(EFI_LOADED_IMAGE *LoadedImage, EFI_BLOCK_IO_PROTOCOL **BlockIo);
-
-#endif

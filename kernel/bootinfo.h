@@ -1,5 +1,4 @@
-#ifndef BOOTINFO_H
-#define BOOTINFO_H
+#pragma once
 
 // Структура с информацией от загрузчика
 // Передаётся ядру при старте
@@ -33,5 +32,3 @@ typedef struct {
 
 // Сигнатура точки входа ядра
 typedef void (*KernelEntry)(BootInfo*);
-
-#endif // BOOTINFO_H

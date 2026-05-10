@@ -1,5 +1,5 @@
-#ifndef FAT_H
-#define FAT_H
+#pragma once
+
 #include <stdint.h>
 
 typedef struct {
@@ -95,5 +95,3 @@ int fat_create_file(fat_fs_t *fs, uint32_t parent_cluster, const char *name);
 
 void fat_mark_sector_dirty(fat_fs_t *fs, uint32_t lba);
 void fat_flush(fat_fs_t *fs);
-
-#endif

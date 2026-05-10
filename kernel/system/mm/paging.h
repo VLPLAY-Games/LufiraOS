@@ -1,5 +1,4 @@
-#ifndef PAGING_H
-#define PAGING_H
+#pragma once
 
 #include <stdint.h>
 #include <stddef.h>
@@ -30,5 +29,3 @@ void unmap_page(uint64_t virt);
 
 // Получить физический адрес по виртуальному (0 при ошибке)
 uint64_t get_physical_address(uint64_t virt);
-
-#endif

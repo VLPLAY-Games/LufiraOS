@@ -1,5 +1,4 @@
-#ifndef UTILS_H
-#define UTILS_H
+#pragma once
 
 #include <efi.h>
 #include <efilib.h>
@@ -33,5 +32,3 @@ VOID SetColor(UINTN Foreground, UINTN Background);
 VOID PrintColored(CONST CHAR16 *String, UINTN Foreground, UINTN Background);
 VOID GetConsoleSize(UINTN *Cols, UINTN *Rows);
 VOID PrintCentered(CONST CHAR16 *Str, UINTN Row, UINTN Color);
-
-#endif

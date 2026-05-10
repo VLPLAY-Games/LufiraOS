@@ -52,7 +52,6 @@ fat_fs_t fatfs;   // глобальная файловая система (дл�
 
 // --- Точка входа ядра ---
 __attribute__((section(".text.prologue")))
-__attribute__((section(".text.prologue")))
 void _start(BootInfo* bi) {
     asm volatile ("cli");
 

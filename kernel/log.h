@@ -1,5 +1,4 @@
-#ifndef LOG_H
-#define LOG_H
+#pragma once
 
 #include "drivers/console/console.h"
 
@@ -115,5 +114,3 @@
     printf(fmt, ##__VA_ARGS__); \
     printf("\n"); \
 } while(0)
-
-#endif

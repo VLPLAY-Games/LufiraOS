@@ -1,5 +1,4 @@
-#ifndef SHELL_H
-#define SHELL_H
+#pragma once
 
 #include "../drivers/console/console.h"
 #include "../drivers/keyboard/keyboard.h"
@@ -30,5 +29,3 @@ void load_command_from_history(int history_idx);
 // Текущий путь и кластер
 extern char cwd_path[256];
 extern uint32_t cwd_first_cluster;
-
-#endif

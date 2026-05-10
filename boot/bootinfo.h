@@ -1,5 +1,4 @@
-#ifndef BOOTINFO_H
-#define BOOTINFO_H
+#pragma once
 
 #include <efi.h>
 
@@ -24,4 +23,4 @@ typedef struct {
 
 typedef void (*KernelEntry)(BootInfo*);
 
-#endif
+typedef enum { MODE_NORMAL, MODE_DEBUG, MODE_SAFE } BootMode;

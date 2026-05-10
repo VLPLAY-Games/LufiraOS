@@ -1,5 +1,4 @@
-#ifndef PMM_H
-#define PMM_H
+#pragma once
 
 #include <stdint.h>
 #include <stddef.h>
@@ -25,5 +24,3 @@ void pmm_free_page(uint64_t phys);
 
 // Общее количество физических страниц (для paging)
 uint64_t pmm_get_total_pages(void);
-
-#endif

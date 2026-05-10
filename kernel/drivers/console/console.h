@@ -1,5 +1,4 @@
-#ifndef CONSOLE_H
-#define CONSOLE_H
+#pragma once
 
 #include <stdint.h>
 #include <stddef.h>
@@ -102,5 +101,3 @@ const char* get_color_name(ConsoleColor color);
 
 // Функция для отображения системной информации
 void display_system_info(BootInfo* bi);
-
-#endif
