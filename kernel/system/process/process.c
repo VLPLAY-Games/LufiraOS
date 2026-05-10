@@ -16,6 +16,7 @@ static process_t *process_list = NULL;
 process_t *current_process = NULL;
 static uint32_t next_pid = 1;
 static process_t *idle_process = NULL;
+uint64_t kernel_cr3 = 0;
 
 // Стек Ring 0 для каждого процесса (для syscall'ов и прерываний)
 static uint64_t allocate_ring0_stack(process_t *proc) {
@@ -57,6 +58,7 @@ static uint64_t create_address_space(uint64_t kernel_pml4_phys) {
 }
 
 void process_init(void) {
+    asm volatile("mov %%cr3, %0" : "=r"(kernel_cr3));
     idle_process = (process_t*)kmalloc(sizeof(process_t));
     if (!idle_process) return;
     
@@ -215,7 +217,10 @@ void process_exit(void) {
     printf("\n[PROCESS] Process %u ('%s') exiting\n", 
            current_process->pid, current_process->name);
     
+    // Запрещаем прерывания на время очистки
     asm volatile("cli");
+    
+    // Помечаем как завершённый
     current_process->state = PROCESS_TERMINATED;
     
     // Освобождаем пользовательский стек
@@ -223,46 +228,117 @@ void process_exit(void) {
         uint64_t stack_start = current_process->stack_base - current_process->stack_size;
         size_t num_pages = current_process->stack_size / PAGE_SIZE;
         
-        uint64_t old_cr3;
-        asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
-        asm volatile("mov %0, %%cr3" : : "r"(current_process->page_table) : "memory");
+        printf("[PROCESS] Freeing user stack: 0x%lx - 0x%lx (%u pages)\n",
+               stack_start, current_process->stack_base, (uint32_t)num_pages);
         
         for (size_t i = 0; i < num_pages; i++) {
-            uint64_t virt = stack_start + i * PAGE_SIZE;
-            uint64_t phys = get_physical_address(virt);
-            if (phys) {
-                unmap_page(virt);
-                pmm_free_page(phys);
-            }
+            pmm_free_page(stack_start + i * PAGE_SIZE);
         }
-        
-        asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
     }
     
     // Освобождаем Ring 0 стек
     if (current_process->ring0_stack > 0) {
-        uint64_t r0_start = current_process->ring0_stack - 16384;
-        for (int i = 0; i < 4; i++) {
+        size_t ring0_pages = 4;  // 16 KB
+        uint64_t r0_start = current_process->ring0_stack - ring0_pages * PAGE_SIZE;
+        
+        printf("[PROCESS] Freeing ring0 stack: 0x%lx - 0x%lx\n",
+               r0_start, current_process->ring0_stack);
+        
+        for (size_t i = 0; i < ring0_pages; i++) {
             pmm_free_page(r0_start + i * PAGE_SIZE);
         }
     }
     
-    // Освобождаем PML4
-    if (current_process->page_table != idle_process->page_table) {
+    // Освобождаем PML4 (только если это не ядерный)
+    if (current_process->page_table != kernel_cr3 && current_process->page_table != 0) {
+        printf("[PROCESS] Freeing PML4: 0x%lx\n", current_process->page_table);
         pmm_free_page(current_process->page_table);
     }
     
+    // Освобождаем структуру процесса (если она не idle)
+    if (current_process != idle_process) {
+        // Не освобождаем сразу, планировщик ещё может на него ссылаться
+        // Помечаем как "зомби" — будет удалён позже
+    }
+    
+    // Разрешаем прерывания
     asm volatile("sti");
+    
+    // Передаём управление планировщику
     schedule();
-    while (1) __asm__("hlt");
+    
+    // Сюда никогда не должны попасть
+    while (1) {
+        asm volatile("hlt");
+    }
+}
+
+// Очистка завершённых процессов (зомби-процессов)
+void process_reap(void) {
+    if (!process_list) return;
+    
+    process_t *p = process_list;
+    process_t *start = p;
+    process_t *prev = NULL;
+    
+    // Находим последний процесс в списке
+    while (p->next && p->next != start) {
+        prev = p;
+        p = p->next;
+    }
+    
+    do {
+        process_t *next = p->next;
+        
+        if (p->state == PROCESS_TERMINATED && p != idle_process) {
+            printf("[PROCESS] Reaping zombie PID %u ('%s')\n", p->pid, p->name);
+            
+            // Удаляем из списка
+            if (p == process_list) {
+                // Удаляем голову списка
+                if (p->next == p) {
+                    // Единственный процесс
+                    process_list = idle_process;
+                    idle_process->next = idle_process;
+                } else {
+                    // Находим предыдущий
+                    process_t *last = process_list;
+                    while (last->next != process_list) {
+                        last = last->next;
+                    }
+                    process_list = p->next;
+                    last->next = process_list;
+                }
+            } else {
+                // Удаляем из середины/конца
+                process_t *prev_node = process_list;
+                while (prev_node->next != p) {
+                    prev_node = prev_node->next;
+                }
+                prev_node->next = p->next;
+            }
+            
+            // Освобождаем память процесса
+            kfree(p);
+        }
+        
+        p = next;
+    } while (p != start && p);
 }
 
 void schedule(void) {
     uint64_t rflags;
     asm volatile("pushfq; pop %0" : "=r"(rflags));
-    if (!(rflags & 0x200)) return;
+    if (!(rflags & 0x200)) {
+        return;
+    }
     
-    if (!current_process) return;
+    if (!current_process) {
+        return;
+    }
+    
+    // Очищаем зомби-процессы
+    process_reap();
     
     process_t *next = current_process->next;
     int tries = 0;
@@ -280,9 +356,11 @@ void schedule(void) {
         }
     }
     
-    if (next == current_process) return;
+    if (next == current_process) {
+        return;
+    }
     
-    // Устанавливаем RSP0 в TSS для нового процесса
+    // Устанавливаем RSP0 для нового процесса
     if (next->ring0_stack > 0) {
         tss_set_rsp0(next->ring0_stack);
     }

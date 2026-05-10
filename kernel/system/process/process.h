@@ -38,6 +38,9 @@ process_t* process_create(const char *name, void (*entry)(void));
 void process_exit(void);
 void schedule(void);
 void switch_to_process(process_t *next);
+void process_reap(void);
+
+extern uint64_t kernel_cr3;  // CR3 ядра
 
 extern void context_switch(process_context_t *old_context, 
                           process_context_t *new_context);
