@@ -20,14 +20,14 @@ $(foreach tool,$(REQUIRED_TOOLS),\
 
 $(shell mkdir -p $(BUILD_DIR) \
     $(BUILD_DIR)/boot \
-    $(BUILD_DIR)/boot/ui \
-    $(BUILD_DIR)/boot/system \
-    $(BUILD_DIR)/boot/loaders \
-    $(BUILD_DIR)/boot/boot_modes \
-    $(BUILD_DIR)/kernel/drivers \
+    $(BUILD_DIR)/kernel/drivers/console \
+    $(BUILD_DIR)/kernel/drivers/keyboard \
+    $(BUILD_DIR)/kernel/drivers/mouse \
+    $(BUILD_DIR)/kernel/drivers/disk \
     $(BUILD_DIR)/kernel/shell \
-    $(BUILD_DIR)/kernel/system \
-    $(BUILD_DIR)/kernel/fs)
+    $(BUILD_DIR)/kernel/system/cpu \
+    $(BUILD_DIR)/kernel/system/mm \
+    $(BUILD_DIR)/kernel/fs/fat)
 
 BOOTLOADER_CFLAGS := -I$(EFI_INC) -I$(EFI_INC_ARCH) \
                      -fpic -ffreestanding -fno-stack-protector \
