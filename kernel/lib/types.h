@@ -19,6 +19,9 @@ typedef int64_t             ptrdiff_t;
 typedef uint64_t            uintptr_t;
 typedef int64_t             intptr_t;
 
+// ========== ФАЙЛОВЫЕ ТИПЫ ==========
+typedef int64_t             off_t;      // Для seek
+
 // ========== БУЛЕВЫЙ ТИП ==========
 #ifndef __cplusplus
     #ifndef bool

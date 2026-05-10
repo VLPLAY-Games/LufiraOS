@@ -5,6 +5,7 @@
 #include "system/cpu/gdt.h"
 #include "system/mm/heap.h"
 #include "lib/stddef.h"
+#include "fs/vfs/vfs.h"
 
 typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
@@ -16,37 +17,22 @@ static uint64_t sys_write(uint64_t fd, uint64_t buffer, uint64_t length,
     (void)unused1;
     (void)unused2;
     
-    // Пока только stdout (fd=0 или fd=1)
-    if (fd == 0 || fd == 1) {
-        if (buffer == 0 || length == 0) return 0;
-        
-        const char *str = (const char *)buffer;
-        uint64_t printed = 0;
-        
-        for (uint64_t i = 0; i < length; i++) {
-            if (str[i] == '\0') break;
-            put_char(str[i]);
-            printed++;
-        }
-        
-        return printed;
-    }
+    if (buffer == 0 || length == 0) return 0;
     
-    // Другие fd пока не поддерживаются
-    return 0;
+    // Используем VFS!
+    return (uint64_t)vfs_write((int)fd, (const void *)buffer, (size_t)length);
 }
 
 // SYS_READ (1): fd, buffer, length
 static uint64_t sys_read(uint64_t fd, uint64_t buffer, uint64_t length,
                          uint64_t unused1, uint64_t unused2) {
-    (void)fd;
-    (void)buffer;
-    (void)length;
     (void)unused1;
     (void)unused2;
     
-    // Пока не реализовано - будет через VFS
-    return 0;
+    if (buffer == 0 || length == 0) return 0;
+    
+    // Используем VFS!
+    return (uint64_t)vfs_read((int)fd, (void *)buffer, (size_t)length);
 }
 
 // SYS_EXIT (2): exit_code
@@ -95,14 +81,9 @@ static uint64_t sys_open(uint64_t filename_ptr, uint64_t flags, uint64_t mode,
     (void)unused1;
     (void)unused2;
     
-    if (filename_ptr == 0) return -1;
+    if (filename_ptr == 0) return (uint64_t)-1;
     
-    const char *filename = (const char *)filename_ptr;
-    printf("[SYS_OPEN] %s (flags=0x%lx)\n", filename, flags);
-    
-    // Заглушка: будет полностью реализовано после VFS
-    // Пока возвращаем -1 (файл не найден)
-    return (uint64_t)-1;
+    return (uint64_t)vfs_open((const char *)filename_ptr, (int)flags);
 }
 
 // SYS_CLOSE (7): fd
@@ -110,10 +91,7 @@ static uint64_t sys_close(uint64_t fd, uint64_t unused1, uint64_t unused2,
                           uint64_t unused3, uint64_t unused4) {
     (void)unused1; (void)unused2; (void)unused3; (void)unused4;
     
-    printf("[SYS_CLOSE] fd=%u\n", (uint32_t)fd);
-    
-    // Заглушка: будет реализовано после VFS
-    return 0;
+    return (uint64_t)vfs_close((int)fd);
 }
 
 // SYS_SEEK (8): fd, offset, whence
@@ -122,11 +100,7 @@ static uint64_t sys_seek(uint64_t fd, uint64_t offset, uint64_t whence,
     (void)unused1;
     (void)unused2;
     
-    printf("[SYS_SEEK] fd=%u offset=%u whence=%u\n", 
-           (uint32_t)fd, (uint32_t)offset, (uint32_t)whence);
-    
-    // Заглушка
-    return (uint64_t)-1;
+    return (uint64_t)vfs_seek((int)fd, (off_t)offset, (int)whence);
 }
 
 // SYS_MMAP (9): addr, length, prot, flags, fd, offset

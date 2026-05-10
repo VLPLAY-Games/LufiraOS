@@ -17,6 +17,7 @@
 #include "system/process/process.h"
 #include "system/timer/pit.h"
 #include "system/syscall/syscall.h"
+#include "fs/vfs/vfs.h"
 #include "log.h"
 
 
@@ -210,6 +211,10 @@ void _start(BootInfo* bi) {
     LOG_PENDING("Initializing syscalls...");
     syscall_init();
     LOG_DONE_OK("Syscalls initialized");
+
+    LOG_PENDING("Initializing VFS...");
+    vfs_init();
+    LOG_DONE_OK("VFS initialized");
 
     LOG_PENDING("Initializing keyboard...");
     keyboard_init();
