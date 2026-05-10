@@ -24,6 +24,9 @@ static uint32_t next_pid = 1;
 // Холостой процесс (когда нет других задач)
 static process_t *idle_process = NULL;
 
+// Счётчик переключений (для отладки)
+static uint64_t switch_count = 0;
+
 // Функция холостого процесса
 static void idle_thread(void) {
     while (1) {
@@ -67,10 +70,6 @@ static uint64_t allocate_kernel_stack(size_t size) {
     // Выделяем физические страницы для стека
     size_t num_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     
-    // Нам нужны последовательные виртуальные адреса
-    // Для простоты выделим физические страницы и будем использовать
-    // их напрямую через identity mapping (первые 2MB уже отображены 1:1)
-    
     // Выделяем первую страницу
     uint64_t first_phys = pmm_alloc_page();
     if (!first_phys) {
@@ -78,12 +77,11 @@ static uint64_t allocate_kernel_stack(size_t size) {
         return 0;
     }
     
-    // Выделяем остальные страницы (они могут быть не последовательными)
+    // Выделяем остальные страницы
     for (size_t i = 1; i < num_pages; i++) {
         uint64_t phys = pmm_alloc_page();
         if (!phys) {
             printf("[PROCESS] Failed to allocate stack page %zu\n", i);
-            // Освобождаем уже выделенные
             for (size_t j = 0; j < i; j++) {
                 pmm_free_page(first_phys + j * PAGE_SIZE);
             }
@@ -94,7 +92,6 @@ static uint64_t allocate_kernel_stack(size_t size) {
         if (phys != first_phys + i * PAGE_SIZE) {
             printf("[PROCESS] Non-contiguous pages, freeing and retrying\n");
             pmm_free_page(phys);
-            // Освобождаем всё и возвращаем ошибку
             for (size_t j = 0; j < i; j++) {
                 pmm_free_page(first_phys + j * PAGE_SIZE);
             }
@@ -102,7 +99,7 @@ static uint64_t allocate_kernel_stack(size_t size) {
         }
     }
     
-    // Возвращаем вершину стека (старший адрес)
+    // Возвращаем вершину стека
     uint64_t stack_top = first_phys + num_pages * PAGE_SIZE;
     return stack_top;
 }
@@ -140,31 +137,43 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     memset(&proc->context, 0, sizeof(process_context_t));
     
     // Настраиваем стек
-    // Стек растёт вниз, RSP должен указывать на вершину стека
-    // Оставляем место для адреса возврата
-    uint64_t rsp = proc->stack_base - 8;
+    uint64_t rsp = proc->stack_base;
     
-    // Записываем адрес возврата (process_exit) на вершину стека
-    uint64_t *stack_ptr = (uint64_t*)rsp;
-    *stack_ptr = (uint64_t)process_exit;
+    // Создаём фрейм стека как будто нас прервали
+    // Стек растёт вниз, поэтому отнимаем
+    rsp -= 8;  // Место для возврата из process_exit
+    uint64_t *stack = (uint64_t*)rsp;
+    *stack = (uint64_t)process_exit;
+    
+    rsp -= 8;  // RIP который заберёт ret в context_switch
+    stack = (uint64_t*)rsp;
+    *stack = (uint64_t)entry;
+    
+    rsp -= 8;  // Дополнительное выравнивание
+    rsp -= 8;  // RFLAGS
+    stack = (uint64_t*)rsp;
+    *stack = 0x202;  // IF flag set
     
     // Настраиваем контекст
     proc->context.rsp = rsp;
     proc->context.rip = (uint64_t)entry;
-    proc->context.rflags = 0x202;  // IF (interrupt flag) + reserved bit
+    proc->context.rflags = 0x202;
     proc->context.cr3 = proc->page_table;
     
-    // Добавляем в список процессов
+    // Добавляем в список процессов (в КОНЕЦ)
     proc->next = NULL;
     
     if (!process_list) {
         process_list = proc;
+        proc->next = proc;  // Зацикливаем на себя
     } else {
         process_t *last = process_list;
-        while (last->next) {
+        // Ищем последний процесс
+        while (last->next && last->next != process_list) {
             last = last->next;
         }
         last->next = proc;
+        proc->next = process_list;  // Зацикливаем список
     }
     
     printf("[PROCESS] Created process '%s' (PID %u, stack: 0x%lx-0x%lx)\n", 
@@ -176,6 +185,8 @@ process_t* process_create(const char *name, void (*entry)(void)) {
 void process_exit(void) {
     printf("\n[PROCESS] Process %u ('%s') exiting\n", 
            current_process->pid, current_process->name);
+    
+    asm volatile("cli");
     
     // Помечаем как завершённый
     current_process->state = PROCESS_TERMINATED;
@@ -189,48 +200,52 @@ void process_exit(void) {
         }
     }
     
-    // Планировщик больше не вернёт этот процесс
+    asm volatile("sti");
+    
+    // Больше никогда не возвращаемся
     schedule();
     
-    // Сюда мы никогда не попадём
     while (1) {
         asm volatile("hlt");
     }
 }
 
 void schedule(void) {
+    // Не переключаемся если прерывания запрещены
+    uint64_t rflags;
+    asm volatile("pushfq; pop %0" : "=r"(rflags));
+    if (!(rflags & 0x200)) {
+        return;  // Interrupts disabled, don't switch
+    }
+    
     if (!current_process) {
         return;
     }
     
-    // Находим следующий процесс для запуска
     process_t *next = current_process->next;
     
-    // Если это конец списка или процесс завершён — начинаем с начала
-    if (!next) {
-        next = process_list;
-    }
-    
     // Пропускаем завершённые процессы
-    while (next && next->state == PROCESS_TERMINATED) {
+    int tries = 0;
+    while (next && next->state == PROCESS_TERMINATED && tries < 100) {
         next = next->next;
-        if (!next) {
-            next = process_list;
-            // Если вернулись к началу и все завершены - остаёмся на idle
-            if (next == current_process) {
-                break;
-            }
-        }
+        tries++;
     }
     
-    // Если нет готовых процессов - используем idle
-    if (!next || next == current_process) {
+    // Если все процессы завершены
+    if (!next || next->state == PROCESS_TERMINATED) {
         if (current_process != idle_process) {
             next = idle_process;
         } else {
             return;
         }
     }
+    
+    // Не переключаемся на тот же процесс
+    if (next == current_process) {
+        return;
+    }
+    
+    switch_count++;
     
     // Переключаем контекст
     switch_to_process(next);
@@ -256,6 +271,6 @@ void switch_to_process(process_t *next) {
     // Устанавливаем новый текущий процесс
     current_process = next;
     
-    // Выполняем переключение контекста
+    // Переключаем контекст
     context_switch(&prev->context, &next->context);
 }

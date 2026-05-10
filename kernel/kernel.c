@@ -15,6 +15,7 @@
 #include "system/cpu/irq.h"
 #include "system/acpi/acpi.h"
 #include "system/process/process.h"
+#include "system/timer/pit.h"
 #include "log.h"
 
 
@@ -58,16 +59,12 @@ static void test_task_1(void) {
     int counter = 0;
     while (1) {
         set_foreground_color(COLOR_LIGHT_GREEN);
-        printf("[Task 1] Counter: %d\n", counter++);
+        printf("[Task 1] Counter: %d, Ticks: %u\n", counter, (uint32_t)pit_get_ticks());
         set_foreground_color(COLOR_WHITE);
         
-        // Добровольно отдаём управление
-        for (volatile int i = 0; i < 5000000; i++) {
-            asm volatile("nop");
-        }
+        counter++;
         
-        // Выходим после 5 итераций для теста
-        if (counter >= 5) {
+        if (counter >= 10) {
             printf("[Task 1] Done, exiting\n");
             process_exit();
         }
@@ -79,19 +76,52 @@ static void test_task_2(void) {
     int counter = 0;
     while (1) {
         set_foreground_color(COLOR_LIGHT_CYAN);
-        printf("[Task 2] Counter: %d\n", counter++);
+        printf("[Task 2] Counter: %d, Ticks: %u\n", counter, (uint32_t)pit_get_ticks());
         set_foreground_color(COLOR_WHITE);
         
-        // Добровольно отдаём управление
-        for (volatile int i = 0; i < 5000000; i++) {
-            asm volatile("nop");
-        }
+        counter++;
         
-        // Выходим после 3 итераций для теста
-        if (counter >= 3) {
+        if (counter >= 10) {
             printf("[Task 2] Done, exiting\n");
             process_exit();
         }
+    }
+}
+
+// Тестовая задача 3 (heartbeat)
+static void test_task_3(void) {
+    uint64_t last_ticks = 0;
+    while (1) {
+        uint64_t current_ticks = pit_get_ticks();
+        if (current_ticks - last_ticks >= 50) {
+            set_foreground_color(COLOR_YELLOW);
+            printf("[Heart] Beat at tick %u\n", (uint32_t)current_ticks);
+            set_foreground_color(COLOR_WHITE);
+            last_ticks = current_ticks;
+        }
+    }
+}
+
+// Главная задача (шелл)
+static void shell_task(void) {
+    // Выводим приглашение
+    printf("\n");
+    set_foreground_color(LOG_COLOR_HEADER);
+    printf("================================================\n");
+    printf(" Type 'help' for available commands\n");
+    printf("================================================\n\n");
+    set_foreground_color(LOG_COLOR_INFO);
+
+    show_prompt();
+    draw_cursor();
+
+    // Основной цикл
+    while (1) {
+        asm volatile("sti");  // Разрешаем прерывания
+        asm volatile("hlt");  // Ждём прерываний
+        asm volatile("cli");  // Запрещаем прерывания на время обновления
+        
+        update_cursor();      // Обновляем мигание курсора
     }
 }
 
@@ -154,6 +184,11 @@ void _start(BootInfo* bi) {
     process_init();
     LOG_DONE_OK("Process manager initialized");
 
+    // ========== ИНИЦИАЛИЗАЦИЯ ТАЙМЕРА ==========
+    LOG_PENDING("Initializing PIT...");
+    pit_init();
+    LOG_DONE_OK("PIT initialized at %d Hz", PIT_FREQUENCY);
+
     // ========== ИНФОРМАЦИЯ О ЗАГРУЗКЕ ==========
     LOG_INFO_LINE("");
     LOG_INFO_LINE("Boot Information");
@@ -197,14 +232,12 @@ void _start(BootInfo* bi) {
     LOG_PENDING("Enabling interrupts...");
     irq_init();
     LOG_DONE_OK("Interrupts enabled");
-    
-    asm volatile("sti");
 
     // ========== ЗАГОЛОВОК ЯДРА ==========
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
     printf("================================================\n");
-    printf("          LufiraOS Kernel v0.2                  \n");
+    printf("     LufiraOS Kernel v0.3 (Preemptive)          \n");
     printf("================================================\n");
     set_foreground_color(LOG_COLOR_INFO);
     
@@ -230,44 +263,34 @@ void _start(BootInfo* bi) {
     
     set_foreground_color(STATUS_READY);
     printf("  Memory manager: INITIALIZED\n");
-    printf("  Interrupts: ENABLED\n");
-    printf("  Heap base: 0x%lx\n", KERNEL_HEAP_START);
+    printf("  Scheduler: PREEMPTIVE (%d Hz)\n", PIT_FREQUENCY);
     printf("  Process manager: INITIALIZED\n");
     set_foreground_color(LOG_COLOR_INFO);
 
     // ========== ЗАПУСК ТЕСТОВЫХ ЗАДАЧ ==========
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
-    printf("STARTING TEST PROCESSES:\n");
+    printf("STARTING PROCESSES:\n");
     set_foreground_color(LOG_COLOR_INFO);
     
-    process_t *task1 = process_create("test_task_1", test_task_1);
-    process_t *task2 = process_create("test_task_2", test_task_2);
+    // Создаём тестовые задачи
+    process_create("test_task_1", test_task_1);
+    process_create("test_task_2", test_task_2);
+    process_create("heartbeat", test_task_3);
     
-    if (task1 && task2) {
-        printf("\nBoth test tasks created successfully!\n");
-        printf("Manual scheduling demo starting...\n\n");
-        
-        // Ручное переключение для теста
-        switch_to_process(task1);
-        
-        // Сюда мы вернёмся когда task1 вызовет process_exit()
-    } else {
-        printf("\nFailed to create test tasks!\n");
-    }
-
-    // ========== ПРИГЛАШЕНИЕ ==========
-    printf("\n");
-    set_foreground_color(LOG_COLOR_HEADER);
-    printf("================================================\n");
-    printf(" Type 'help' for available commands\n");
-    printf("================================================\n\n");
-    set_foreground_color(LOG_COLOR_INFO);
-
-    show_prompt();
-    draw_cursor();
-
-    // Основной цикл
+    // Создаём процесс для шелла (основной поток)
+    process_create("shell", shell_task);
+    
+    printf("\nAll processes created! Preemptive scheduling active.\n");
+    printf("Tasks will automatically switch every %d ms\n\n", 1000/PIT_FREQUENCY);
+    
+    // Запускаем прерывания и уходим в планировщик
+    asm volatile("sti");
+    
+    // Переключаемся на первый процесс (это переведёт основной поток в планировщик)
+    schedule();
+    
+    // Сюда мы никогда не попадём
     while (1) {
         asm volatile("hlt");
     }

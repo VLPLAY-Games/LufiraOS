@@ -6,20 +6,15 @@
 # RDI = указатель на old_context
 # RSI = указатель на new_context
 context_switch:
-    # Сохраняем ВСЕ регистры в old_context (на который указывает RDI)
-    
-    # Сначала сохраняем регистры общего назначения
+    # Сохраняем регистры в old_context
     movq %rax, 0(%rdi)
     movq %rbx, 8(%rdi)
     movq %rcx, 16(%rdi)
     movq %rdx, 24(%rdi)
-    # RSI сохраняем, но помним что в нём пока old_context
     movq %rsi, 32(%rdi)
-    # RDI нужно сохранить ДО того как мы его испортим
     movq %rdi, 40(%rdi)
     movq %rbp, 48(%rdi)
     
-    # Сохраняем R8-R15
     movq %r8,  56(%rdi)
     movq %r9,  64(%rdi)
     movq %r10, 72(%rdi)
@@ -29,16 +24,12 @@ context_switch:
     movq %r14, 104(%rdi)
     movq %r15, 112(%rdi)
     
-    # Сохраняем RSP (указатель стека)
-    # RSP сейчас указывает на адрес возврата (который на стеке)
-    # Нам нужно сохранить RSP, который был ДО вызова context_switch
-    # После выполнения call на стеке лежит адрес возврата
-    # Поэтому оригинальный RSP = текущий RSP + 8
-    movq %rsp, %rax
-    addq $8, %rax
+    # Сохраняем RSP (указатель на вершину стека ДО вызова)
+    # После call на стеке лежит адрес возврата
+    leaq 8(%rsp), %rax
     movq %rax, 120(%rdi)   # rsp
     
-    # Сохраняем RIP (адрес возврата со стека)
+    # Сохраняем RIP (адрес возврата)
     movq (%rsp), %rax
     movq %rax, 128(%rdi)   # rip
     
@@ -52,34 +43,17 @@ context_switch:
     movq %rax, 144(%rdi)   # cr3
     
     # ========================================
-    # Теперь переключаемся на new_context (RSI)
+    # Восстанавливаем контекст из new_context
     # ========================================
     
-    # Восстанавливаем CR3 (если нужно переключить адресное пространство)
+    # Восстанавливаем CR3
+    movq 144(%rsi), %rax
     movq %cr3, %rax
     cmpq %rax, 144(%rsi)
     je 1f
     movq 144(%rsi), %rax
     movq %rax, %cr3
 1:
-    
-    # Восстанавливаем регистры общего назначения
-    # Кроме RSI и RDI - их восстановим позже
-    movq 0(%rsi), %rax
-    movq 8(%rsi), %rbx
-    movq 16(%rsi), %rcx
-    movq 24(%rsi), %rdx
-    movq 48(%rsi), %rbp
-    
-    # Восстанавливаем R8-R15
-    movq 56(%rsi), %r8
-    movq 64(%rsi), %r9
-    movq 72(%rsi), %r10
-    movq 80(%rsi), %r11
-    movq 88(%rsi), %r12
-    movq 96(%rsi), %r13
-    movq 104(%rsi), %r14
-    movq 112(%rsi), %r15
     
     # Восстанавливаем RFLAGS
     movq 136(%rsi), %rax
@@ -89,16 +63,35 @@ context_switch:
     # Восстанавливаем RSP (переключаем стек!)
     movq 120(%rsi), %rsp
     
-    # Теперь мы на новом стеке!
-    # Сохраняем новый RIP во временный регистр
+    # Восстанавливаем RIP в RAX
     movq 128(%rsi), %rax
     
-    # Восстанавливаем RDI и RSI последними
+    # Восстанавливаем остальные регистры
+    movq 0(%rsi), %r8    # временно используем r8 для rax
+    movq 8(%rsi), %rbx
+    movq 16(%rsi), %rcx
+    movq 24(%rsi), %rdx
+    movq 48(%rsi), %rbp
+    
+    movq 56(%rsi), %r9
+    movq 64(%rsi), %r10
+    movq 72(%rsi), %r11
+    movq 80(%rsi), %r12
+    movq 88(%rsi), %r13
+    movq 96(%rsi), %r14
+    movq 104(%rsi), %r15
+    
+    # Восстанавливаем RDI и RSI
     movq 40(%rsi), %rdi
+    
+    # RSI нужно восстановить последним
     movq 32(%rsi), %rsi
     
-    # Прыгаем на сохранённый RIP
-    # RIP уже сохранён в RAX
+    # Восстанавливаем RAX
+    movq %r8, %rax
+    
+    # "Возвращаемся" в новый процесс
+    # RIP уже в RAX
     jmp *%rax
 
 .size context_switch, .-context_switch

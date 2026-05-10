@@ -2,6 +2,7 @@
 #include "drivers/console/console.h"
 #include "drivers/keyboard/keyboard.h"
 #include "drivers/mouse/mouse.h"
+#include "system/timer/pit.h"
 
 // Прямая работа с портами PIC
 static inline uint8_t inb(uint16_t port) {
@@ -30,7 +31,7 @@ void irq_handler(uint64_t vector) {
 
     switch (irq) {
         case 0:                     // системный таймер
-            update_cursor();        // мигание курсора
+            timer_irq_handler();    // Вызываем обработчик таймера (внутри schedule)
             break;
         case 1:                     // клавиатура
             keyboard_irq_handler();
@@ -79,5 +80,5 @@ void irq_disable(uint8_t irq) {
 void irq_init(void) {
     irq_enable(0);   // таймер
     irq_enable(1);   // клавиатура
-    irq_enable(12);   // mouse
+    irq_enable(12);  // mouse
 }

@@ -30,6 +30,7 @@ $(shell mkdir -p $(BUILD_DIR) \
     $(BUILD_DIR)/kernel/system/cpu \
     $(BUILD_DIR)/kernel/system/mm \
 	$(BUILD_DIR)/kernel/system/acpi \
+	$(BUILD_DIR)/kernel/system/timer \
 	$(BUILD_DIR)/kernel/system/process \
     $(BUILD_DIR)/kernel/fs/fat)
 
@@ -74,6 +75,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/system/mm/paging.c \
     $(KERNEL_DIR)/system/mm/heap.c \
     $(KERNEL_DIR)/system/acpi/acpi.c \
+	$(KERNEL_DIR)/system/timer/pit.c \
     $(KERNEL_DIR)/system/process/process.c \
     $(KERNEL_DIR)/fs/fat/fat.c
 
