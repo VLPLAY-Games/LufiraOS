@@ -50,5 +50,5 @@ void timer_irq_handler(void) {
     update_cursor();
     
     // Вызываем планировщик
-    // schedule();
+    schedule();
 }

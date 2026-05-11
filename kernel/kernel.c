@@ -116,6 +116,16 @@ static void test_syscall_task(void) {
 }
 
 static void shell_task(void) {
+    printf("\n");
+    set_foreground_color(LOG_COLOR_HEADER);
+    printf("================================================\n");
+    printf(" Type 'help' for available commands\n");
+    printf("================================================\n\n");
+    set_foreground_color(LOG_COLOR_INFO);
+
+    show_prompt();
+    draw_cursor();
+
     while (1) {
         asm volatile("sti");
         asm volatile("hlt");
@@ -224,16 +234,6 @@ void _start(BootInfo* bi) {
     printf("  Process manager: INITIALIZED\n");
     printf("  FAT filesystem: MOUNTED\n");
     set_foreground_color(LOG_COLOR_INFO);
-
-    printf("\n");
-    set_foreground_color(LOG_COLOR_HEADER);
-    printf("================================================\n");
-    printf(" Type 'help' for available commands\n");
-    printf("================================================\n\n");
-    set_foreground_color(LOG_COLOR_INFO);
-
-    show_prompt();
-    draw_cursor();
 
     process_create("shell", shell_task);
     
