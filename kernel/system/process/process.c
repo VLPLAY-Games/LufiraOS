@@ -133,17 +133,17 @@ void process_init(void) {
 static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys) {
     size_t num_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     
+    irq_disable();                                    // ← counter++
+
     uint64_t old_cr3;
     asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
     asm volatile("mov %0, %%cr3" : : "r"(pml4_phys) : "memory");
     
-    // Выделяем стек в userspace-адресе (0x0000700000000000)
     uint64_t stack_virt = 0x0000700000000000ULL;
     
     for (size_t i = 0; i < num_pages; i++) {
         uint64_t phys = pmm_alloc_page();
         if (!phys) {
-            // Освобождаем выделенные
             for (size_t j = 0; j < i; j++) {
                 uint64_t v = stack_virt + j * PAGE_SIZE;
                 uint64_t p = get_physical_address(v);
@@ -153,6 +153,7 @@ static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys) {
                 }
             }
             asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
+            irq_enable();                             // ← ДОБАВИТЬ
             return 0;
         }
         
@@ -160,12 +161,14 @@ static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys) {
         if (map_page(virt, phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER) != 0) {
             pmm_free_page(phys);
             asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
+            irq_enable();                             // ← ДОБАВИТЬ
             return 0;
         }
     }
     
     asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
     
+    irq_enable();                                     // ← ДОБАВИТЬ
     return stack_virt + num_pages * PAGE_SIZE;
 }
 
@@ -470,12 +473,8 @@ void schedule(void) {
         return;
     }
     
-    // Устанавливаем RSP0 для нового процесса
-    if (next->ring0_stack > 0) {
-        tss_set_rsp0(next->ring0_stack);
-    }
-    
     // Переключаем контекст (прерывания остаются запрещёнными)
+    // Установка RSP0 теперь происходит внутри switch_to_process
     switch_to_process(next);
     
     // Разрешаем прерывания ПОСЛЕ возврата (когда этот процесс снова запланирован)
@@ -492,6 +491,17 @@ void switch_to_process(process_t *next) {
         prev->state = PROCESS_READY;
     }
     next->state = PROCESS_RUNNING;
+    
+    // Устанавливаем RSP0 для нового процесса в TSS
+    // Это критически важно для правильной обработки прерываний
+    if (next->ring0_stack > 0) {
+        tss_set_rsp0(next->ring0_stack);
+    } else {
+        // Fallback на стек ядра (должно быть настроено)
+        // Здесь можно использовать стек idle процесса или запасной стек
+        static uint64_t fallback_stack[1024];
+        tss_set_rsp0((uint64_t)fallback_stack + sizeof(fallback_stack));
+    }
     
     current_process = next;
     
