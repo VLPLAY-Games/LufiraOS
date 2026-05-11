@@ -83,9 +83,10 @@ static void free_ring0_stack(process_t *proc) {
 
 static void idle_thread(void) {
     while (1) {
-        asm volatile("sti");
-        asm volatile("hlt");
-        asm volatile("cli");
+        asm volatile("sti");   // Разрешаем прерывания
+        asm volatile("hlt");   // Засыпаем до следующего прерывания
+        // После пробуждения (по прерыванию) даём планировщику шанс
+        schedule();            // Проверяем, нет ли готовых процессов
     }
 }
 
@@ -318,8 +319,6 @@ void process_exit(void) {
 
 // Очистка завершённых процессов (зомби-процессов)
 void process_reap(void) {
-    // Запрещаем прерывания
-    irq_disable();
     
     if (!process_list) {
         irq_enable();
@@ -403,9 +402,6 @@ void process_reap(void) {
     if (iterations >= MAX_ITERATIONS) {
         printf("[PROCESS] WARNING: Process list may be corrupted\n");
     }
-    
-    // Оставляем прерывания запрещёнными - их включит вызывающая функция
-    // irq_enable() будет вызван в schedule() ПОСЛЕ switch_to_process()
 }
 
 void schedule(void) {
@@ -419,8 +415,8 @@ void schedule(void) {
     // Запрещаем прерывания для атомарной работы
     irq_disable();
     
-    // Очищаем зомби-процессы (прерывания остаются запрещёнными)
-    process_reap();
+    // Очищаем зомби-процессы (прерывания уже запрещены)
+    process_reap();  // Теперь process_reap() НЕ пытается управлять прерываниями
     
     // Если current_process был обнулён в process_exit, восстанавливаем его через список
     if (current_process == NULL && process_list != NULL) {
@@ -482,25 +478,7 @@ void switch_to_process(process_t *next) {
     }
     next->state = PROCESS_RUNNING;
     
-    // Сохраняем текущий CR3 перед переключением
-    uint64_t old_cr3;
-    asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
-    
-    // Если меняется адресное пространство, обновляем CR3
-    if (prev && prev->page_table != next->page_table) {
-        asm volatile("mov %0, %%cr3" : : "r"(next->page_table) : "memory");
-    }
-    
     current_process = next;
     
-    // Выполняем переключение контекста
     context_switch(prev ? &prev->context : NULL, &next->context);
-    
-    // Восстанавливаем CR3 после возврата (если нужно)
-    uint64_t new_cr3;
-    asm volatile("mov %%cr3, %0" : "=r"(new_cr3));
-    if (new_cr3 != old_cr3 && current_process) {
-        // CR3 уже должен быть правильным из-за переключения выше
-        // Эта проверка просто для отладки
-    }
 }
