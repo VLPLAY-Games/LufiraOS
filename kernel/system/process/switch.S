@@ -3,6 +3,12 @@
 .type context_switch, @function
 
 context_switch:
+    # Сохраняем регистры общего назначения
+    movq %rax, 0(%rdi)
+    movq %rbx, 8(%rdi)
+    movq %rcx, 16(%rdi)
+    movq %rdx, 24(%rdi)
+    
     # Сохраняем RIP
     movq (%rsp), %rax
     movq %rax, 128(%rdi)
@@ -33,6 +39,12 @@ context_switch:
     
     # Восстанавливаем RSP
     movq 120(%rsi), %rsp
+    
+    # Восстанавливаем регистры общего назначения
+    movq 0(%rsi), %rax
+    movq 8(%rsi), %rbx
+    movq 16(%rsi), %rcx
+    movq 24(%rsi), %rdx
     
     # Восстанавливаем RIP и прыгаем
     movq 128(%rsi), %rax
