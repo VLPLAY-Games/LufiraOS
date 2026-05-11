@@ -28,8 +28,8 @@ typedef struct process {
     process_context_t context;
     uint64_t stack_base;       // User stack (Ring 3)
     uint64_t stack_size;
-    uint64_t ring0_stack;      // Kernel stack (Ring 0)
-    uint64_t ring0_stack_pages; // Хранилище адресов страниц Ring 0 стека
+    uint64_t ring0_stack;      // Kernel stack (Ring 0) - верхушка стека
+    uint64_t ring0_stack_pages; // Хранилище адресов страниц Ring 0 стека (указатель на массив)
     uint64_t page_table;
     struct process *next;
 } process_t;
