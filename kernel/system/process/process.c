@@ -130,59 +130,70 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
     proc->name[31] = '\0';
     
-    asm volatile("mov %%cr3, %0" : "=r"(proc->page_table));
+    uint64_t kernel_pml4;
+    asm volatile("mov %%cr3, %0" : "=r"(kernel_pml4));
     
-    // Ring 0 стек
-    uint64_t r0_phys = pmm_alloc_page();
-    if (!r0_phys) { kfree(proc); return NULL; }
-    
-    for (int i = 1; i < 4; i++) {
-        uint64_t phys = pmm_alloc_page();
-        if (!phys || phys != r0_phys + i * PAGE_SIZE) {
-            if (phys) pmm_free_page(phys);
-            for (int j = 0; j < i; j++) pmm_free_page(r0_phys + j * PAGE_SIZE);
-            kfree(proc);
-            return NULL;
-        }
+    uint64_t new_pml4 = create_address_space(kernel_pml4);
+    if (!new_pml4) {
+        kfree(proc);
+        return NULL;
     }
-    proc->ring0_stack = r0_phys + 4 * PAGE_SIZE;
+    proc->page_table = new_pml4;
     
-    // Стек процесса
-    proc->stack_size = 16384;
-    uint64_t first_phys = pmm_alloc_page();
-    if (!first_phys) {
-        for (int i = 0; i < 4; i++) pmm_free_page(r0_phys + i * PAGE_SIZE);
+    // Выделяем Ring 0 стек (для обработчиков прерываний и syscall)
+    proc->ring0_stack = allocate_ring0_stack(proc);
+    if (!proc->ring0_stack) {
+        pmm_free_page(new_pml4);
         kfree(proc);
         return NULL;
     }
     
-    for (int i = 1; i < 4; i++) {
-        uint64_t phys = pmm_alloc_page();
-        if (!phys || phys != first_phys + i * PAGE_SIZE) {
-            if (phys) pmm_free_page(phys);
-            for (int j = 0; j < i; j++) pmm_free_page(first_phys + j * PAGE_SIZE);
-            for (int j = 0; j < 4; j++) pmm_free_page(r0_phys + j * PAGE_SIZE);
-            kfree(proc);
-            return NULL;
+    // Выделяем пользовательский стек (в userspace-адресе)
+    proc->stack_size = 16384;
+    proc->stack_base = allocate_user_stack(proc->stack_size, new_pml4);
+    if (!proc->stack_base) {
+        pmm_free_page(new_pml4);
+        // Освободить ring0_stack
+        uint64_t r0_start = proc->ring0_stack - 16384;
+        for (int i = 0; i < 4; i++) {
+            pmm_free_page(r0_start + i * PAGE_SIZE);
         }
-    }
-    proc->stack_base = first_phys + proc->stack_size;
-    
-    // Устанавливаем TSS ТОЛЬКО если ring0_stack валидный
-    if (proc->ring0_stack > 0) {
-        tss_set_rsp0(proc->ring0_stack);
+        kfree(proc);
+        return NULL;
     }
     
+    // Устанавливаем RSP0 в TSS (указатель на Ring 0 стек)
+    tss_set_rsp0(proc->ring0_stack);
+    
+    // Инициализируем контекст
     memset(&proc->context, 0, sizeof(process_context_t));
     
-    uint64_t *stack_ptr = (uint64_t*)(proc->stack_base - 8);
+    // Заполняем стек пользователя
+    uint64_t old_cr3;
+    asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
+    asm volatile("mov %0, %%cr3" : : "r"(new_pml4) : "memory");
+    
+    uint64_t rsp = proc->stack_base;
+    rsp -= 8;
+    uint64_t *stack_ptr = (uint64_t*)rsp;
+    *stack_ptr = (uint64_t)process_exit;
+    
+    rsp -= 8;
+    stack_ptr = (uint64_t*)rsp;
     *stack_ptr = (uint64_t)entry;
     
-    proc->context.rsp = proc->stack_base - 8;
+    rsp -= 8;
+    stack_ptr = (uint64_t*)rsp;
+    *stack_ptr = 0x202;  // RFLAGS с IF=1
+    
+    asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
+    
+    proc->context.rsp = rsp;
     proc->context.rip = (uint64_t)entry;
     proc->context.rflags = 0x202;
-    proc->context.cr3 = proc->page_table;
+    proc->context.cr3 = new_pml4;
     
+    // Добавляем в список
     proc->next = NULL;
     if (!process_list) {
         process_list = proc;
@@ -196,7 +207,8 @@ process_t* process_create(const char *name, void (*entry)(void)) {
         proc->next = process_list;
     }
     
-    printf("[PROCESS] Created '%s' (PID %u, r0=0x%lx)\n", name, proc->pid, proc->ring0_stack);
+    printf("[PROCESS] Created '%s' (PID %u, Ring 3, user stack: 0x%lx)\n", 
+           name, proc->pid, proc->stack_base);
     
     return proc;
 }
