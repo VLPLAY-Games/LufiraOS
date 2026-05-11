@@ -279,7 +279,13 @@ void process_exit(void) {
 
 // Очистка завершённых процессов (зомби-процессов)
 void process_reap(void) {
-    if (!process_list) return;
+    // Запрещаем прерывания для атомарного доступа к списку процессов
+    asm volatile("cli");
+    
+    if (!process_list) {
+        asm volatile("sti");
+        return;
+    }
     
     // Счётчик итераций для защиты от повреждённого списка
     const uint32_t MAX_ITERATIONS = 10000;
@@ -298,11 +304,15 @@ void process_reap(void) {
     // Проверка на превышение лимита итераций
     if (iterations >= MAX_ITERATIONS) {
         printf("[PROCESS] WARNING: Possible corrupted process list detected in process_reap!\n");
-        // Аварийный выход из функции, чтобы не зависнуть
+        asm volatile("sti");
         return;
     }
     
     iterations = 0;  // Сбрасываем счётчик для основного цикла
+    
+    // Сохраняем следующий процесс перед возможным удалением
+    process_t *next_process = NULL;
+    
     do {
         // Защита от бесконечного цикла
         if (iterations++ >= MAX_ITERATIONS) {
@@ -310,11 +320,18 @@ void process_reap(void) {
             break;
         }
         
-        process_t *next = p->next;
-        
-        // Проверка на повреждение списка (указывает сам на себя или неверный указатель)
+        // Проверка на валидность указателя
         if (p == NULL) {
             printf("[PROCESS] ERROR: NULL process pointer in list!\n");
+            break;
+        }
+        
+        // Сохраняем следующий процесс ДО возможного удаления текущего
+        next_process = p->next;
+        
+        // Проверка на зацикливание (указатель на самого себя)
+        if (p == next_process && p != process_list) {
+            printf("[PROCESS] ERROR: Process points to itself, list corrupted!\n");
             break;
         }
         
@@ -329,6 +346,8 @@ void process_reap(void) {
                     process_list = idle_process;
                     if (idle_process) {
                         idle_process->next = idle_process;
+                    } else {
+                        process_list = NULL;
                     }
                 } else {
                     // Находим предыдущий (также с защитой от бесконечного цикла)
@@ -336,11 +355,11 @@ void process_reap(void) {
                     uint32_t find_iter = 0;
                     const uint32_t MAX_FIND = 10000;
                     
-                    while (last->next != process_list && find_iter++ < MAX_FIND) {
+                    while (last->next != process_list && find_iter++ < MAX_FIND && last != NULL) {
                         last = last->next;
                     }
                     
-                    if (find_iter >= MAX_FIND) {
+                    if (find_iter >= MAX_FIND || last == NULL) {
                         printf("[PROCESS] ERROR: Failed to find last element, list corrupted!\n");
                         break;
                     }
@@ -353,34 +372,46 @@ void process_reap(void) {
                 process_t *prev_node = process_list;
                 uint32_t find_iter = 0;
                 const uint32_t MAX_FIND = 10000;
+                int found = 0;
                 
-                while (prev_node->next != p && find_iter++ < MAX_FIND) {
+                // Защита от бесконечного цикла при поиске предыдущего узла
+                while (prev_node != NULL && find_iter++ < MAX_FIND) {
+                    if (prev_node->next == p) {
+                        found = 1;
+                        break;
+                    }
                     prev_node = prev_node->next;
-                    if (prev_node == NULL) {
-                        printf("[PROCESS] ERROR: Previous node became NULL!\n");
+                    
+                    // Защита от зацикливания
+                    if (prev_node == process_list) {
                         break;
                     }
                 }
                 
-                if (find_iter >= MAX_FIND) {
+                if (find_iter >= MAX_FIND || !found || prev_node == NULL) {
                     printf("[PROCESS] ERROR: Failed to find previous node, list corrupted!\n");
                     break;
                 }
                 
-                if (prev_node != NULL) {
-                    prev_node->next = p->next;
-                }
+                prev_node->next = p->next;
             }
             
             // Освобождаем память процесса
             kfree(p);
         }
         
-        p = next;
+        // Переходим к следующему процессу
+        p = next_process;
         
-        // Проверка на зацикливание
+        // Проверка на зацикливание списка
         if (p == start && iterations > 1) {
             break;  // Вернулись к началу списка
+        }
+        
+        // Защита от зацикливания если следующий процесс указывает на себя
+        if (p != NULL && p->next == p && p != idle_process && p->state == PROCESS_TERMINATED) {
+            // Удаляем такой процесс в следующей итерации
+            continue;
         }
         
     } while (p != start && p != NULL && iterations < MAX_ITERATIONS);
@@ -390,13 +421,20 @@ void process_reap(void) {
         printf("[PROCESS] CRITICAL: Process list appears corrupted, re-initializing...\n");
         // Восстанавливаем список до безопасного состояния
         if (idle_process) {
-            process_list = idle_process;
+            // Восстанавливаем idle процесс в безопасное состояние
             idle_process->next = idle_process;
+            idle_process->state = PROCESS_READY;
+            process_list = idle_process;
             current_process = idle_process;
+        } else {
+            process_list = NULL;
+            current_process = NULL;
         }
     }
+    
+    // Разрешаем прерывания после завершения работы со списком
+    asm volatile("sti");
 }
-
 
 void schedule(void) {
     uint64_t rflags;
@@ -409,26 +447,38 @@ void schedule(void) {
         return;
     }
     
-    // Очищаем зомби-процессы
+    // Запрещаем прерывания для атомарной работы со списком процессов
+    asm volatile("cli");
+    
+    // Очищаем зомби-процессы (теперь с защитой)
     process_reap();
     
     process_t *next = current_process->next;
     int tries = 0;
+    const int MAX_TRIES = 100;
     
-    while (next && next->state == PROCESS_TERMINATED && tries < 100) {
+    // Безопасный поиск следующего процесса с защитой от повреждённого списка
+    while (next && (next->state == PROCESS_TERMINATED) && tries < MAX_TRIES) {
         next = next->next;
         tries++;
+        
+        // Защита от зацикливания
+        if (next == current_process) {
+            break;
+        }
     }
     
-    if (!next || next->state == PROCESS_TERMINATED) {
-        if (current_process != idle_process) {
+    if (!next || next->state == PROCESS_TERMINATED || tries >= MAX_TRIES) {
+        if (current_process != idle_process && idle_process != NULL) {
             next = idle_process;
         } else {
+            asm volatile("sti");
             return;
         }
     }
     
     if (next == current_process) {
+        asm volatile("sti");
         return;
     }
     
@@ -437,7 +487,11 @@ void schedule(void) {
         tss_set_rsp0(next->ring0_stack);
     }
     
+    // Переключаем контекст (прерывания уже запрещены)
     switch_to_process(next);
+    
+    // Прерывания будут разрешены после переключения контекста
+    // (контекстный переключатель сам восстановит состояние флагов)
 }
 
 void switch_to_process(process_t *next) {
