@@ -281,18 +281,42 @@ void process_exit(void) {
 void process_reap(void) {
     if (!process_list) return;
     
+    // Счётчик итераций для защиты от повреждённого списка
+    const uint32_t MAX_ITERATIONS = 10000;
+    uint32_t iterations = 0;
+    
     process_t *p = process_list;
     process_t *start = p;
     process_t *prev = NULL;
     
-    // Находим последний процесс в списке
-    while (p->next && p->next != start) {
+    // Находим последний процесс в списке (ограничиваем итерации)
+    while (p->next && p->next != start && iterations++ < MAX_ITERATIONS) {
         prev = p;
         p = p->next;
     }
     
+    // Проверка на превышение лимита итераций
+    if (iterations >= MAX_ITERATIONS) {
+        printf("[PROCESS] WARNING: Possible corrupted process list detected in process_reap!\n");
+        // Аварийный выход из функции, чтобы не зависнуть
+        return;
+    }
+    
+    iterations = 0;  // Сбрасываем счётчик для основного цикла
     do {
+        // Защита от бесконечного цикла
+        if (iterations++ >= MAX_ITERATIONS) {
+            printf("[PROCESS] WARNING: Infinite loop prevented in process_reap main loop!\n");
+            break;
+        }
+        
         process_t *next = p->next;
+        
+        // Проверка на повреждение списка (указывает сам на себя или неверный указатель)
+        if (p == NULL) {
+            printf("[PROCESS] ERROR: NULL process pointer in list!\n");
+            break;
+        }
         
         if (p->state == PROCESS_TERMINATED && p != idle_process) {
             printf("[PROCESS] Reaping zombie PID %u ('%s')\n", p->pid, p->name);
@@ -303,23 +327,49 @@ void process_reap(void) {
                 if (p->next == p) {
                     // Единственный процесс
                     process_list = idle_process;
-                    idle_process->next = idle_process;
+                    if (idle_process) {
+                        idle_process->next = idle_process;
+                    }
                 } else {
-                    // Находим предыдущий
+                    // Находим предыдущий (также с защитой от бесконечного цикла)
                     process_t *last = process_list;
-                    while (last->next != process_list) {
+                    uint32_t find_iter = 0;
+                    const uint32_t MAX_FIND = 10000;
+                    
+                    while (last->next != process_list && find_iter++ < MAX_FIND) {
                         last = last->next;
                     }
+                    
+                    if (find_iter >= MAX_FIND) {
+                        printf("[PROCESS] ERROR: Failed to find last element, list corrupted!\n");
+                        break;
+                    }
+                    
                     process_list = p->next;
                     last->next = process_list;
                 }
             } else {
                 // Удаляем из середины/конца
                 process_t *prev_node = process_list;
-                while (prev_node->next != p) {
+                uint32_t find_iter = 0;
+                const uint32_t MAX_FIND = 10000;
+                
+                while (prev_node->next != p && find_iter++ < MAX_FIND) {
                     prev_node = prev_node->next;
+                    if (prev_node == NULL) {
+                        printf("[PROCESS] ERROR: Previous node became NULL!\n");
+                        break;
+                    }
                 }
-                prev_node->next = p->next;
+                
+                if (find_iter >= MAX_FIND) {
+                    printf("[PROCESS] ERROR: Failed to find previous node, list corrupted!\n");
+                    break;
+                }
+                
+                if (prev_node != NULL) {
+                    prev_node->next = p->next;
+                }
             }
             
             // Освобождаем память процесса
@@ -327,8 +377,26 @@ void process_reap(void) {
         }
         
         p = next;
-    } while (p != start && p);
+        
+        // Проверка на зацикливание
+        if (p == start && iterations > 1) {
+            break;  // Вернулись к началу списка
+        }
+        
+    } while (p != start && p != NULL && iterations < MAX_ITERATIONS);
+    
+    // Дополнительная проверка на случай повреждённого списка
+    if (iterations >= MAX_ITERATIONS) {
+        printf("[PROCESS] CRITICAL: Process list appears corrupted, re-initializing...\n");
+        // Восстанавливаем список до безопасного состояния
+        if (idle_process) {
+            process_list = idle_process;
+            idle_process->next = idle_process;
+            current_process = idle_process;
+        }
+    }
 }
+
 
 void schedule(void) {
     uint64_t rflags;
