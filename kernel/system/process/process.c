@@ -18,24 +18,88 @@ static uint32_t next_pid = 1;
 static process_t *idle_process = NULL;
 uint64_t kernel_cr3 = 0;
 
+// Структура для хранения адресов страниц Ring 0 стека
+typedef struct {
+    uint64_t pages[4];
+    int count;
+} ring0_stack_pages_t;
+
 // Стек Ring 0 для каждого процесса (для syscall'ов и прерываний)
 static uint64_t allocate_ring0_stack(process_t *proc) {
     size_t num_pages = 4;  // 16 KB
-    uint64_t first_phys = pmm_alloc_page();
-    if (!first_phys) return 0;
+    ring0_stack_pages_t *stack_pages = (ring0_stack_pages_t*)kmalloc(sizeof(ring0_stack_pages_t));
+    if (!stack_pages) return 0;
     
-    for (size_t i = 1; i < num_pages; i++) {
+    stack_pages->count = 0;
+    
+    // Выделяем страницы без требования последовательности
+    for (size_t i = 0; i < num_pages; i++) {
         uint64_t phys = pmm_alloc_page();
-        if (!phys || phys != first_phys + i * PAGE_SIZE) {
-            if (phys) pmm_free_page(phys);
-            for (size_t j = 0; j < i; j++) {
-                pmm_free_page(first_phys + j * PAGE_SIZE);
+        if (!phys) {
+            // Освобождаем уже выделенные страницы
+            for (int j = 0; j < stack_pages->count; j++) {
+                pmm_free_page(stack_pages->pages[j]);
             }
+            kfree(stack_pages);
             return 0;
         }
+        stack_pages->pages[stack_pages->count++] = phys;
     }
     
-    return first_phys + num_pages * PAGE_SIZE;
+    // Сохраняем массив страниц в proc (можно добавить поле в process_t,
+    // но для простоты сохраняем перед первым адресом стека)
+    uint64_t *saved_pages = (uint64_t*)kmalloc(sizeof(uint64_t) * num_pages);
+    if (!saved_pages) {
+        for (int i = 0; i < stack_pages->count; i++) {
+            pmm_free_page(stack_pages->pages[i]);
+        }
+        kfree(stack_pages);
+        return 0;
+    }
+    
+    for (size_t i = 0; i < num_pages; i++) {
+        saved_pages[i] = stack_pages->pages[i];
+    }
+    
+    // Возвращаем верхушку стека (последняя страница + PAGE_SIZE)
+    uint64_t stack_top = stack_pages->pages[num_pages - 1] + PAGE_SIZE;
+    
+    // Сохраняем указатель на массив страниц где-то, чтобы потом освободить
+    // Используем поле ring0_stack для хранения base, а массив сохраняем отдельно
+    // Временно сохраняем в глобальную хеш-таблицу (упрощённо - в proc->ring0_stack_base)
+    // Для этого нужно добавить поле в process_t, но чтобы не менять структуру,
+    // сохраняем указатель на массив перед стеком (в неиспользуемой области)
+    *(uint64_t**)(stack_pages->pages[0]) = saved_pages;
+    
+    kfree(stack_pages);
+    return stack_top;
+}
+
+// Функция для освобождения Ring 0 стека
+static void free_ring0_stack(uint64_t ring0_stack_top) {
+    if (!ring0_stack_top) return;
+    
+    size_t num_pages = 4;
+    uint64_t last_page = ring0_stack_top - PAGE_SIZE;
+    
+    // Получаем указатель на массив сохранённых страниц
+    uint64_t first_page = last_page - (num_pages - 1) * PAGE_SIZE;
+    uint64_t **saved_pages_ptr = (uint64_t**)first_page;
+    uint64_t *saved_pages = *saved_pages_ptr;
+    
+    if (saved_pages) {
+        for (size_t i = 0; i < num_pages; i++) {
+            if (saved_pages[i]) {
+                pmm_free_page(saved_pages[i]);
+            }
+        }
+        kfree(saved_pages);
+    } else {
+        // Fallback: если массив не найден, пытаемся освободить последовательные страницы
+        for (size_t i = 0; i < num_pages; i++) {
+            pmm_free_page(first_page + i * PAGE_SIZE);
+        }
+    }
 }
 
 static void idle_thread(void) {
@@ -72,6 +136,7 @@ void process_init(void) {
     idle_process->stack_size = 0;
     idle_process->next = NULL;
     idle_process->ring0_stack = 0;
+    idle_process->ring0_stack_pages = NULL;
     
     const char *name = "idle";
     for (int i = 0; i < 31 && name[i]; i++) idle_process->name[i] = name[i];
@@ -151,17 +216,14 @@ process_t* process_create(const char *name, void (*entry)(void)) {
         kfree(proc);
         return NULL;
     }
+    proc->ring0_stack_pages = NULL; // Будет заполнено в allocate_ring0_stack
     
     // Выделяем пользовательский стек (в userspace-адресе)
     proc->stack_size = 16384;
     proc->stack_base = allocate_user_stack(proc->stack_size, new_pml4);
     if (!proc->stack_base) {
         pmm_free_page(new_pml4);
-        // Освободить ring0_stack
-        uint64_t r0_start = proc->ring0_stack - 16384;
-        for (int i = 0; i < 4; i++) {
-            pmm_free_page(r0_start + i * PAGE_SIZE);
-        }
+        free_ring0_stack(proc->ring0_stack);
         kfree(proc);
         return NULL;
     }
@@ -242,27 +304,13 @@ void process_exit(void) {
     
     // Освобождаем Ring 0 стек
     if (current_process->ring0_stack > 0) {
-        size_t ring0_pages = 4;  // 16 KB
-        uint64_t r0_start = current_process->ring0_stack - ring0_pages * PAGE_SIZE;
-        
-        printf("[PROCESS] Freeing ring0 stack: 0x%lx - 0x%lx\n",
-               r0_start, current_process->ring0_stack);
-        
-        for (size_t i = 0; i < ring0_pages; i++) {
-            pmm_free_page(r0_start + i * PAGE_SIZE);
-        }
+        free_ring0_stack(current_process->ring0_stack);
     }
     
     // Освобождаем PML4 (только если это не ядерный)
     if (current_process->page_table != kernel_cr3 && current_process->page_table != 0) {
         printf("[PROCESS] Freeing PML4: 0x%lx\n", current_process->page_table);
         pmm_free_page(current_process->page_table);
-    }
-    
-    // Освобождаем структуру процесса (если она не idle)
-    if (current_process != idle_process) {
-        // Не освобождаем сразу, планировщик ещё может на него ссылаться
-        // Помечаем как "зомби" — будет удалён позже
     }
     
     // Разрешаем прерывания
