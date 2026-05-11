@@ -277,13 +277,31 @@ void process_exit(void) {
     }
 }
 
+// Глобальный счётчик для вложенных запретов прерываний
+static volatile uint32_t irq_disable_counter = 0;
+
+// Вспомогательные функции для управления прерываниями
+static inline void irq_disable(void) {
+    asm volatile("cli");
+    irq_disable_counter++;
+}
+
+static inline void irq_enable(void) {
+    if (irq_disable_counter > 0) {
+        irq_disable_counter--;
+        if (irq_disable_counter == 0) {
+            asm volatile("sti");
+        }
+    }
+}
+
 // Очистка завершённых процессов (зомби-процессов)
 void process_reap(void) {
-    // Запрещаем прерывания для атомарного доступа к списку процессов
-    asm volatile("cli");
+    // Запрещаем прерывания с учётом вложенности
+    irq_disable();
     
     if (!process_list) {
-        asm volatile("sti");
+        irq_enable();
         return;
     }
     
@@ -304,7 +322,7 @@ void process_reap(void) {
     // Проверка на превышение лимита итераций
     if (iterations >= MAX_ITERATIONS) {
         printf("[PROCESS] WARNING: Possible corrupted process list detected in process_reap!\n");
-        asm volatile("sti");
+        irq_enable();
         return;
     }
     
@@ -432,8 +450,8 @@ void process_reap(void) {
         }
     }
     
-    // Разрешаем прерывания после завершения работы со списком
-    asm volatile("sti");
+    // НЕ разрешаем прерывания здесь - это сделает вызывающая функция
+    // irq_enable() будет вызван в schedule() после switch_to_process()
 }
 
 void schedule(void) {
@@ -448,9 +466,9 @@ void schedule(void) {
     }
     
     // Запрещаем прерывания для атомарной работы со списком процессов
-    asm volatile("cli");
+    irq_disable();
     
-    // Очищаем зомби-процессы (теперь с защитой)
+    // Очищаем зомби-процессы (прерывания остаются запрещёнными)
     process_reap();
     
     process_t *next = current_process->next;
@@ -472,13 +490,13 @@ void schedule(void) {
         if (current_process != idle_process && idle_process != NULL) {
             next = idle_process;
         } else {
-            asm volatile("sti");
+            irq_enable();  // Разрешаем прерывания перед выходом
             return;
         }
     }
     
     if (next == current_process) {
-        asm volatile("sti");
+        irq_enable();  // Разрешаем прерывания перед выходом
         return;
     }
     
@@ -487,11 +505,17 @@ void schedule(void) {
         tss_set_rsp0(next->ring0_stack);
     }
     
-    // Переключаем контекст (прерывания уже запрещены)
+    // Переключаем контекст (прерывания остаются запрещёнными)
+    // switch_to_process вызовет context_switch, который восстановит rflags
+    // из контекста нового процесса, включая состояние прерываний
     switch_to_process(next);
     
-    // Прерывания будут разрешены после переключения контекста
-    // (контекстный переключатель сам восстановит состояние флагов)
+    // ВАЖНО: после возвращения из switch_to_process (когда этот процесс
+    // будет снова запланирован) мы должны разрешить прерывания, если
+    // они были запрещены
+    
+    // Симметрично разрешаем прерывания
+    irq_enable();
 }
 
 void switch_to_process(process_t *next) {
