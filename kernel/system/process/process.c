@@ -272,7 +272,7 @@ void process_exit(void) {
     printf("\n[PROCESS] Process %u ('%s') exiting\n", 
            exiting_process->pid, exiting_process->name);
     
-    // Запрещаем прерывания (используем правильную функцию)
+    // Запрещаем прерывания
     irq_disable();
     
     // Помечаем как завершённый
@@ -315,10 +315,10 @@ void process_exit(void) {
         exiting_process->page_table = 0;
     }
     
-    // Разрешаем прерывания (используем правильную функцию)
-    irq_enable();
+    // НЕ разрешаем прерывания здесь - schedule() сделает это сам
+    // Просто передаём управление планировщику с запрещёнными прерываниями
     
-    // Передаём управление планировщику
+    // Передаём управление планировщику (прерывания остаются запрещёнными)
     schedule();
     
     // Сюда никогда не должны попасть
@@ -360,35 +360,30 @@ void process_reap(void) {
             if (prev == NULL) {
                 // Удаляем голову списка
                 if (p->next == p) {
-                    // Единственный процесс в списке
+                    // Случай 1: Единственный процесс в списке
                     if (idle_process) {
                         process_list = idle_process;
                         idle_process->next = idle_process;
                     } else {
                         process_list = NULL;
                     }
-                } else if (p->next == process_list) {
-                    // Голова, но есть другие процессы
-                    process_list = p->next;
-                    // Находим последний элемент
-                    process_t *last = process_list;
+                } else {
+                    // Случай 2: Голова, но есть другие процессы
+                    // Находим последний элемент (который указывает на голову)
+                    process_t *last = p;
                     uint32_t find_iter = 0;
                     while (last->next != p && find_iter++ < MAX_ITERATIONS) {
                         last = last->next;
                     }
-                    if (last) {
-                        last->next = process_list;
-                    }
-                } else {
-                    // Находим предыдущий
-                    process_t *last = process_list;
-                    uint32_t find_iter = 0;
-                    while (last->next != process_list && find_iter++ < MAX_ITERATIONS) {
-                        last = last->next;
-                    }
-                    if (last) {
+                    
+                    if (last && last->next == p) {
+                        // Переключаем голову на следующий элемент
                         process_list = p->next;
+                        // Замыкаем последний элемент на новую голову
                         last->next = process_list;
+                    } else {
+                        printf("[PROCESS] ERROR: Corrupted list, cannot find last element\n");
+                        break;
                     }
                 }
                 
