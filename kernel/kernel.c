@@ -207,10 +207,10 @@ void _start(BootInfo* bi) {
     mouse_init();
     LOG_DONE_OK("Mouse %s", mouse_is_initialized() ? "ready" : "not found");
     
+    asm volatile("sti");
     irq_enable(0);  // таймер
     irq_enable(1);  // клавиатура
     irq_enable(12); // мышь
-    asm volatile("sti");
 
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
