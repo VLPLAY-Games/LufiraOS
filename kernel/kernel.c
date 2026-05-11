@@ -115,42 +115,11 @@ static void test_syscall_task(void) {
     while(1) __asm__("hlt");
 }
 
-static void test_task_1(void) {
-    int counter = 0;
-    while (1) {
-        set_foreground_color(COLOR_LIGHT_GREEN);
-        printf("[Task 1] Counter: %d, Ticks: %u\n", counter, (uint32_t)pit_get_ticks());
-        set_foreground_color(COLOR_WHITE);
-        counter++;
-        if (counter >= 10) process_exit();
-    }
-}
-
-static void test_task_2(void) {
-    int counter = 0;
-    while (1) {
-        set_foreground_color(COLOR_LIGHT_CYAN);
-        printf("[Task 2] Counter: %d, Ticks: %u\n", counter, (uint32_t)pit_get_ticks());
-        set_foreground_color(COLOR_WHITE);
-        counter++;
-        if (counter >= 10) process_exit();
-    }
-}
-
 static void shell_task(void) {
-    printf("\n");
-    set_foreground_color(LOG_COLOR_HEADER);
-    printf("================================================\n");
-    printf(" Type 'help' for available commands\n");
-    printf("================================================\n\n");
-    set_foreground_color(LOG_COLOR_INFO);
-
-    show_prompt();
-    draw_cursor();
-
     while (1) {
         asm volatile("sti");
         asm volatile("hlt");
+        schedule();
     }
 }
 
@@ -188,6 +157,8 @@ void _start(BootInfo* bi) {
         } else {
             LOG_DONE_FAIL("FAT mount failed");
         }
+    } else {
+        LOG_FAIL("No FAT image provided");
     }
 
     if (bi->RsdpAddress) {
@@ -197,6 +168,8 @@ void _start(BootInfo* bi) {
         } else {
             LOG_DONE_WARN("ACPI initialization failed");
         }
+    } else {
+        LOG_WARN("No RSDP found, ACPI disabled");
     }
 
     LOG_PENDING("Initializing process manager...");
@@ -207,7 +180,6 @@ void _start(BootInfo* bi) {
     pit_init();
     LOG_DONE_OK("PIT initialized at %d Hz", PIT_FREQUENCY);
 
-    // Инициализируем системные вызовы
     LOG_PENDING("Initializing syscalls...");
     syscall_init();
     LOG_DONE_OK("Syscalls initialized");
@@ -224,16 +196,15 @@ void _start(BootInfo* bi) {
     mouse_init();
     LOG_DONE_OK("Mouse %s", mouse_is_initialized() ? "ready" : "not found");
     
-    LOG_PENDING("Enabling interrupts...");
-    irq_init();
-    LOG_DONE_OK("Interrupts enabled");
-    
+    irq_enable(0);  // таймер
+    irq_enable(1);  // клавиатура
+    irq_enable(12); // мышь
     asm volatile("sti");
 
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
     printf("================================================\n");
-    printf("     LufiraOS Kernel v0.5 (with Syscalls!)      \n");
+    printf("     LufiraOS Kernel v0.6 (Stable)              \n");
     printf("================================================\n");
     set_foreground_color(LOG_COLOR_INFO);
     
@@ -249,22 +220,26 @@ void _start(BootInfo* bi) {
     
     set_foreground_color(STATUS_READY);
     printf("  Memory manager: INITIALIZED\n");
-    printf("  Scheduler: PREEMPTIVE (%d Hz)\n", PIT_FREQUENCY);
+    printf("  Scheduler: COOPERATIVE\n");
     printf("  Process manager: INITIALIZED\n");
     printf("  FAT filesystem: MOUNTED\n");
     set_foreground_color(LOG_COLOR_INFO);
 
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
-    printf("STARTING SHELL:\n");
+    printf("================================================\n");
+    printf(" Type 'help' for available commands\n");
+    printf("================================================\n\n");
     set_foreground_color(LOG_COLOR_INFO);
-    
-    // Только shell процесс — всё остальное по требованию
+
+    show_prompt();
+    draw_cursor();
+
     process_create("shell", shell_task);
     
-    printf("\nSystem ready!\n");
-    
-    schedule();
-    
-    while (1) __asm__("hlt");
+    while (1) {
+        asm volatile("sti");
+        asm volatile("hlt");
+        schedule();
+    }
 }
