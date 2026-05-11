@@ -36,7 +36,7 @@ static inline void irq_enable(void) {
     }
 }
 
-// Выделение Ring 0 стека (исправленная версия)
+// Выделение Ring 0 стека
 static uint64_t allocate_ring0_stack(process_t *proc) {
     size_t num_pages = 4;  // 16 KB
     uint64_t *pages = (uint64_t*)kmalloc(sizeof(uint64_t) * num_pages);
@@ -63,7 +63,7 @@ static uint64_t allocate_ring0_stack(process_t *proc) {
     return pages[num_pages - 1] + PAGE_SIZE;
 }
 
-// Освобождение Ring 0 стека (исправленная версия)
+// Освобождение Ring 0 стека
 static void free_ring0_stack(process_t *proc) {
     if (!proc->ring0_stack_pages) return;
     
@@ -85,7 +85,6 @@ static void idle_thread(void) {
     while (1) {
         asm volatile("sti");   // Разрешаем прерывания
         asm volatile("hlt");   // Засыпаем до следующего прерывания
-        // После пробуждения (по прерыванию) даём планировщику шанс
         schedule();            // Проверяем, нет ли готовых процессов
     }
 }
@@ -125,6 +124,7 @@ void process_init(void) {
     asm volatile("mov %%cr3, %0" : "=r"(idle_process->page_table));
     
     process_list = idle_process;
+    idle_process->next = idle_process;  // Замыкаем список на себя
     current_process = idle_process;
     
     printf("[PROCESS] Process manager initialized\n");
@@ -170,8 +170,14 @@ static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys) {
 }
 
 process_t* process_create(const char *name, void (*entry)(void)) {
+    // Запрещаем прерывания на время создания процесса
+    irq_disable();
+    
     process_t *proc = (process_t*)kmalloc(sizeof(process_t));
-    if (!proc) return NULL;
+    if (!proc) {
+        irq_enable();
+        return NULL;
+    }
     
     proc->pid = next_pid++;
     proc->state = PROCESS_READY;
@@ -185,6 +191,7 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     uint64_t new_pml4 = create_address_space(kernel_pml4);
     if (!new_pml4) {
         kfree(proc);
+        irq_enable();
         return NULL;
     }
     proc->page_table = new_pml4;
@@ -194,6 +201,7 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     if (!proc->ring0_stack) {
         pmm_free_page(new_pml4);
         kfree(proc);
+        irq_enable();
         return NULL;
     }
     
@@ -204,13 +212,14 @@ process_t* process_create(const char *name, void (*entry)(void)) {
         pmm_free_page(new_pml4);
         free_ring0_stack(proc);
         kfree(proc);
+        irq_enable();
         return NULL;
     }
     
     // Инициализируем контекст
     memset(&proc->context, 0, sizeof(process_context_t));
     
-    // Заполняем стек пользователя
+    // Заполняем стек пользователя (с запрещёнными прерываниями)
     uint64_t old_cr3;
     asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
     asm volatile("mov %0, %%cr3" : : "r"(new_pml4) : "memory");
@@ -235,7 +244,7 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     proc->context.rflags = 0x202;
     proc->context.cr3 = new_pml4;
     
-    // Добавляем в список
+    // Добавляем в список (с уже запрещёнными прерываниями)
     proc->next = NULL;
     if (!process_list) {
         process_list = proc;
@@ -252,6 +261,7 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     printf("[PROCESS] Created '%s' (PID %u, Ring 3, user stack: 0x%lx)\n", 
            name, proc->pid, proc->stack_base);
     
+    irq_enable();
     return proc;
 }
 
@@ -262,8 +272,8 @@ void process_exit(void) {
     printf("\n[PROCESS] Process %u ('%s') exiting\n", 
            exiting_process->pid, exiting_process->name);
     
-    // Запрещаем прерывания
-    asm volatile("cli");
+    // Запрещаем прерывания (используем правильную функцию)
+    irq_disable();
     
     // Помечаем как завершённый
     exiting_process->state = PROCESS_TERMINATED;
@@ -305,8 +315,8 @@ void process_exit(void) {
         exiting_process->page_table = 0;
     }
     
-    // Разрешаем прерывания
-    asm volatile("sti");
+    // Разрешаем прерывания (используем правильную функцию)
+    irq_enable();
     
     // Передаём управление планировщику
     schedule();
@@ -319,9 +329,7 @@ void process_exit(void) {
 
 // Очистка завершённых процессов (зомби-процессов)
 void process_reap(void) {
-    
     if (!process_list) {
-        irq_enable();
         return;
     }
     
@@ -333,7 +341,7 @@ void process_reap(void) {
     process_t *start = p;
     process_t *prev = NULL;
     
-    // БЕЗОПАСНОЕ удаление с обходом повреждённых указателей
+    // Безопасное удаление с обходом повреждённых указателей
     while (p && iterations++ < MAX_ITERATIONS) {
         // Сохраняем следующий до удаления
         process_t *next_process = p->next;
@@ -352,12 +360,24 @@ void process_reap(void) {
             if (prev == NULL) {
                 // Удаляем голову списка
                 if (p->next == p) {
-                    // Единственный процесс
-                    process_list = idle_process;
+                    // Единственный процесс в списке
                     if (idle_process) {
+                        process_list = idle_process;
                         idle_process->next = idle_process;
                     } else {
                         process_list = NULL;
+                    }
+                } else if (p->next == process_list) {
+                    // Голова, но есть другие процессы
+                    process_list = p->next;
+                    // Находим последний элемент
+                    process_t *last = process_list;
+                    uint32_t find_iter = 0;
+                    while (last->next != p && find_iter++ < MAX_ITERATIONS) {
+                        last = last->next;
+                    }
+                    if (last) {
+                        last->next = process_list;
                     }
                 } else {
                     // Находим предыдущий
@@ -416,7 +436,7 @@ void schedule(void) {
     irq_disable();
     
     // Очищаем зомби-процессы (прерывания уже запрещены)
-    process_reap();  // Теперь process_reap() НЕ пытается управлять прерываниями
+    process_reap();
     
     // Если current_process был обнулён в process_exit, восстанавливаем его через список
     if (current_process == NULL && process_list != NULL) {
@@ -480,5 +500,9 @@ void switch_to_process(process_t *next) {
     
     current_process = next;
     
-    context_switch(prev ? &prev->context : NULL, &next->context);
+    // ВАЖНО: Всегда передаём валидный контекст
+    // Если prev == NULL (первое переключение), используем контекст idle процесса
+    process_context_t *prev_context = prev ? &prev->context : &idle_process->context;
+    
+    context_switch(prev_context, &next->context);
 }
