@@ -129,7 +129,8 @@ static void shell_task(void) {
     while (1) {
         asm volatile("sti");
         asm volatile("hlt");
-        schedule();
+        asm volatile("cli");     // Запретить прерывания перед schedule
+        schedule();              // Передать управление другим процессам
     }
 }
 
@@ -240,6 +241,7 @@ void _start(BootInfo* bi) {
     while (1) {
         asm volatile("sti");
         asm volatile("hlt");
+        asm volatile("cli");
         schedule();
     }
 }

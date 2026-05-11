@@ -39,7 +39,11 @@ static uint64_t allocate_ring0_stack(process_t *proc) {
 }
 
 static void idle_thread(void) {
-    while (1) __asm__("hlt");
+    while (1) {
+        asm volatile("sti");
+        asm volatile("hlt");
+        asm volatile("cli");
+    }
 }
 
 static uint64_t create_address_space(uint64_t kernel_pml4_phys) {
