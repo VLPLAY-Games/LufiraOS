@@ -61,6 +61,11 @@ typedef struct __attribute__((packed)) {
     uint64_t align;          // Alignment
 } elf64_program_header_t;
 
+// Структура процесса (forward declaration)
+typedef struct process process_t;
+
 // Функции
-void* elf_load(const void *elf_data, uint64_t elf_size, const char *name);
 int elf_validate(const elf64_header_t *header);
+void* elf_load_to_process(const void *elf_data, uint64_t elf_size, 
+                          process_t *proc, const char *name);
+int elf_exec(const void *elf_data, uint64_t elf_size, const char *name);
