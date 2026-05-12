@@ -105,6 +105,7 @@ static void idle_thread(void) {
     }
 }
 
+// Создаёт новое адресное пространство на основе КОРНЕВОГО ядерного PML4
 static uint64_t create_address_space(uint64_t kernel_pml4_phys) {
     uint64_t new_pml4_phys = pmm_alloc_page();
     if (!new_pml4_phys) return 0;
@@ -112,7 +113,9 @@ static uint64_t create_address_space(uint64_t kernel_pml4_phys) {
     uint64_t *new_pml4 = (uint64_t*)new_pml4_phys;
     uint64_t *kernel_pml4 = (uint64_t*)kernel_pml4_phys;
     
-    // Копируем все записи из ядерного PML4
+    // Копируем ВСЕ записи из ЯДЕРНОГО PML4.
+    // В нём нет пользовательских маппингов, поэтому наследование
+    // чужих user-space страниц невозможно.
     for (int i = 0; i < 512; i++) {
         new_pml4[i] = kernel_pml4[i];
     }
@@ -121,7 +124,9 @@ static uint64_t create_address_space(uint64_t kernel_pml4_phys) {
 }
 
 void process_init(void) {
+    // Сохраняем корневой ядерный PML4 на раннем этапе (до загрузки процессов)
     asm volatile("mov %%cr3, %0" : "=r"(kernel_cr3));
+    
     idle_process = (process_t*)kmalloc(sizeof(process_t));
     if (!idle_process) return;
     
@@ -137,6 +142,7 @@ void process_init(void) {
     for (int i = 0; i < 31 && name[i]; i++) idle_process->name[i] = name[i];
     idle_process->name[31] = '\0';
     
+    // idle использует текущее адресное пространство (ядерное)
     asm volatile("mov %%cr3, %0" : "=r"(idle_process->page_table));
     
     process_list = idle_process;
@@ -204,10 +210,8 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
     proc->name[31] = '\0';
     
-    uint64_t kernel_pml4;
-    asm volatile("mov %%cr3, %0" : "=r"(kernel_pml4));
-    
-    uint64_t new_pml4 = create_address_space(kernel_pml4);
+    // Используем КОРНЕВОЙ ядерный PML4 для создания нового адресного пространства
+    uint64_t new_pml4 = create_address_space(kernel_cr3);
     if (!new_pml4) {
         kfree(proc);
         irq_enable();
@@ -215,9 +219,10 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     }
     proc->page_table = new_pml4;
     
-    // ВАЖНО: синхронизируем kernel mappings с текущим ядерным PML4
-    // Это необходимо, так как ядерная куча могла расшириться
-    sync_kernel_mappings(proc->page_table, kernel_pml4);
+    // Синхронизируем актуальные ядерные маппинги (куча могла расшириться)
+    uint64_t current_kernel_pml4;
+    asm volatile("mov %%cr3, %0" : "=r"(current_kernel_pml4));
+    sync_kernel_mappings(proc->page_table, current_kernel_pml4);
     
     // Выделяем Ring 0 стек
     proc->ring0_stack = allocate_ring0_stack(proc);
@@ -325,13 +330,11 @@ void process_exit(void) {
         free_ring0_stack(exiting_process);
     }
     
-    // Освобождаем PML4
-    // ВАЖНО: Нужно освободить все таблицы страниц, а не только PML4
+    // Освобождаем PML4 и все таблицы user-space
     if (exiting_process->page_table != kernel_cr3 && exiting_process->page_table != 0) {
         uint64_t pml4_phys = exiting_process->page_table;
         uint64_t *pml4 = (uint64_t*)pml4_phys;
         
-        // Рекурсивно освобождаем все таблицы (кроме kernel space 256-511)
         for (int i = 0; i < 256; i++) {  // Только user space
             if (pml4[i] & PAGE_PRESENT) {
                 uint64_t pdpt_phys = pml4[i] & 0x000FFFFFFFFFF000ULL;
