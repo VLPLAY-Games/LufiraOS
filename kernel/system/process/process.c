@@ -42,7 +42,7 @@ static uint64_t allocate_ring0_stack(process_t *proc) {
     uint64_t *pages = (uint64_t*)kmalloc(sizeof(uint64_t) * num_pages);
     if (!pages) return 0;
     
-    // ✅ Уникальный базовый адрес для каждого процесса
+    // Уникальный базовый адрес для каждого процесса
     uint64_t stack_base = KERNEL_HEAP_START + (proc->pid * num_pages * PAGE_SIZE);
     
     for (size_t i = 0; i < num_pages; i++) {
@@ -59,7 +59,7 @@ static uint64_t allocate_ring0_stack(process_t *proc) {
         }
         pages[i] = phys;
         
-        uint64_t virt = stack_base + i * PAGE_SIZE;  // ✅ Уникальный!
+        uint64_t virt = stack_base + i * PAGE_SIZE;
         if (map_page(virt, phys, PAGE_PRESENT | PAGE_WRITE) != 0) {
             pmm_free_page(phys);
             for (size_t j = 0; j < i; j++) {

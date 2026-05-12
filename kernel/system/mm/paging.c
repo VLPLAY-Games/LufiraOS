@@ -1,3 +1,4 @@
+// paging.c
 #include "paging.h"
 #include "pmm.h"
 #include "bootinfo.h"
@@ -113,7 +114,28 @@ int map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
     pt_entry_t *pd_table = get_or_create_table(pdpt_table, PDPT_INDEX(virt), 1);
     if (!pd_table) return -1;
 
-    pt_entry_t *pt_table = get_or_create_table(pd_table, PD_INDEX(virt), 1);
+    uint64_t pd_idx = PD_INDEX(virt);
+    
+    // If we hit a huge page, split it into 4KB pages
+    if ((pd_table[pd_idx] & PAGE_PRESENT) && (pd_table[pd_idx] & PAGE_HUGE)) {
+        uint64_t huge_entry = pd_table[pd_idx];
+        uint64_t phys_base = huge_entry & 0x000FFFFFFFFFF000ULL;
+        uint64_t pde_flags = (huge_entry & 0xFFF) & ~PAGE_HUGE;   // keep all flags except huge
+
+        uint64_t pt_phys = pmm_alloc_page();
+        if (!pt_phys) return -1;
+
+        pt_entry_t *pt = (pt_entry_t*)pt_phys;
+        for (int i = 0; i < 512; i++) {
+            pt[i] = paddr_to_entry(phys_base + i * PAGE_SIZE, pde_flags);
+        }
+
+        pd_table[pd_idx] = paddr_to_entry(pt_phys, pde_flags);
+        // flush the huge TLB entry
+        invlpg(virt & ~0x1FFFFFULL);
+    }
+
+    pt_entry_t *pt_table = get_or_create_table(pd_table, pd_idx, 1);
     if (!pt_table) return -1;
 
     pt_table[PT_INDEX(virt)] = (phys & 0x000FFFFFFFFFF000ULL) | (flags & 0xFFF) | PAGE_PRESENT;
@@ -132,7 +154,26 @@ int map_page_in_pml4(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t 
     pt_entry_t *pd_table = get_or_create_table(pdpt_table, PDPT_INDEX(virt), 1);
     if (!pd_table) return -1;
 
-    pt_entry_t *pt_table = get_or_create_table(pd_table, PD_INDEX(virt), 1);
+    uint64_t pd_idx = PD_INDEX(virt);
+
+    if ((pd_table[pd_idx] & PAGE_PRESENT) && (pd_table[pd_idx] & PAGE_HUGE)) {
+        uint64_t huge_entry = pd_table[pd_idx];
+        uint64_t phys_base = huge_entry & 0x000FFFFFFFFFF000ULL;
+        uint64_t pde_flags = (huge_entry & 0xFFF) & ~PAGE_HUGE;
+
+        uint64_t pt_phys = pmm_alloc_page();
+        if (!pt_phys) return -1;
+
+        pt_entry_t *pt = (pt_entry_t*)pt_phys;
+        for (int i = 0; i < 512; i++) {
+            pt[i] = paddr_to_entry(phys_base + i * PAGE_SIZE, pde_flags);
+        }
+
+        pd_table[pd_idx] = paddr_to_entry(pt_phys, pde_flags);
+        invlpg(virt & ~0x1FFFFFULL);
+    }
+
+    pt_entry_t *pt_table = get_or_create_table(pd_table, pd_idx, 1);
     if (!pt_table) return -1;
 
     pt_table[PT_INDEX(virt)] = (phys & 0x000FFFFFFFFFF000ULL) | (flags & 0xFFF) | PAGE_PRESENT;
@@ -153,6 +194,11 @@ void unmap_page(uint64_t virt) {
     pt_entry_t *pd_table = (pt_entry_t*)(*pdpte & 0x000FFFFFFFFFF000ULL);
     pt_entry_t *pde = &pd_table[PD_INDEX(virt)];
     if (!(*pde & PAGE_PRESENT)) return;
+    
+    // A huge page cannot be partially unmapped; bail out safely
+    if (*pde & PAGE_HUGE) {
+        return;
+    }
     
     pt_entry_t *pt_table = (pt_entry_t*)(*pde & 0x000FFFFFFFFFF000ULL);
     pt_entry_t *pte = &pt_table[PT_INDEX(virt)];
