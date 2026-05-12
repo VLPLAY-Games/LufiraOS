@@ -23,7 +23,7 @@ typedef struct {
     uint32_t volume_id;
     char     volume_label[11];
     char     fs_type[8];
-    // FAT32
+    /* FAT32 */
     uint32_t sectors_per_fat_32;
     uint16_t ext_flags;
     uint16_t fs_version;
@@ -59,9 +59,11 @@ typedef struct {
     uint32_t    total_sectors;
     uint8_t     fat_type;
     uint32_t    root_cluster;
-    /* new fields for dirty tracking */
-    uint8_t*    dirty_map;          // битовая карта изменённых секторов
-    uint32_t    dirty_map_size;     // размер карты в байтах
+    uint32_t    sectors_per_fat;   /* реальное количество секторов на FAT */
+    uint32_t    max_cluster;       /* максимальный допустимый номер кластера + 1 */
+    /* dirty‑карта */
+    uint8_t*    dirty_map;
+    uint32_t    dirty_map_size;
 } fat_fs_t;
 
 typedef struct {
@@ -75,6 +77,7 @@ typedef struct {
     int         is_root;
 } fat_dir_t;
 
+/* === Публичный API === */
 int fat_find_entry(fat_fs_t *fs, uint32_t dir_cluster,
                    const char *filename, fat_dir_entry_t *out_entry);
 
@@ -100,3 +103,8 @@ int fat_write_file(fat_fs_t *fs, const char *filename, const void *buffer, uint3
 int fat_append_file(fat_fs_t *fs, const char *filename, const void *buffer, uint32_t size);
 int fat_truncate_file(fat_fs_t *fs, const char *filename, uint32_t new_size);
 int fat_rename_file(fat_fs_t *fs, const char *old_name, const char *new_name);
+
+/* === Внутренние функции, экспортированные для VFS === */
+uint32_t get_fat_entry(fat_fs_t *fs, uint32_t cluster);
+int is_eoc(fat_fs_t *fs, uint32_t cluster);
+void to_short_name(const char *filename, char out[11]);
