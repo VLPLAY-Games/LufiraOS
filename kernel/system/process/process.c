@@ -38,15 +38,20 @@ static inline void irq_enable(void) {
 
 // Выделение Ring 0 стека (не требует переключения CR3, так как ядерная память видна везде)
 static uint64_t allocate_ring0_stack(process_t *proc) {
-    size_t num_pages = 4;  // 16 KB
+    size_t num_pages = 4;
     uint64_t *pages = (uint64_t*)kmalloc(sizeof(uint64_t) * num_pages);
     if (!pages) return 0;
     
-    // Выделяем физические страницы
+    // ✅ Уникальный базовый адрес для каждого процесса
+    uint64_t stack_base = KERNEL_HEAP_START + (proc->pid * num_pages * PAGE_SIZE);
+    
     for (size_t i = 0; i < num_pages; i++) {
         uint64_t phys = pmm_alloc_page();
         if (!phys) {
             for (size_t j = 0; j < i; j++) {
+                uint64_t v = stack_base + j * PAGE_SIZE;
+                uint64_t p = get_physical_address(v);
+                if (p) { unmap_page(v); pmm_free_page(p); }
                 pmm_free_page(pages[j]);
             }
             kfree(pages);
@@ -54,24 +59,22 @@ static uint64_t allocate_ring0_stack(process_t *proc) {
         }
         pages[i] = phys;
         
-        // Маппим в ядерное адресное пространство (через identity mapping)
-        // Адрес берем из ядерной области
-        uint64_t virt = KERNEL_HEAP_START + i * PAGE_SIZE;
+        uint64_t virt = stack_base + i * PAGE_SIZE;  // ✅ Уникальный!
         if (map_page(virt, phys, PAGE_PRESENT | PAGE_WRITE) != 0) {
             pmm_free_page(phys);
             for (size_t j = 0; j < i; j++) {
+                uint64_t v = stack_base + j * PAGE_SIZE;
+                uint64_t p = get_physical_address(v);
+                if (p) { unmap_page(v); pmm_free_page(p); }
                 pmm_free_page(pages[j]);
             }
             kfree(pages);
             return 0;
         }
-        pages[i] = virt;  // Сохраняем виртуальный адрес вместо физического
+        pages[i] = virt;
     }
     
-    // Сохраняем массив адресов стека в структуре процесса
     proc->ring0_stack_pages = (uint64_t)pages;
-    
-    // Возвращаем верхушку стека (последняя страница + PAGE_SIZE)
     return pages[num_pages - 1] + PAGE_SIZE;
 }
 
