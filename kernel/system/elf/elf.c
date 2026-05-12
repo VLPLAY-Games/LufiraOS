@@ -6,6 +6,10 @@
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
 
+// Внешние переменные для управления прерываниями
+extern void irq_disable(void);
+extern void irq_enable(void);
+
 static void *memset(void *s, int c, size_t n) {
     unsigned char *p = (unsigned char *)s;
     while (n--) *p++ = (unsigned char)c;
@@ -66,6 +70,7 @@ static int map_page_with_tables(uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t pt_idx   = (virt >> 12) & 0x1FF;
     
     // Проверяем/создаём PDPT
+    // ВАЖНО: НЕ ставим PAGE_USER на промежуточные таблицы!
     if (!(pml4[pml4_idx] & PAGE_PRESENT)) {
         uint64_t new_pdpt_phys = pmm_alloc_page();
         if (!new_pdpt_phys) return -1;
@@ -74,7 +79,8 @@ static int map_page_with_tables(uint64_t virt, uint64_t phys, uint64_t flags) {
         uint64_t *new_pdpt = (uint64_t*)new_pdpt_phys;
         for (int i = 0; i < 512; i++) new_pdpt[i] = 0;
         
-        pml4[pml4_idx] = (new_pdpt_phys & ~0xFFF) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+        // Только PAGE_PRESENT | PAGE_WRITE для доступа ядра, НЕТ PAGE_USER!
+        pml4[pml4_idx] = (new_pdpt_phys & ~0xFFF) | PAGE_PRESENT | PAGE_WRITE;
         
         // Инвалидируем TLB для этой записи
         asm volatile("invlpg (%0)" : : "r"(virt) : "memory");
@@ -84,6 +90,7 @@ static int map_page_with_tables(uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t *pdpt = (uint64_t*)pdpt_phys;
     
     // Проверяем/создаём Page Directory
+    // НЕТ PAGE_USER!
     if (!(pdpt[pdpt_idx] & PAGE_PRESENT)) {
         uint64_t new_pd_phys = pmm_alloc_page();
         if (!new_pd_phys) return -1;
@@ -91,7 +98,8 @@ static int map_page_with_tables(uint64_t virt, uint64_t phys, uint64_t flags) {
         uint64_t *new_pd = (uint64_t*)new_pd_phys;
         for (int i = 0; i < 512; i++) new_pd[i] = 0;
         
-        pdpt[pdpt_idx] = (new_pd_phys & ~0xFFF) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+        // Только PAGE_PRESENT | PAGE_WRITE, НЕТ PAGE_USER!
+        pdpt[pdpt_idx] = (new_pd_phys & ~0xFFF) | PAGE_PRESENT | PAGE_WRITE;
         
         asm volatile("invlpg (%0)" : : "r"(virt) : "memory");
     }
@@ -100,6 +108,7 @@ static int map_page_with_tables(uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t *pd = (uint64_t*)pd_phys;
     
     // Проверяем/создаём Page Table
+    // НЕТ PAGE_USER!
     if (!(pd[pd_idx] & PAGE_PRESENT)) {
         uint64_t new_pt_phys = pmm_alloc_page();
         if (!new_pt_phys) return -1;
@@ -107,7 +116,8 @@ static int map_page_with_tables(uint64_t virt, uint64_t phys, uint64_t flags) {
         uint64_t *new_pt = (uint64_t*)new_pt_phys;
         for (int i = 0; i < 512; i++) new_pt[i] = 0;
         
-        pd[pd_idx] = (new_pt_phys & ~0xFFF) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+        // Только PAGE_PRESENT | PAGE_WRITE, НЕТ PAGE_USER!
+        pd[pd_idx] = (new_pt_phys & ~0xFFF) | PAGE_PRESENT | PAGE_WRITE;
         
         asm volatile("invlpg (%0)" : : "r"(virt) : "memory");
     }
@@ -116,7 +126,7 @@ static int map_page_with_tables(uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t *pt = (uint64_t*)pt_phys;
     
     // Устанавливаем запись в Page Table
-    // Флаги уже включают PAGE_PRESENT, просто ORим для страницы
+    // Здесь flags УЖЕ включает PAGE_USER для пользовательских страниц
     uint64_t entry = (phys & ~0xFFF) | (flags & 0xFFF) | PAGE_PRESENT;
     pt[pt_idx] = entry;
     
@@ -188,11 +198,10 @@ void* elf_load_to_process(const void *elf_data, uint64_t elf_size,
                 return NULL;
             }
             
-            // Определяем флаги страницы
-            uint64_t page_flags = PAGE_WRITE | PAGE_USER;
-            if (!(segment_flags & PF_X)) {
-                page_flags |= PAGE_NX;
-            }
+            // Определяем флаги страницы (ДЛЯ ПОЛЬЗОВАТЕЛЬСКИХ СТРАНИЦ)
+            uint64_t page_flags = PAGE_USER;  // Базовый флаг для user space
+            if (segment_flags & PF_W) page_flags |= PAGE_WRITE;
+            if (!(segment_flags & PF_X)) page_flags |= PAGE_NX;
             
             // Маппим страницу с созданием таблиц
             if (map_page_with_tables(virt, phys, page_flags) != 0) {
@@ -253,15 +262,15 @@ int elf_exec(const void *elf_data, uint64_t elf_size, const char *name) {
     
     printf("[ELF] Executing '%s' from memory (%u bytes)\n", name, (uint32_t)elf_size);
     
-    // Отключаем прерывания
-    asm volatile("cli");
+    // Используем правильные функции для управления прерываниями
+    irq_disable();
     
     // ШАГ 1: Создаём процесс с его собственным PML4
     process_t *proc = process_create(name, NULL);
     
     if (!proc) {
         printf("[ELF] Failed to create process for %s\n", name);
-        asm volatile("sti");
+        irq_enable();
         return -1;
     }
     
@@ -273,7 +282,7 @@ int elf_exec(const void *elf_data, uint64_t elf_size, const char *name) {
     if (!entry) {
         printf("[ELF] Failed to load ELF into process %u\n", proc->pid);
         proc->state = PROCESS_TERMINATED;
-        asm volatile("sti");
+        irq_enable();
         return -1;
     }
     
@@ -283,8 +292,8 @@ int elf_exec(const void *elf_data, uint64_t elf_size, const char *name) {
     printf("[ELF] Process %u entry point set to 0x%lx\n", proc->pid, (uint64_t)entry);
     printf("[ELF] User stack at 0x%lx\n", proc->stack_base);
     
-    // Включаем прерывания
-    asm volatile("sti");
+    // Включаем прерывания (с учётом счётчика)
+    irq_enable();
     
     // ШАГ 4: Если мы в idle процессе, сразу переключаемся
     if (current_process == NULL || current_process->pid == 0) {
