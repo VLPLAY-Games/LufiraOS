@@ -26,8 +26,9 @@ typedef struct __attribute__((packed)) {
     uint64_t base;
 } gdt_ptr_t;
 
-// 8 записей: null, kernel code, kernel data, 
-//           user code (2 слота), user data (2 слота), TSS
+// 8 записей: null (0), kernel code (1), kernel data (2),
+//           TSS low (3), TSS high (4),
+//           user data (5), user code (6), зарезервировано (7)
 static uint64_t gdt[8] __attribute__((aligned(16)));
 static gdt_ptr_t gdt_descriptor;
 
@@ -100,10 +101,10 @@ void gdt_init(void) {
     
     // 3-4: TSS (будет установлен позже)
     
-    // 5: user data (0x20) - access=0xF2 (present, ring 3, data, writable)
+    // 5: user data (селектор 0x2B после RPL 3) - access=0xF2 (present, ring 3, data, writable)
     gdt_set_entry(5, 0, 0xFFFFF, 0xF2, 0xC0);
     
-    // 6: user code (0x28) - access=0xFA (present, ring 3, code)
+    // 6: user code (селектор 0x33 после RPL 3) - access=0xFA (present, ring 3, code)
     gdt_set_entry(6, 0, 0xFFFFF, 0xFA, 0xA0);
 
     gdt_descriptor.limit = (uint16_t)(sizeof(gdt) - 1);
