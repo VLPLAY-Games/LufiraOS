@@ -23,6 +23,9 @@ void paging_init(BootInfo* bi);
 // Отобразить виртуальную страницу на физический адрес
 int map_page(uint64_t virt, uint64_t phys, uint64_t flags);
 
+// Отобразить страницу с указанным PML4
+int map_page_in_pml4(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags);
+
 // Снять отображение
 void unmap_page(uint64_t virt);
 
@@ -31,3 +34,6 @@ uint64_t get_physical_address(uint64_t virt);
 
 // Получить физический адрес текущего PML4
 uint64_t get_current_pml4(void);
+
+// Синхронизировать kernel mappings между PML4
+void sync_kernel_mappings(uint64_t dest_pml4_phys, uint64_t src_pml4_phys);

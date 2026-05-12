@@ -64,7 +64,6 @@ void paging_init(BootInfo* bi) {
     for (int i = 0; i < 512; i++) kernel_pdpt[i] = 0;
 
     // Identity mapping для нижней половины (первые 512 GB)
-    // Это нужно для доступа к физической памяти
     kernel_pml4[0] = paddr_to_entry((uint64_t)kernel_pdpt, PAGE_PRESENT | PAGE_WRITE);
 
     uint8_t *map = (uint8_t*)bi->MemoryMap;
@@ -105,7 +104,6 @@ void paging_init(BootInfo* bi) {
 }
 
 int map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
-    // Получаем ТЕКУЩИЙ PML4
     pt_entry_t *pml4 = (pt_entry_t*)get_current_pml4();
     if (!pml4) return -1;
     
@@ -120,6 +118,24 @@ int map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
 
     pt_table[PT_INDEX(virt)] = (phys & 0x000FFFFFFFFFF000ULL) | (flags & 0xFFF) | PAGE_PRESENT;
     invlpg(virt);
+    return 0;
+}
+
+// Функция для маппинга с указанным PML4 (для процессов)
+int map_page_in_pml4(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
+    pt_entry_t *pml4 = (pt_entry_t*)pml4_phys;
+    if (!pml4) return -1;
+    
+    pt_entry_t *pdpt_table = get_or_create_table(pml4, PML4_INDEX(virt), 1);
+    if (!pdpt_table) return -1;
+
+    pt_entry_t *pd_table = get_or_create_table(pdpt_table, PDPT_INDEX(virt), 1);
+    if (!pd_table) return -1;
+
+    pt_entry_t *pt_table = get_or_create_table(pd_table, PD_INDEX(virt), 1);
+    if (!pt_table) return -1;
+
+    pt_table[PT_INDEX(virt)] = (phys & 0x000FFFFFFFFFF000ULL) | (flags & 0xFFF) | PAGE_PRESENT;
     return 0;
 }
 
@@ -141,7 +157,6 @@ void unmap_page(uint64_t virt) {
     pt_entry_t *pt_table = (pt_entry_t*)(*pde & 0x000FFFFFFFFFF000ULL);
     pt_entry_t *pte = &pt_table[PT_INDEX(virt)];
     
-    // Освобождаем физическую страницу
     uint64_t phys = *pte & 0x000FFFFFFFFFF000ULL;
     if (phys) {
         pmm_free_page(phys);
@@ -173,5 +188,38 @@ uint64_t get_physical_address(uint64_t virt) {
         pt_entry_t *pte = &pt_table[PT_INDEX(virt)];
         if (!(*pte & PAGE_PRESENT)) return 0;
         return (*pte & 0x000FFFFFFFFFF000ULL) + (virt & 0xFFF);
+    }
+}
+
+// Синхронизация kernel space записей между PML4 (для процессов)
+void sync_kernel_mappings(uint64_t dest_pml4_phys, uint64_t src_pml4_phys) {
+    pt_entry_t *dest_pml4 = (pt_entry_t*)dest_pml4_phys;
+    pt_entry_t *src_pml4 = (pt_entry_t*)src_pml4_phys;
+    
+    for (int i = 256; i < 512; i++) {  // Только kernel space (верхняя половина)
+        if (src_pml4[i] & PAGE_PRESENT) {
+            uint64_t table_phys = src_pml4[i] & 0x000FFFFFFFFFF000ULL;
+            // Копируем всю таблицу PDPT для этого индекса
+            pt_entry_t *src_table = (pt_entry_t*)table_phys;
+            
+            if (!(dest_pml4[i] & PAGE_PRESENT)) {
+                // Выделяем новую PDPT для destination
+                uint64_t new_table_phys = pmm_alloc_page();
+                if (new_table_phys) {
+                    dest_pml4[i] = (new_table_phys & ~0xFFF) | (src_pml4[i] & 0xFFF);
+                    pt_entry_t *dest_table = (pt_entry_t*)new_table_phys;
+                    // Копируем все записи
+                    for (int j = 0; j < 512; j++) {
+                        dest_table[j] = src_table[j];
+                    }
+                }
+            } else {
+                // Обновляем существующую таблицу
+                pt_entry_t *dest_table = (pt_entry_t*)(dest_pml4[i] & 0x000FFFFFFFFFF000ULL);
+                for (int j = 0; j < 512; j++) {
+                    dest_table[j] = src_table[j];
+                }
+            }
+        }
     }
 }

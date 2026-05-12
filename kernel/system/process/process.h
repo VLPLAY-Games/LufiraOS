@@ -26,10 +26,10 @@ typedef struct process {
     char name[32];
     process_state_t state;
     process_context_t context;
-    uint64_t stack_base;       // User stack (Ring 3)
+    uint64_t stack_base;
     uint64_t stack_size;
-    uint64_t ring0_stack;      // Kernel stack (Ring 0) - верхушка стека
-    uint64_t ring0_stack_pages; // Хранилище адресов страниц Ring 0 стека (указатель на массив)
+    uint64_t ring0_stack;
+    uint64_t ring0_stack_pages;
     uint64_t page_table;
     struct process *next;
 } process_t;
@@ -41,7 +41,7 @@ void schedule(void);
 void switch_to_process(process_t *next);
 void process_reap(void);
 
-extern uint64_t kernel_cr3;  // CR3 ядра
+extern uint64_t kernel_cr3;
 
 extern void context_switch(process_context_t *old_context, 
                           process_context_t *new_context);

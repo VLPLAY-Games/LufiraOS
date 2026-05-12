@@ -36,7 +36,7 @@ static inline void irq_enable(void) {
     }
 }
 
-// Выделение Ring 0 стека
+// Выделение Ring 0 стека (не требует переключения CR3, так как ядерная память видна везде)
 static uint64_t allocate_ring0_stack(process_t *proc) {
     size_t num_pages = 4;  // 16 KB
     uint64_t *pages = (uint64_t*)kmalloc(sizeof(uint64_t) * num_pages);
@@ -46,7 +46,6 @@ static uint64_t allocate_ring0_stack(process_t *proc) {
     for (size_t i = 0; i < num_pages; i++) {
         uint64_t phys = pmm_alloc_page();
         if (!phys) {
-            // Освобождаем уже выделенные страницы
             for (size_t j = 0; j < i; j++) {
                 pmm_free_page(pages[j]);
             }
@@ -54,9 +53,22 @@ static uint64_t allocate_ring0_stack(process_t *proc) {
             return 0;
         }
         pages[i] = phys;
+        
+        // Маппим в ядерное адресное пространство (через identity mapping)
+        // Адрес берем из ядерной области
+        uint64_t virt = KERNEL_HEAP_START + i * PAGE_SIZE;
+        if (map_page(virt, phys, PAGE_PRESENT | PAGE_WRITE) != 0) {
+            pmm_free_page(phys);
+            for (size_t j = 0; j < i; j++) {
+                pmm_free_page(pages[j]);
+            }
+            kfree(pages);
+            return 0;
+        }
+        pages[i] = virt;  // Сохраняем виртуальный адрес вместо физического
     }
     
-    // Сохраняем массив страниц в структуре процесса
+    // Сохраняем массив адресов стека в структуре процесса
     proc->ring0_stack_pages = (uint64_t)pages;
     
     // Возвращаем верхушку стека (последняя страница + PAGE_SIZE)
@@ -72,7 +84,11 @@ static void free_ring0_stack(process_t *proc) {
     
     for (size_t i = 0; i < num_pages; i++) {
         if (pages[i]) {
-            pmm_free_page(pages[i]);
+            uint64_t phys = get_physical_address(pages[i]);
+            if (phys) {
+                unmap_page(pages[i]);
+                pmm_free_page(phys);
+            }
         }
     }
     
@@ -83,9 +99,9 @@ static void free_ring0_stack(process_t *proc) {
 
 static void idle_thread(void) {
     while (1) {
-        asm volatile("sti");   // Разрешаем прерывания
-        asm volatile("hlt");   // Засыпаем до следующего прерывания
-        schedule();            // Проверяем, нет ли готовых процессов
+        asm volatile("sti");
+        asm volatile("hlt");
+        schedule();
     }
 }
 
@@ -124,7 +140,7 @@ void process_init(void) {
     asm volatile("mov %%cr3, %0" : "=r"(idle_process->page_table));
     
     process_list = idle_process;
-    idle_process->next = idle_process;  // Замыкаем список на себя
+    idle_process->next = idle_process;
     current_process = idle_process;
     
     printf("[PROCESS] Process manager initialized\n");
@@ -133,8 +149,8 @@ void process_init(void) {
 static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys) {
     size_t num_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     
-    irq_disable();                                    // ← counter++
-
+    irq_disable();
+    
     uint64_t old_cr3;
     asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
     asm volatile("mov %0, %%cr3" : : "r"(pml4_phys) : "memory");
@@ -153,27 +169,27 @@ static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys) {
                 }
             }
             asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
-            irq_enable();                             // ← ДОБАВИТЬ
+            irq_enable();
             return 0;
         }
         
         uint64_t virt = stack_virt + i * PAGE_SIZE;
+        // Используем map_page (работает с текущим CR3)
         if (map_page(virt, phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER) != 0) {
             pmm_free_page(phys);
             asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
-            irq_enable();                             // ← ДОБАВИТЬ
+            irq_enable();
             return 0;
         }
     }
     
     asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
     
-    irq_enable();                                     // ← ДОБАВИТЬ
+    irq_enable();
     return stack_virt + num_pages * PAGE_SIZE;
 }
 
 process_t* process_create(const char *name, void (*entry)(void)) {
-    // Запрещаем прерывания на время создания процесса
     irq_disable();
     
     process_t *proc = (process_t*)kmalloc(sizeof(process_t));
@@ -199,6 +215,10 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     }
     proc->page_table = new_pml4;
     
+    // ВАЖНО: синхронизируем kernel mappings с текущим ядерным PML4
+    // Это необходимо, так как ядерная куча могла расшириться
+    sync_kernel_mappings(proc->page_table, kernel_pml4);
+    
     // Выделяем Ring 0 стек
     proc->ring0_stack = allocate_ring0_stack(proc);
     if (!proc->ring0_stack) {
@@ -222,7 +242,7 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     // Инициализируем контекст
     memset(&proc->context, 0, sizeof(process_context_t));
     
-    // Заполняем стек пользователя (с запрещёнными прерываниями)
+    // Заполняем стек пользователя
     uint64_t old_cr3;
     asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
     asm volatile("mov %0, %%cr3" : : "r"(new_pml4) : "memory");
@@ -238,7 +258,7 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     
     rsp -= 8;
     stack_ptr = (uint64_t*)rsp;
-    *stack_ptr = 0x202;  // RFLAGS с IF=1
+    *stack_ptr = 0x202;
     
     asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
     
@@ -247,7 +267,7 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     proc->context.rflags = 0x202;
     proc->context.cr3 = new_pml4;
     
-    // Добавляем в список (с уже запрещёнными прерываниями)
+    // Добавляем в список
     proc->next = NULL;
     if (!process_list) {
         process_list = proc;
@@ -269,19 +289,14 @@ process_t* process_create(const char *name, void (*entry)(void)) {
 }
 
 void process_exit(void) {
-    // Сохраняем указатель на текущий процесс ДО изменения состояния
     process_t *exiting_process = current_process;
     
     printf("\n[PROCESS] Process %u ('%s') exiting\n", 
            exiting_process->pid, exiting_process->name);
     
-    // Запрещаем прерывания
     irq_disable();
     
-    // Помечаем как завершённый
     exiting_process->state = PROCESS_TERMINATED;
-    
-    // ОЧИЩАЕМ current_process, чтобы планировщик не использовал freed память
     current_process = NULL;
     
     // Освобождаем пользовательский стек
@@ -289,7 +304,6 @@ void process_exit(void) {
         uint64_t stack_start = exiting_process->stack_base - exiting_process->stack_size;
         size_t num_pages = exiting_process->stack_size / PAGE_SIZE;
         
-        // Временно переключаемся на адресное пространство процесса
         uint64_t old_cr3;
         asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
         asm volatile("mov %0, %%cr3" : : "r"(exiting_process->page_table) : "memory");
@@ -311,32 +325,49 @@ void process_exit(void) {
         free_ring0_stack(exiting_process);
     }
     
-    // Освобождаем PML4 (только если это не ядерный)
+    // Освобождаем PML4
+    // ВАЖНО: Нужно освободить все таблицы страниц, а не только PML4
     if (exiting_process->page_table != kernel_cr3 && exiting_process->page_table != 0) {
-        printf("[PROCESS] Freeing PML4: 0x%lx\n", exiting_process->page_table);
-        pmm_free_page(exiting_process->page_table);
+        uint64_t pml4_phys = exiting_process->page_table;
+        uint64_t *pml4 = (uint64_t*)pml4_phys;
+        
+        // Рекурсивно освобождаем все таблицы (кроме kernel space 256-511)
+        for (int i = 0; i < 256; i++) {  // Только user space
+            if (pml4[i] & PAGE_PRESENT) {
+                uint64_t pdpt_phys = pml4[i] & 0x000FFFFFFFFFF000ULL;
+                uint64_t *pdpt = (uint64_t*)pdpt_phys;
+                
+                for (int j = 0; j < 512; j++) {
+                    if (pdpt[j] & PAGE_PRESENT) {
+                        uint64_t pd_phys = pdpt[j] & 0x000FFFFFFFFFF000ULL;
+                        uint64_t *pd = (uint64_t*)pd_phys;
+                        
+                        for (int k = 0; k < 512; k++) {
+                            if (pd[k] & PAGE_PRESENT && !(pd[k] & PAGE_HUGE)) {
+                                uint64_t pt_phys = pd[k] & 0x000FFFFFFFFFF000ULL;
+                                pmm_free_page(pt_phys);
+                            }
+                        }
+                        pmm_free_page(pd_phys);
+                    }
+                }
+                pmm_free_page(pdpt_phys);
+            }
+        }
+        pmm_free_page(pml4_phys);
         exiting_process->page_table = 0;
     }
     
-    // НЕ разрешаем прерывания здесь - schedule() сделает это сам
-    // Просто передаём управление планировщику с запрещёнными прерываниями
-    
-    // Передаём управление планировщику (прерывания остаются запрещёнными)
     schedule();
     
-    // Сюда никогда не должны попасть
     while (1) {
         asm volatile("hlt");
     }
 }
 
-// Очистка завершённых процессов (зомби-процессов)
 void process_reap(void) {
-    if (!process_list) {
-        return;
-    }
+    if (!process_list) return;
     
-    // Защита от повреждённого списка
     const uint32_t MAX_ITERATIONS = 10000;
     uint32_t iterations = 0;
     
@@ -344,26 +375,19 @@ void process_reap(void) {
     process_t *start = p;
     process_t *prev = NULL;
     
-    // Безопасное удаление с обходом повреждённых указателей
     while (p && iterations++ < MAX_ITERATIONS) {
-        // Сохраняем следующий до удаления
         process_t *next_process = p->next;
         
-        // Проверка на зацикливание
         if (next_process == p && p != idle_process) {
             printf("[PROCESS] WARNING: Process points to itself\n");
             break;
         }
         
-        // Удаляем только зомби (не idle)
         if (p->state == PROCESS_TERMINATED && p != idle_process) {
             printf("[PROCESS] Reaping zombie PID %u ('%s')\n", p->pid, p->name);
             
-            // Удаляем из списка
             if (prev == NULL) {
-                // Удаляем голову списка
                 if (p->next == p) {
-                    // Случай 1: Единственный процесс в списке
                     if (idle_process) {
                         process_list = idle_process;
                         idle_process->next = idle_process;
@@ -371,8 +395,6 @@ void process_reap(void) {
                         process_list = NULL;
                     }
                 } else {
-                    // Случай 2: Голова, но есть другие процессы
-                    // Находим последний элемент (который указывает на голову)
                     process_t *last = p;
                     uint32_t find_iter = 0;
                     while (last->next != p && find_iter++ < MAX_ITERATIONS) {
@@ -380,23 +402,19 @@ void process_reap(void) {
                     }
                     
                     if (last && last->next == p) {
-                        // Переключаем голову на следующий элемент
                         process_list = p->next;
-                        // Замыкаем последний элемент на новую голову
                         last->next = process_list;
                     } else {
-                        printf("[PROCESS] ERROR: Corrupted list, cannot find last element\n");
+                        printf("[PROCESS] ERROR: Corrupted list\n");
                         break;
                     }
                 }
                 
-                // Освобождаем память процесса
                 kfree(p);
                 p = process_list;
                 prev = NULL;
                 continue;
             } else {
-                // Удаляем из середины/конца
                 prev->next = p->next;
                 kfree(p);
                 p = prev->next;
@@ -404,39 +422,25 @@ void process_reap(void) {
             }
         }
         
-        // Переход к следующему
         prev = p;
         p = next_process;
         
-        // Защита от зацикливания
-        if (p == start) {
-            break;
-        }
-        if (p == NULL) {
-            break;
-        }
-    }
-    
-    if (iterations >= MAX_ITERATIONS) {
-        printf("[PROCESS] WARNING: Process list may be corrupted\n");
+        if (p == start) break;
+        if (p == NULL) break;
     }
 }
 
 void schedule(void) {
-    // Проверяем, разрешены ли прерывания
     uint64_t rflags;
     asm volatile("pushfq; pop %0" : "=r"(rflags));
     if (!(rflags & 0x200)) {
-        return;  // Прерывания запрещены, не переключаемся
+        return;
     }
     
-    // Запрещаем прерывания для атомарной работы
     irq_disable();
     
-    // Очищаем зомби-процессы (прерывания уже запрещены)
     process_reap();
     
-    // Если current_process был обнулён в process_exit, восстанавливаем его через список
     if (current_process == NULL && process_list != NULL) {
         current_process = process_list;
     }
@@ -446,7 +450,6 @@ void schedule(void) {
         return;
     }
     
-    // Поиск следующего готового процесса
     process_t *next = current_process->next;
     int tries = 0;
     const int MAX_TRIES = 100;
@@ -457,7 +460,6 @@ void schedule(void) {
         if (next == current_process) break;
     }
     
-    // Если не нашли готовый процесс, используем idle
     if (!next || next->state != PROCESS_READY || tries >= MAX_TRIES) {
         if (idle_process && idle_process != current_process) {
             next = idle_process;
@@ -467,17 +469,13 @@ void schedule(void) {
         }
     }
     
-    // Если тот же процесс, ничего не делаем
     if (next == current_process) {
         irq_enable();
         return;
     }
     
-    // Переключаем контекст (прерывания остаются запрещёнными)
-    // Установка RSP0 теперь происходит внутри switch_to_process
     switch_to_process(next);
     
-    // Разрешаем прерывания ПОСЛЕ возврата (когда этот процесс снова запланирован)
     irq_enable();
 }
 
@@ -486,28 +484,21 @@ void switch_to_process(process_t *next) {
     
     process_t *prev = current_process;
     
-    // Обновляем состояния
     if (prev && prev->state == PROCESS_RUNNING) {
         prev->state = PROCESS_READY;
     }
     next->state = PROCESS_RUNNING;
     
-    // Устанавливаем RSP0 для нового процесса в TSS
-    // Это критически важно для правильной обработки прерываний
     if (next->ring0_stack > 0) {
         tss_set_rsp0(next->ring0_stack);
     } else {
-        // Fallback на стек ядра (должно быть настроено)
-        // Здесь можно использовать стек idle процесса или запасной стек
         static uint64_t fallback_stack[1024];
         tss_set_rsp0((uint64_t)fallback_stack + sizeof(fallback_stack));
     }
     
     current_process = next;
     
-    // ВАЖНО: Всегда передаём валидный контекст
-    // Если prev == NULL (первое переключение), используем контекст idle процесса
-    process_context_t *prev_context = prev ? &prev->context : &idle_process->context;
+    process_context_t *prev_context = (prev && prev != next) ? &prev->context : &idle_process->context;
     
     context_switch(prev_context, &next->context);
 }
