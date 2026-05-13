@@ -3,6 +3,14 @@
 #include "lib/types.h"
 #include "system/cpu/tss.h"
 
+#define KERNEL_HEAP_START       0xFFFF900000000000ULL  // Куча ядра
+#define KERNEL_STACK_AREA_START 0xFFFF880000000000ULL  // Область стеков
+#define KERNEL_STACK_SIZE       (16 * 1024)            // 16KB на процесс
+#define MAX_PROCESSES           32
+#define USER_STACK_AREA_START 0x0000700000000000ULL
+#define USER_STACK_SIZE       (16 * 1024)  // 16KB
+
+
 typedef enum {
     PROCESS_READY = 0,
     PROCESS_RUNNING = 1,

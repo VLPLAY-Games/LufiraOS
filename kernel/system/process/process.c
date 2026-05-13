@@ -37,45 +37,56 @@ static inline void irq_enable(void) {
 }
 
 // Выделение Ring 0 стека (не требует переключения CR3, так как ядерная память видна везде)
+// process.c - НОВАЯ ВЕРСИЯ
+// process.c - исправленная allocate_ring0_stack
 static uint64_t allocate_ring0_stack(process_t *proc) {
-    size_t num_pages = 4;
+    uint64_t stack_base = KERNEL_STACK_AREA_START + 
+                          (proc->pid * KERNEL_STACK_SIZE);
+    size_t num_pages = KERNEL_STACK_SIZE / PAGE_SIZE;
+    
     uint64_t *pages = (uint64_t*)kmalloc(sizeof(uint64_t) * num_pages);
     if (!pages) return 0;
     
-    // Уникальный базовый адрес для каждого процесса
-    uint64_t stack_base = KERNEL_HEAP_START + (proc->pid * num_pages * PAGE_SIZE);
+    // Сохраняем текущий CR3
+    uint64_t old_cr3;
+    asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
+    
+    // Переключаемся на PML4 процесса ДО маппинга
+    asm volatile("mov %0, %%cr3" : : "r"(proc->page_table) : "memory");
     
     for (size_t i = 0; i < num_pages; i++) {
         uint64_t phys = pmm_alloc_page();
         if (!phys) {
+            // Откат
             for (size_t j = 0; j < i; j++) {
-                uint64_t v = stack_base + j * PAGE_SIZE;
-                uint64_t p = get_physical_address(v);
-                if (p) { unmap_page(v); pmm_free_page(p); }
-                pmm_free_page(pages[j]);
+                unmap_page(stack_base + j * PAGE_SIZE);
+                pmm_free_page(get_physical_address(stack_base + j * PAGE_SIZE));
             }
+            asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
             kfree(pages);
             return 0;
         }
-        pages[i] = phys;
         
         uint64_t virt = stack_base + i * PAGE_SIZE;
+        // Теперь маппим в адресное пространство процесса
         if (map_page(virt, phys, PAGE_PRESENT | PAGE_WRITE) != 0) {
             pmm_free_page(phys);
             for (size_t j = 0; j < i; j++) {
-                uint64_t v = stack_base + j * PAGE_SIZE;
-                uint64_t p = get_physical_address(v);
-                if (p) { unmap_page(v); pmm_free_page(p); }
-                pmm_free_page(pages[j]);
+                unmap_page(stack_base + j * PAGE_SIZE);
+                pmm_free_page(get_physical_address(stack_base + j * PAGE_SIZE));
             }
+            asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
             kfree(pages);
             return 0;
         }
         pages[i] = virt;
     }
     
+    // Возвращаемся к старому CR3
+    asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
+    
     proc->ring0_stack_pages = (uint64_t)pages;
-    return pages[num_pages - 1] + PAGE_SIZE;
+    return stack_base + KERNEL_STACK_SIZE;
 }
 
 // Освобождение Ring 0 стека
@@ -83,15 +94,16 @@ static void free_ring0_stack(process_t *proc) {
     if (!proc->ring0_stack_pages) return;
     
     uint64_t *pages = (uint64_t*)proc->ring0_stack_pages;
-    size_t num_pages = 4;
+    uint64_t stack_base = KERNEL_STACK_AREA_START + 
+                          (proc->pid * KERNEL_STACK_SIZE);
+    size_t num_pages = KERNEL_STACK_SIZE / PAGE_SIZE;
     
     for (size_t i = 0; i < num_pages; i++) {
-        if (pages[i]) {
-            uint64_t phys = get_physical_address(pages[i]);
-            if (phys) {
-                unmap_page(pages[i]);
-                pmm_free_page(phys);
-            }
+        uint64_t virt = stack_base + i * PAGE_SIZE;
+        uint64_t phys = get_physical_address(virt);
+        if (phys) {
+            unmap_page(virt);
+            pmm_free_page(phys);
         }
     }
     
@@ -155,8 +167,12 @@ void process_init(void) {
     printf("[PROCESS] Process manager initialized\n");
 }
 
-static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys) {
-    size_t num_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys, uint32_t pid) {
+    // Каждому процессу - свой уникальный виртуальный адрес
+    uint64_t stack_virt = USER_STACK_AREA_START + (pid * USER_STACK_SIZE);
+    size_t num_pages = size / PAGE_SIZE;
+    
+    if (num_pages == 0) num_pages = 1;
     
     irq_disable();
     
@@ -164,11 +180,10 @@ static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys) {
     asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
     asm volatile("mov %0, %%cr3" : : "r"(pml4_phys) : "memory");
     
-    uint64_t stack_virt = 0x0000700000000000ULL;
-    
     for (size_t i = 0; i < num_pages; i++) {
         uint64_t phys = pmm_alloc_page();
         if (!phys) {
+            // Откат
             for (size_t j = 0; j < i; j++) {
                 uint64_t v = stack_virt + j * PAGE_SIZE;
                 uint64_t p = get_physical_address(v);
@@ -183,9 +198,16 @@ static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys) {
         }
         
         uint64_t virt = stack_virt + i * PAGE_SIZE;
-        // Используем map_page (работает с текущим CR3)
         if (map_page(virt, phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER) != 0) {
             pmm_free_page(phys);
+            for (size_t j = 0; j < i; j++) {
+                uint64_t v = stack_virt + j * PAGE_SIZE;
+                uint64_t p = get_physical_address(v);
+                if (p) {
+                    unmap_page(v);
+                    pmm_free_page(p);
+                }
+            }
             asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
             irq_enable();
             return 0;
@@ -193,9 +215,10 @@ static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys) {
     }
     
     asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
-    
     irq_enable();
-    return stack_virt + num_pages * PAGE_SIZE;
+    
+    // Возвращаем ВЕРХНИЙ адрес стека
+    return stack_virt + size;
 }
 
 process_t* process_create(const char *name, void (*entry)(void)) {
@@ -238,7 +261,7 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     
     // Выделяем пользовательский стек
     proc->stack_size = 16384;
-    proc->stack_base = allocate_user_stack(proc->stack_size, new_pml4);
+    proc->stack_base = allocate_user_stack(proc->stack_size, new_pml4, proc->pid);
     if (!proc->stack_base) {
         pmm_free_page(new_pml4);
         free_ring0_stack(proc);
