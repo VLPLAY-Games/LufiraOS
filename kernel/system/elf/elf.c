@@ -6,10 +6,6 @@
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
 
-// Внешние переменные для управления прерываниями
-extern void irq_disable(void);
-extern void irq_enable(void);
-
 #ifndef PAGE_PS
 #define PAGE_PS     0x80    // Page size (2MB / 1GB)
 #endif
@@ -460,7 +456,7 @@ void* elf_load_to_process(const void *elf_data,
 int elf_exec(const void *elf_data, uint64_t elf_size, const char *name) {
     printf("[ELF] DEBUG: Step 0 - entry\n");
     
-    irq_disable();
+    asm volatile("cli");
     
     // Сохраняем CR3
     uint64_t cr3_before;
@@ -472,7 +468,7 @@ int elf_exec(const void *elf_data, uint64_t elf_size, const char *name) {
     process_t *proc = process_create(name, NULL);
     if (!proc) {
         printf("[ELF] Failed to create process\n");
-        irq_enable();
+        asm volatile("sti");
         return -1;
     }
     
@@ -507,7 +503,7 @@ int elf_exec(const void *elf_data, uint64_t elf_size, const char *name) {
     if (!entry) {
         printf("[ELF] Failed to load ELF\n");
         proc->state = PROCESS_TERMINATED;
-        irq_enable();
+        asm volatile("sti");
         return -1;
     }
     
@@ -518,12 +514,9 @@ int elf_exec(const void *elf_data, uint64_t elf_size, const char *name) {
     
     printf("[ELF] DEBUG: ALL OK!\n");
     
-    irq_enable();
-    
     // Запускаем процесс, если это первый пользовательский процесс
-    if (current_process == NULL || current_process->pid == 0) {
-        switch_to_process(proc);
-    }
+    asm volatile("cli");
+    switch_to_process(proc);
     
     return 0;
 }

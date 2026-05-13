@@ -22,12 +22,12 @@ uint64_t kernel_cr3 = 0;
 static volatile uint32_t irq_disable_counter = 0;
 
 // Вспомогательные функции для управления прерываниями
-inline void irq_disable(void) {
+static inline void irq_disable(void) {
     asm volatile("cli");
     irq_disable_counter++;
 }
 
-inline void irq_enable(void) {
+static inline void irq_enable(void) {
     if (irq_disable_counter > 0) {
         irq_disable_counter--;
         if (irq_disable_counter == 0) {
