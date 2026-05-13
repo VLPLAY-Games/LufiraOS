@@ -48,7 +48,4 @@ void timer_irq_handler(void) {
     
     // Обновляем курсор (мигание)
     update_cursor();
-    
-    // Вызываем планировщик
-    schedule();
 }
