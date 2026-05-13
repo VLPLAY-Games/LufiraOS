@@ -49,6 +49,9 @@ void schedule(void);
 void switch_to_process(process_t *next);
 void process_reap(void);
 
+void irq_disable(void);
+void irq_enable(void);
+
 extern uint64_t kernel_cr3;
 
 extern void context_switch(process_context_t *old_context, 
