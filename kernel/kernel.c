@@ -137,7 +137,7 @@ static void shell_task(void) {
 __attribute__((section(".text.prologue")))
 void _start(BootInfo* bi) {
     asm volatile ("cli");
-
+    
     initialize_console(bi);
     
     LOG_PENDING("Initializing GDT...");
@@ -156,10 +156,13 @@ void _start(BootInfo* bi) {
     pic_remap();
     LOG_DONE_OK("PIC remapped");
 
+    // ВАЖНО: сначала PMM, потом PAGING, потом HEAP
     pmm_init(bi->MemoryMap, bi->MemoryMapSize, bi->MemoryMapDescriptorSize,
                 bi->KernelBase, bi->KernelSize);
     paging_init(bi);
-    heap_init();
+    
+    // Heap теперь статический - инициализируем сразу
+    heap_init();  // <-- ВСЯ память выделяется здесь
 
     if (bi->FATImageBase && bi->FATImageSize) {
         LOG_PENDING("Mounting FAT filesystem...");

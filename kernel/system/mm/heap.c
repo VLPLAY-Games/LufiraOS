@@ -4,140 +4,191 @@
 #include "lib/types.h"
 #include "log.h"
 
-#define KERNEL_HEAP_START   0xFFFF900000000000ULL
-#define KERNEL_HEAP_INITIAL_SIZE   (4 * 1024 * 1024)   // 4 MB
+#define HEAP_MAGIC_FREE  0xDEADBEE1
+#define HEAP_MAGIC_USED  0xDEADBEE2
 
 typedef struct block_header {
-    size_t size;                  // размер блока (включая заголовок)
-    int free;                     // 1 если свободен
+    uint32_t magic;           // Магическое число для проверки целостности
+    uint32_t size;            // Размер блока (включая заголовок)
     struct block_header *next;
     struct block_header *prev;
 } __attribute__((packed)) block_header_t;
 
 static block_header_t *heap_start = NULL;
-static block_header_t *heap_end = NULL;   // указатель на начало свободного виртуального пространства
+static uint64_t heap_initialized = 0;
 
-static uint64_t heap_current_top = 0;      // текущий верхний виртуальный адрес
+// Включение/выключение прерываний для heap
+static inline void heap_lock(void) {
+    asm volatile("cli");
+}
 
-static block_header_t *find_free_block(size_t size) {
+static inline void heap_unlock(void) {
+    asm volatile("sti");
+}
+
+// Инициализация кучи - выделяем ВСЮ память сразу
+void heap_init(void) {
+    LOG_PENDING("Initializing static heap...");
+    
+    // Запрещаем прерывания во время инициализации
+    heap_lock();
+    
+    // Маппим всю область кучи заранее
+    for (uint64_t virt = KERNEL_HEAP_START; virt < KERNEL_HEAP_END; virt += PAGE_SIZE) {
+        uint64_t phys = pmm_alloc_page();
+        if (!phys) {
+            LOG_DONE_FAIL("Heap initialization failed: out of physical memory");
+            heap_unlock();
+            while(1) __asm__("hlt");
+        }
+        
+        if (map_page(virt, phys, PAGE_PRESENT | PAGE_WRITE) != 0) {
+            LOG_DONE_FAIL("Heap initialization failed: mapping error");
+            heap_unlock();
+            while(1) __asm__("hlt");
+        }
+    }
+    
+    // Создаём начальный блок
+    heap_start = (block_header_t*)KERNEL_HEAP_START;
+    heap_start->magic = HEAP_MAGIC_FREE;
+    heap_start->size = KERNEL_HEAP_SIZE;
+    heap_start->next = NULL;
+    heap_start->prev = NULL;
+    
+    heap_initialized = 1;
+    heap_unlock();
+    
+    LOG_DONE_OK("Static heap initialized: 0x%lx - 0x%lx (%d MB)", 
+                KERNEL_HEAP_START, KERNEL_HEAP_END, KERNEL_HEAP_SIZE / (1024 * 1024));
+}
+
+// Поиск свободного блока достаточного размера
+static block_header_t* find_free_block(size_t size) {
     block_header_t *current = heap_start;
+    
     while (current) {
-        if (current->free && current->size >= size) {
+        if (current->magic == HEAP_MAGIC_FREE && current->size >= size) {
             return current;
         }
         current = current->next;
     }
+    
     return NULL;
 }
 
-static block_header_t *request_space(block_header_t *last, size_t size) {
-    size_t needed = size + sizeof(block_header_t);
-    size_t pages = (needed + PAGE_SIZE - 1) / PAGE_SIZE;
-    if (pages == 0) pages = 1;
-
-    if (heap_current_top == 0)
-        heap_current_top = KERNEL_HEAP_START;
-
-    uint64_t virt_base = heap_current_top;
-
-    for (size_t i = 0; i < pages; i++) {
-        uint64_t phys = pmm_alloc_page();
-        if (!phys) {
-            return NULL;
-        }
-
-        if (map_page(heap_current_top, phys, PAGE_PRESENT | PAGE_WRITE) != 0) {
-            pmm_free_page(phys);
-            return NULL;
-        }
-
-        heap_current_top += PAGE_SIZE;
-    }
-
-    block_header_t *header = (block_header_t*)virt_base;
-    header->size = pages * PAGE_SIZE;
-    header->free = 1;
-    header->next = NULL;
-    header->prev = last;
-
-    if (last)
-        last->next = header;
-
-    if (!heap_start)
-        heap_start = header;
-
-    heap_end = header;
-    return header;
-}
-
-void heap_init(void) {
-    LOG_PENDING("Initializing heap...");
-
-    heap_start = NULL;
-    heap_end = NULL;
-    heap_current_top = KERNEL_HEAP_START;
-
-    if (!request_space(NULL, 4 * 1024)) {
-        LOG_DONE_FAIL("Heap initialization failed");
-        while (1) __asm__("hlt");
-    }
-
-    LOG_DONE_OK("Heap initialized at 0x%lx", KERNEL_HEAP_START);
-}
-
+// Разделение блока на две части
 static void split_block(block_header_t *block, size_t size) {
-    if (block->size >= size + sizeof(block_header_t) + 8) {
+    // Размер нового блока должен быть достаточно большим
+    if (block->size >= size + sizeof(block_header_t) + 32) {
         block_header_t *new_block = (block_header_t*)((uint8_t*)block + size);
+        
+        new_block->magic = HEAP_MAGIC_FREE;
         new_block->size = block->size - size;
-        new_block->free = 1;
         new_block->next = block->next;
         new_block->prev = block;
-
-        if (block->next)
+        
+        if (block->next) {
             block->next->prev = new_block;
-
+        }
+        
         block->next = new_block;
         block->size = size;
     }
 }
 
+// Объединение соседних свободных блоков
 static void merge_blocks(block_header_t *block) {
-    if (block->next && block->next->free) {
+    // Объединяем со следующим блоком
+    if (block->next && block->next->magic == HEAP_MAGIC_FREE) {
         block->size += block->next->size;
         block->next = block->next->next;
-        if (block->next) block->next->prev = block;
+        if (block->next) {
+            block->next->prev = block;
+        }
     }
-    if (block->prev && block->prev->free) {
+    
+    // Объединяем с предыдущим блоком
+    if (block->prev && block->prev->magic == HEAP_MAGIC_FREE) {
         block->prev->size += block->size;
         block->prev->next = block->next;
-        if (block->next) block->next->prev = block->prev;
+        if (block->next) {
+            block->next->prev = block->prev;
+        }
         block = block->prev;
     }
 }
 
+// Выделение памяти
 void *kmalloc(size_t size) {
-    if (size == 0)
+    if (!heap_initialized || size == 0) {
         return NULL;
-
-    size_t total_size = size + sizeof(block_header_t);
-    total_size = (total_size + 7) & ~7;
-
-    block_header_t *block = find_free_block(total_size);
-    if (!block) {
-        block = request_space(heap_end, total_size);
-        if (!block)
-            return NULL;
     }
-
+    
+    // Выравниваем размер до 8 байт (минимальное выравнивание)
+    size = (size + 7) & ~7;
+    size_t total_size = size + sizeof(block_header_t);
+    
+    heap_lock();
+    
+    block_header_t *block = find_free_block(total_size);
+    
+    if (!block) {
+        heap_unlock();
+        LOG_FAIL("kmalloc: out of memory (requested %u bytes)", (uint32_t)size);
+        return NULL;
+    }
+    
     split_block(block, total_size);
-    block->free = 0;
-
-    return (void*)((uint8_t*)block + sizeof(block_header_t));
+    block->magic = HEAP_MAGIC_USED;
+    
+    void *ptr = (void*)((uint8_t*)block + sizeof(block_header_t));
+    
+    heap_unlock();
+    
+    return ptr;
 }
 
+// Освобождение памяти
 void kfree(void *ptr) {
     if (!ptr) return;
+    
+    heap_lock();
+    
     block_header_t *block = (block_header_t*)((uint8_t*)ptr - sizeof(block_header_t));
-    block->free = 1;
+    
+    // Проверка на валидность указателя
+    if (block->magic != HEAP_MAGIC_USED) {
+        LOG_FAIL("kfree: invalid pointer %p (magic=0x%x)", ptr, block->magic);
+        heap_unlock();
+        return;
+    }
+    
+    block->magic = HEAP_MAGIC_FREE;
     merge_blocks(block);
+    
+    heap_unlock();
+}
+
+// Вспомогательная функция для отладки (опционально)
+void heap_dump(void) {
+    heap_lock();
+    
+    printf("\n=== HEAP DUMP ===\n");
+    block_header_t *current = heap_start;
+    int block_num = 0;
+    
+    while (current) {
+        printf("Block %d: addr=0x%lx, size=%u, magic=0x%x, %s\n",
+               block_num++,
+               (uint64_t)current,
+               current->size,
+               current->magic,
+               (current->magic == HEAP_MAGIC_FREE) ? "FREE" : 
+               (current->magic == HEAP_MAGIC_USED) ? "USED" : "INVALID");
+        current = current->next;
+    }
+    
+    printf("================\n\n");
+    heap_unlock();
 }
