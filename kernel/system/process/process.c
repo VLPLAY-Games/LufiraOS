@@ -128,11 +128,18 @@ static uint64_t create_address_space(uint64_t kernel_pml4_phys) {
     uint64_t *new_pml4 = (uint64_t*)new_pml4_phys;
     uint64_t *kernel_pml4 = (uint64_t*)kernel_pml4_phys;
     
-    // Копируем ВСЕ записи из ЯДЕРНОГО PML4.
-    // В нём нет пользовательских маппингов, поэтому наследование
-    // чужих user-space страниц невозможно.
+    // Копируем ВСЕ записи, но с модификацией флагов
     for (int i = 0; i < 512; i++) {
-        new_pml4[i] = kernel_pml4[i];
+        if (kernel_pml4[i] & PAGE_PRESENT) {
+            uint64_t entry = kernel_pml4[i];
+            
+            // Для user space (0-255) - снимаем флаг USER
+            if (i < 256) {
+                entry &= ~PAGE_USER;  // Убираем доступ из user mode
+            }
+            
+            new_pml4[i] = entry;
+        }
     }
     
     return new_pml4_phys;
