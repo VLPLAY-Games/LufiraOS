@@ -84,12 +84,12 @@ syscall_entry:
     # )
     #
 
-    movq 56(%rsp), %rdi       # syscall number
-    movq 48(%rsp), %rsi       # arg1
-    movq 40(%rsp), %rdx       # arg2
-    movq 32(%rsp), %rcx       # arg3
-    movq 24(%rsp), %r8        # arg4
-    movq 16(%rsp), %r9        # arg5
+    movq 64(%rsp), %rdi       # syscall number (было 56)
+    movq 56(%rsp), %rsi       # arg1           (было 48)
+    movq 48(%rsp), %rdx       # arg2           (было 40)
+    movq 40(%rsp), %rcx       # arg3           (было 32)
+    movq 32(%rsp), %r8        # arg4           (было 24)
+    movq 24(%rsp), %r9        # arg5           (было 16)
 
     #
     # Вызываем C handler
