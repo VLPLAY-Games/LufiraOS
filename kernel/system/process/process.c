@@ -339,40 +339,15 @@ void process_exit(void) {
            exiting_process->pid,
            exiting_process->name);
 
-    /*
-     * НИЧЕГО НЕ ОСВОБОЖДАЕМ ЗДЕСЬ.
-     *
-     * Мы всё ещё выполняемся на ring0 stack этого процесса.
-     *
-     * Нельзя:
-     *   - освобождать ring0 stack;
-     *   - освобождать его PML4;
-     *   - уничтожать page tables.
-     *
-     * Только помечаем процесс завершённым.
-     */
-
-    irq_disable();
-
     exiting_process->state = PROCESS_TERMINATED;
 
-    /*
-     * Передаём управление scheduler.
-     *
-     * ВАЖНО:
-     * current_process оставляем как exiting_process.
-     *
-     * schedule() увидит TERMINATED и переключится
-     * на следующий READY процесс.
-     */
     schedule();
 
     /*
-     * Сюда нормальный процесс больше не должен вернуться.
+     * Если сюда вернулись — что-то пошло не так.
      */
-    while (1) {
+    while (1)
         asm volatile("hlt");
-    }
 }
 
 void process_reap(void) {
