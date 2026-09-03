@@ -1,3 +1,4 @@
 build/
 hello.c
 hello.elf
+hello_simple.o

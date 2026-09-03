@@ -107,6 +107,9 @@ void gdt_init(void) {
     // 6: user code (селектор 0x33 после RPL 3) - access=0xFA (present, ring 3, code)
     gdt_set_entry(6, 0, 0xFFFFF, 0xFA, 0xA0);
 
+    // 7: user data2 (для SS после sysretq) - access=0xF2
+    gdt_set_entry(7, 0, 0xFFFFF, 0xF2, 0xC0);
+
     gdt_descriptor.limit = (uint16_t)(sizeof(gdt) - 1);
     gdt_descriptor.base = (uint64_t)&gdt;
 

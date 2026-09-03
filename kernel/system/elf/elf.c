@@ -71,67 +71,75 @@ static int map_page_in_space(uint64_t pml4_phys,
                              uint64_t phys,
                              uint64_t flags)
 {
-    uint64_t *pml4 = (uint64_t*)pml4_phys;
+    uint64_t *pml4 = (uint64_t *)pml4_phys;
 
     uint64_t pml4_idx = (virt >> 39) & 0x1FF;
     uint64_t pdpt_idx = (virt >> 30) & 0x1FF;
     uint64_t pd_idx   = (virt >> 21) & 0x1FF;
     uint64_t pt_idx   = (virt >> 12) & 0x1FF;
 
-    // ========================================================
-    // PML4 -> PDPT
-    // ========================================================
+    /*
+     * Все промежуточные таблицы user mapping должны иметь USER=1.
+     */
+    const uint64_t table_flags =
+        PAGE_PRESENT |
+        PAGE_WRITE |
+        PAGE_USER;
 
+    /*
+     * PML4 -> PDPT
+     */
     if (!(pml4[pml4_idx] & PAGE_PRESENT)) {
 
         uint64_t new_pdpt_phys = pmm_alloc_page();
         if (!new_pdpt_phys)
             return -1;
 
-        uint64_t *new_pdpt = (uint64_t*)new_pdpt_phys;
+        uint64_t *new_pdpt = (uint64_t *)new_pdpt_phys;
 
         for (int i = 0; i < 512; i++)
             new_pdpt[i] = 0;
 
         pml4[pml4_idx] =
             (new_pdpt_phys & ~0xFFFULL) |
-            PAGE_PRESENT |
-            PAGE_WRITE |
-            PAGE_USER;
+            table_flags;
+    } else {
+        /*
+         * Для user mapping existing PML4 entry обязан быть USER.
+         */
+        pml4[pml4_idx] |= PAGE_USER;
     }
 
     uint64_t *pdpt =
-        (uint64_t*)(pml4[pml4_idx] & ~0xFFFULL);
+        (uint64_t *)(pml4[pml4_idx] & ~0xFFFULL);
 
-    // ========================================================
-    // PDPT -> PD
-    // ========================================================
-
+    /*
+     * PDPT -> PD
+     */
     if (!(pdpt[pdpt_idx] & PAGE_PRESENT)) {
 
         uint64_t new_pd_phys = pmm_alloc_page();
         if (!new_pd_phys)
             return -1;
 
-        uint64_t *new_pd = (uint64_t*)new_pd_phys;
+        uint64_t *new_pd = (uint64_t *)new_pd_phys;
 
         for (int i = 0; i < 512; i++)
             new_pd[i] = 0;
 
         pdpt[pdpt_idx] =
             (new_pd_phys & ~0xFFFULL) |
-            PAGE_PRESENT |
-            PAGE_WRITE |
-            PAGE_USER;
+            table_flags;
+    } else {
+        pdpt[pdpt_idx] |= PAGE_USER;
     }
 
     uint64_t *pd =
-        (uint64_t*)(pdpt[pdpt_idx] & ~0xFFFULL);
+        (uint64_t *)(pdpt[pdpt_idx] & ~0xFFFULL);
 
-    // ========================================================
-    // SPLIT 2MB HUGE PAGE
-    // ========================================================
-
+    /*
+     * Если существовала huge page, разбиваем её.
+     */
     if (pd[pd_idx] & PAGE_PS) {
 
         uint64_t huge_entry = pd[pd_idx];
@@ -140,22 +148,27 @@ static int map_page_in_space(uint64_t pml4_phys,
             huge_entry & 0x000FFFFFFFE00000ULL;
 
         uint64_t orig_flags =
-            (huge_entry & 0xFFFULL) & ~PAGE_PS;
+            huge_entry & 0xFFFULL;
+
+        orig_flags &= ~PAGE_PS;
 
         uint64_t new_pt_phys = pmm_alloc_page();
         if (!new_pt_phys)
             return -1;
 
-        uint64_t *new_pt = (uint64_t*)new_pt_phys;
+        uint64_t *new_pt = (uint64_t *)new_pt_phys;
 
         for (int j = 0; j < 512; j++) {
-
             new_pt[j] =
                 (phys_2m + j * PAGE_SIZE) |
                 orig_flags |
-                PAGE_PRESENT;
+                PAGE_PRESENT |
+                PAGE_USER;
         }
 
+        /*
+         * Сам PDE тоже должен быть USER.
+         */
         pd[pd_idx] =
             (new_pt_phys & ~0xFFFULL) |
             PAGE_PRESENT |
@@ -163,16 +176,44 @@ static int map_page_in_space(uint64_t pml4_phys,
             PAGE_USER;
     }
 
-    // ========================================================
-    // PT
-    // ========================================================
+    /*
+     * PD -> PT
+     */
+    if (!(pd[pd_idx] & PAGE_PRESENT)) {
+
+        uint64_t new_pt_phys = pmm_alloc_page();
+        if (!new_pt_phys)
+            return -1;
+
+        uint64_t *new_pt = (uint64_t *)new_pt_phys;
+
+        for (int i = 0; i < 512; i++)
+            new_pt[i] = 0;
+
+        pd[pd_idx] =
+            (new_pt_phys & ~0xFFFULL) |
+            table_flags;
+    } else {
+        /*
+         * Для user page PDE обязан иметь USER.
+         */
+        pd[pd_idx] |= PAGE_USER;
+    }
 
     uint64_t *pt =
-        (uint64_t*)(pd[pd_idx] & ~0xFFFULL);
+        (uint64_t *)(pd[pd_idx] & ~0xFFFULL);
+
+    /*
+     * NX находится в bit 63, поэтому его нельзя терять
+     * через (flags & 0xFFF).
+     */
+    uint64_t pte_flags =
+        (flags & 0xFFFULL) |
+        (flags & PAGE_NX);
 
     pt[pt_idx] =
         (phys & ~0xFFFULL) |
-        (flags & 0xFFFULL) |
+        pte_flags |
         PAGE_PRESENT;
 
     return 0;

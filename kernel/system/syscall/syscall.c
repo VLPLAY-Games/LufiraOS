@@ -221,14 +221,9 @@ static syscall_fn_t syscall_table[256] = {
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
 
 void syscall_init(void) {
-    // 0x08 — Kernel Code (Ring 0)
-    // 0x1B — База для User Mode (Слот 3 в GDT = 0x18, плюс RPL 3 = 0x1B)
-    uint16_t kernel_cs = 0x08;
-    uint16_t user_base_cs = 0x18 | 3; // Обязательно выставляем RPL 3!
-
-    uint64_t star = ((uint64_t)kernel_cs << 32) | 
-                    ((uint64_t)user_base_cs << 48);
-
+    // STAR MSR: kernel CS (47:32) и user CS (63:48)
+    uint64_t star = ((uint64_t)GDT_KERNEL_CODE << 32) | 
+                    ((uint64_t)0x30 << 48);
     asm volatile("wrmsr" : : "c"(0xC0000081), "a"((uint32_t)star), 
                  "d"((uint32_t)(star >> 32)));
     

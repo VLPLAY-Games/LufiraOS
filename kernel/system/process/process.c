@@ -14,6 +14,7 @@ static void *memset(void *s, int c, size_t n) {
 
 static process_t *process_list = NULL;
 process_t *current_process = NULL;
+uint64_t current_kernel_rsp = 0; // Глобальная переменная для asm
 static uint32_t next_pid = 1;
 static process_t *idle_process = NULL;
 uint64_t kernel_cr3 = 0;
@@ -328,77 +329,25 @@ process_t* process_create(const char *name, void (*entry)(void)) {
 
 void process_exit(void) {
     process_t *exiting_process = current_process;
-    
-    printf("\n[PROCESS] Process %u ('%s') exiting\n", 
-           exiting_process->pid, exiting_process->name);
-    
-    irq_disable();
-    
+
+    if (!exiting_process) {
+        while (1)
+            asm volatile("hlt");
+    }
+
+    printf("\n[PROCESS] Process %u ('%s') exiting\n",
+           exiting_process->pid,
+           exiting_process->name);
+
     exiting_process->state = PROCESS_TERMINATED;
-    current_process = NULL;
-    
-    // Освобождаем пользовательский стек
-    if (exiting_process->stack_base > 0 && exiting_process->stack_size > 0) {
-        uint64_t stack_start = exiting_process->stack_base - exiting_process->stack_size;
-        size_t num_pages = exiting_process->stack_size / PAGE_SIZE;
-        
-        uint64_t old_cr3;
-        asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
-        asm volatile("mov %0, %%cr3" : : "r"(exiting_process->page_table) : "memory");
-        
-        for (size_t i = 0; i < num_pages; i++) {
-            uint64_t virt = stack_start + i * PAGE_SIZE;
-            uint64_t phys = get_physical_address(virt);
-            if (phys) {
-                unmap_page(virt);
-                pmm_free_page(phys);
-            }
-        }
-        
-        asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
-    }
-    
-    // Освобождаем Ring 0 стек
-    if (exiting_process->ring0_stack_pages) {
-        free_ring0_stack(exiting_process);
-    }
-    
-    // Освобождаем PML4 и все таблицы user-space
-    if (exiting_process->page_table != kernel_cr3 && exiting_process->page_table != 0) {
-        uint64_t pml4_phys = exiting_process->page_table;
-        uint64_t *pml4 = (uint64_t*)pml4_phys;
-        
-        for (int i = 0; i < 256; i++) {  // Только user space
-            if (pml4[i] & PAGE_PRESENT) {
-                uint64_t pdpt_phys = pml4[i] & 0x000FFFFFFFFFF000ULL;
-                uint64_t *pdpt = (uint64_t*)pdpt_phys;
-                
-                for (int j = 0; j < 512; j++) {
-                    if (pdpt[j] & PAGE_PRESENT) {
-                        uint64_t pd_phys = pdpt[j] & 0x000FFFFFFFFFF000ULL;
-                        uint64_t *pd = (uint64_t*)pd_phys;
-                        
-                        for (int k = 0; k < 512; k++) {
-                            if (pd[k] & PAGE_PRESENT && !(pd[k] & PAGE_HUGE)) {
-                                uint64_t pt_phys = pd[k] & 0x000FFFFFFFFFF000ULL;
-                                pmm_free_page(pt_phys);
-                            }
-                        }
-                        pmm_free_page(pd_phys);
-                    }
-                }
-                pmm_free_page(pdpt_phys);
-            }
-        }
-        pmm_free_page(pml4_phys);
-        exiting_process->page_table = 0;
-    }
-    
+
     schedule();
-    
-    while (1) {
+
+    /*
+     * Если сюда вернулись — что-то пошло не так.
+     */
+    while (1)
         asm volatile("hlt");
-    }
 }
 
 void process_reap(void) {
@@ -467,36 +416,44 @@ void process_reap(void) {
 }
 
 void schedule(void) {
-    uint64_t rflags;
-    asm volatile("pushfq; pop %0" : "=r"(rflags));
-    if (!(rflags & 0x200)) {
-        return;
-    }
-    
+    /*
+     * Scheduler должен уметь работать и при IF=0.
+     *
+     * Это особенно важно для process_exit(), syscall handler
+     * и interrupt context.
+     */
+
     irq_disable();
-    
-    process_reap();
-    
+
     if (current_process == NULL && process_list != NULL) {
         current_process = process_list;
     }
-    
+
     if (current_process == NULL) {
         irq_enable();
         return;
     }
-    
+
     process_t *next = current_process->next;
+
     int tries = 0;
     const int MAX_TRIES = 100;
-    
-    while (next && (next->state != PROCESS_READY) && tries < MAX_TRIES) {
+
+    while (next &&
+           next->state != PROCESS_READY &&
+           tries < MAX_TRIES)
+    {
         next = next->next;
         tries++;
-        if (next == current_process) break;
+
+        if (next == current_process)
+            break;
     }
-    
-    if (!next || next->state != PROCESS_READY || tries >= MAX_TRIES) {
+
+    if (!next ||
+        next->state != PROCESS_READY ||
+        tries >= MAX_TRIES)
+    {
         if (idle_process && idle_process != current_process) {
             next = idle_process;
         } else {
@@ -504,14 +461,21 @@ void schedule(void) {
             return;
         }
     }
-    
+
     if (next == current_process) {
         irq_enable();
         return;
     }
-    
+
     switch_to_process(next);
-    
+
+    /*
+     * В нормальном случае после switch_to_process()
+     * этот код не выполняется сразу.
+     *
+     * Он продолжится тогда, когда старый процесс
+     * будет снова выбран scheduler'ом.
+     */
     irq_enable();
 }
 
@@ -535,6 +499,9 @@ void switch_to_process(process_t *next) {
     current_process = next;
     
     process_context_t *prev_context = (prev && prev != next) ? &prev->context : &idle_process->context;
+
+    current_process = next;
+    current_kernel_rsp = next->ring0_stack;
     
     context_switch(prev_context, &next->context);
 }
