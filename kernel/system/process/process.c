@@ -329,74 +329,47 @@ process_t* process_create(const char *name, void (*entry)(void)) {
 
 void process_exit(void) {
     process_t *exiting_process = current_process;
-    
-    printf("\n[PROCESS] Process %u ('%s') exiting\n", 
-           exiting_process->pid, exiting_process->name);
-    
+
+    if (!exiting_process) {
+        while (1)
+            asm volatile("hlt");
+    }
+
+    printf("\n[PROCESS] Process %u ('%s') exiting\n",
+           exiting_process->pid,
+           exiting_process->name);
+
+    /*
+     * НИЧЕГО НЕ ОСВОБОЖДАЕМ ЗДЕСЬ.
+     *
+     * Мы всё ещё выполняемся на ring0 stack этого процесса.
+     *
+     * Нельзя:
+     *   - освобождать ring0 stack;
+     *   - освобождать его PML4;
+     *   - уничтожать page tables.
+     *
+     * Только помечаем процесс завершённым.
+     */
+
     irq_disable();
-    
+
     exiting_process->state = PROCESS_TERMINATED;
-    current_process = NULL;
-    
-    // Освобождаем пользовательский стек
-    if (exiting_process->stack_base > 0 && exiting_process->stack_size > 0) {
-        uint64_t stack_start = exiting_process->stack_base - exiting_process->stack_size;
-        size_t num_pages = exiting_process->stack_size / PAGE_SIZE;
-        
-        uint64_t old_cr3;
-        asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
-        asm volatile("mov %0, %%cr3" : : "r"(exiting_process->page_table) : "memory");
-        
-        for (size_t i = 0; i < num_pages; i++) {
-            uint64_t virt = stack_start + i * PAGE_SIZE;
-            uint64_t phys = get_physical_address(virt);
-            if (phys) {
-                unmap_page(virt);
-                pmm_free_page(phys);
-            }
-        }
-        
-        asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
-    }
-    
-    // Освобождаем Ring 0 стек
-    if (exiting_process->ring0_stack_pages) {
-        free_ring0_stack(exiting_process);
-    }
-    
-    // Освобождаем PML4 и все таблицы user-space
-    if (exiting_process->page_table != kernel_cr3 && exiting_process->page_table != 0) {
-        uint64_t pml4_phys = exiting_process->page_table;
-        uint64_t *pml4 = (uint64_t*)pml4_phys;
-        
-        for (int i = 0; i < 256; i++) {  // Только user space
-            if (pml4[i] & PAGE_PRESENT) {
-                uint64_t pdpt_phys = pml4[i] & 0x000FFFFFFFFFF000ULL;
-                uint64_t *pdpt = (uint64_t*)pdpt_phys;
-                
-                for (int j = 0; j < 512; j++) {
-                    if (pdpt[j] & PAGE_PRESENT) {
-                        uint64_t pd_phys = pdpt[j] & 0x000FFFFFFFFFF000ULL;
-                        uint64_t *pd = (uint64_t*)pd_phys;
-                        
-                        for (int k = 0; k < 512; k++) {
-                            if (pd[k] & PAGE_PRESENT && !(pd[k] & PAGE_HUGE)) {
-                                uint64_t pt_phys = pd[k] & 0x000FFFFFFFFFF000ULL;
-                                pmm_free_page(pt_phys);
-                            }
-                        }
-                        pmm_free_page(pd_phys);
-                    }
-                }
-                pmm_free_page(pdpt_phys);
-            }
-        }
-        pmm_free_page(pml4_phys);
-        exiting_process->page_table = 0;
-    }
-    
+
+    /*
+     * Передаём управление scheduler.
+     *
+     * ВАЖНО:
+     * current_process оставляем как exiting_process.
+     *
+     * schedule() увидит TERMINATED и переключится
+     * на следующий READY процесс.
+     */
     schedule();
-    
+
+    /*
+     * Сюда нормальный процесс больше не должен вернуться.
+     */
     while (1) {
         asm volatile("hlt");
     }
@@ -470,49 +443,78 @@ void process_reap(void) {
 void schedule(void) {
     uint64_t rflags;
     asm volatile("pushfq; pop %0" : "=r"(rflags));
+
     if (!(rflags & 0x200)) {
         return;
     }
-    
+
     irq_disable();
-    
-    process_reap();
-    
+
+    /*
+     * Сначала выбираем следующий процесс.
+     * Никакого reap до context switch.
+     */
+
     if (current_process == NULL && process_list != NULL) {
         current_process = process_list;
     }
-    
+
     if (current_process == NULL) {
         irq_enable();
         return;
     }
-    
+
     process_t *next = current_process->next;
+
     int tries = 0;
     const int MAX_TRIES = 100;
-    
-    while (next && (next->state != PROCESS_READY) && tries < MAX_TRIES) {
+
+    while (next &&
+           next->state != PROCESS_READY &&
+           tries < MAX_TRIES)
+    {
         next = next->next;
         tries++;
-        if (next == current_process) break;
+
+        if (next == current_process)
+            break;
     }
-    
-    if (!next || next->state != PROCESS_READY || tries >= MAX_TRIES) {
-        if (idle_process && idle_process != current_process) {
+
+    if (!next ||
+        next->state != PROCESS_READY ||
+        tries >= MAX_TRIES)
+    {
+        if (idle_process &&
+            idle_process != current_process)
+        {
             next = idle_process;
-        } else {
+        }
+        else
+        {
             irq_enable();
             return;
         }
     }
-    
+
     if (next == current_process) {
         irq_enable();
         return;
     }
-    
+
+    /*
+     * Сейчас происходит реальный уход с ring0 stack
+     * завершившегося процесса.
+     */
     switch_to_process(next);
-    
+
+    /*
+     * После switch_to_process execution продолжится
+     * уже в контексте следующего процесса,
+     * когда его контекст будет активирован.
+     *
+     * До этого места НЕ пытаемся освобождать prev.
+     */
+
     irq_enable();
 }
 
