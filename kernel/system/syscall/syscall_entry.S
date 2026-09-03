@@ -1,49 +1,26 @@
 .section .text
 
+.section .bss
+.global user_rsp_save
+user_rsp_save: .quad 0
+.section .text
+
+.extern current_kernel_rsp
+
 .global syscall_entry
 .type syscall_entry, @function
 
-#
-# x86_64 syscall entry
-#
-# Вход от инструкции syscall:
-#
-#   RAX = syscall number
-#   RDI = arg1
-#   RSI = arg2
-#   RDX = arg3
-#   R10 = arg4
-#   R8  = arg5
-#   R9  = arg6
-#
-# RCX = user RIP
-# R11 = user RFLAGS
-#
-# SysV ABI для syscall_handler:
-#
-#   RDI = syscall number
-#   RSI = arg1
-#   RDX = arg2
-#   RCX = arg3
-#   R8  = arg4
-#   R9  = arg5
-#
-# Возврат:
-#   RAX = результат syscall
-#
-
 syscall_entry:
-    #
-    # Сохраняем user context
-    #
+    # Сохраняем user RSP
+    mov %rsp, %rbx
+    mov %rbx, user_rsp_save(%rip)
 
+    # Переключаемся на kernel stack
+    mov current_kernel_rsp(%rip), %rsp
+
+    # Сохраняем user context
     pushq %rcx                # user RIP
     pushq %r11                # user RFLAGS
-
-    #
-    # Сохраняем регистры,
-    # которые хотим восстановить после syscall
-    #
 
     pushq %rbx
     pushq %rbp
@@ -51,10 +28,6 @@ syscall_entry:
     pushq %r13
     pushq %r14
     pushq %r15
-
-    #
-    # Сохраняем syscall arguments
-    #
 
     pushq %rax                # syscall number
     pushq %rdi                # arg1
@@ -64,25 +37,7 @@ syscall_entry:
     pushq %r8                 # arg5
     pushq %r9                 # arg6
 
-    #
-    # После 15 push стек misaligned на 8 байт.
-    # Перед call нужен 16-byte alignment.
-    #
-
     subq $8, %rsp
-
-    #
-    # Готовим аргументы для syscall_handler
-    #
-    # syscall_handler(
-    #     syscall_num,
-    #     arg1,
-    #     arg2,
-    #     arg3,
-    #     arg4,
-    #     arg5
-    # )
-    #
 
     movq 56(%rsp), %rdi       # syscall number
     movq 48(%rsp), %rsi       # arg1
@@ -91,21 +46,9 @@ syscall_entry:
     movq 24(%rsp), %r8        # arg4
     movq 16(%rsp), %r9        # arg5
 
-    #
-    # Вызываем C handler
-    #
-
     call syscall_handler
 
-    #
-    # Убираем alignment padding
-    #
-
     addq $8, %rsp
-
-    #
-    # Восстанавливаем сохранённые syscall registers
-    #
 
     popq %r9
     popq %r8
@@ -114,16 +57,7 @@ syscall_entry:
     popq %rsi
     popq %rdi
 
-    #
-    # НЕ восстанавливаем старый RAX,
-    # потому что syscall return value должен остаться в RAX
-    #
-
-    addq $8, %rsp             # пропускаем сохранённый syscall number
-
-    #
-    # Восстанавливаем callee-saved registers
-    #
+    addq $8, %rsp             # пропускаем syscall number
 
     popq %r15
     popq %r14
@@ -132,17 +66,18 @@ syscall_entry:
     popq %rbp
     popq %rbx
 
-    #
-    # Восстанавливаем user state для sysretq
-    #
-
     popq %r11                 # user RFLAGS
     popq %rcx                 # user RIP
 
-    #
-    # Возврат в usermode
-    #
+    # Восстанавливаем user RSP
+    mov user_rsp_save(%rip), %rsp
 
-    sysretq
+    # Формируем стек для iretq
+    pushq $0x2B               # user SS (данные)
+    pushq user_rsp_save(%rip) # user RSP
+    pushq %r11                # user RFLAGS
+    pushq $0x33               # user CS
+    pushq %rcx                # user RIP
+    iretq
 
 .size syscall_entry, .-syscall_entry

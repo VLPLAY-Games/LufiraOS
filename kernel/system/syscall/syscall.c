@@ -223,7 +223,7 @@ static syscall_fn_t syscall_table[256] = {
 void syscall_init(void) {
     // STAR MSR: kernel CS (47:32) и user CS (63:48)
     uint64_t star = ((uint64_t)GDT_KERNEL_CODE << 32) | 
-                    ((uint64_t)GDT_USER_CODE << 48);
+                    ((uint64_t)0x30 << 48);
     asm volatile("wrmsr" : : "c"(0xC0000081), "a"((uint32_t)star), 
                  "d"((uint32_t)(star >> 32)));
     

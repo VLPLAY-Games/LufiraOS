@@ -14,6 +14,7 @@ static void *memset(void *s, int c, size_t n) {
 
 static process_t *process_list = NULL;
 process_t *current_process = NULL;
+uint64_t current_kernel_rsp = 0; // Глобальная переменная для asm
 static uint32_t next_pid = 1;
 static process_t *idle_process = NULL;
 uint64_t kernel_cr3 = 0;
@@ -535,6 +536,9 @@ void switch_to_process(process_t *next) {
     current_process = next;
     
     process_context_t *prev_context = (prev && prev != next) ? &prev->context : &idle_process->context;
+
+    current_process = next;
+    current_kernel_rsp = next->ring0_stack;
     
     context_switch(prev_context, &next->context);
 }
