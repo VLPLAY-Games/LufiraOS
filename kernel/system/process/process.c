@@ -441,19 +441,14 @@ void process_reap(void) {
 }
 
 void schedule(void) {
-    uint64_t rflags;
-    asm volatile("pushfq; pop %0" : "=r"(rflags));
-
-    if (!(rflags & 0x200)) {
-        return;
-    }
+    /*
+     * Scheduler должен уметь работать и при IF=0.
+     *
+     * Это особенно важно для process_exit(), syscall handler
+     * и interrupt context.
+     */
 
     irq_disable();
-
-    /*
-     * Сначала выбираем следующий процесс.
-     * Никакого reap до context switch.
-     */
 
     if (current_process == NULL && process_list != NULL) {
         current_process = process_list;
@@ -484,13 +479,9 @@ void schedule(void) {
         next->state != PROCESS_READY ||
         tries >= MAX_TRIES)
     {
-        if (idle_process &&
-            idle_process != current_process)
-        {
+        if (idle_process && idle_process != current_process) {
             next = idle_process;
-        }
-        else
-        {
+        } else {
             irq_enable();
             return;
         }
@@ -501,20 +492,15 @@ void schedule(void) {
         return;
     }
 
-    /*
-     * Сейчас происходит реальный уход с ring0 stack
-     * завершившегося процесса.
-     */
     switch_to_process(next);
 
     /*
-     * После switch_to_process execution продолжится
-     * уже в контексте следующего процесса,
-     * когда его контекст будет активирован.
+     * В нормальном случае после switch_to_process()
+     * этот код не выполняется сразу.
      *
-     * До этого места НЕ пытаемся освобождать prev.
+     * Он продолжится тогда, когда старый процесс
+     * будет снова выбран scheduler'ом.
      */
-
     irq_enable();
 }
 
