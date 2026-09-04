@@ -168,14 +168,14 @@ static unsigned char full_font_data[][8] = {
 
 // ==================== CONSOLE SCROLLBACK ====================
 
-#define CONSOLE_HISTORY_LINES 1000
+#define CONSOLE_HISTORY_LINES 64
 #define CONSOLE_MAX_COLUMNS   256
 #define CONSOLE_LINE_HEIGHT   (CHAR_HEIGHT + CHAR_PADDING_Y)
 
 typedef struct {
     char ch;
-    uint32_t fg;
-    uint32_t bg;
+    uint8_t fg;
+    uint8_t bg;
 } console_history_cell_t;
 
 static console_history_cell_t
@@ -999,8 +999,8 @@ void set_cursor_position(uint32_t x, uint32_t y) {
 static void history_clear_line(uint32_t index) {
     for (uint32_t i = 0; i < CONSOLE_MAX_COLUMNS; i++) {
         console_history[index][i].ch = ' ';
-        console_history[index][i].fg = current_color;
-        console_history[index][i].bg = current_bg_color;
+        console_history[index][i].fg = current_colors.fg_index;
+        console_history[index][i].bg = current_colors.bg_index;
     }
 }
 
@@ -1057,8 +1057,8 @@ static void history_set_visible_char(uint32_t x, uint32_t y, char c) {
     uint32_t index = history_get_index(logical_line);
 
     console_history[index][x].ch = c;
-    console_history[index][x].fg = current_color;
-    console_history[index][x].bg = current_bg_color;
+    console_history[index][x].fg = current_colors.fg_index;
+    console_history[index][x].bg = current_colors.bg_index;
 }
 
 static void history_render_line(uint32_t screen_y, uint32_t logical_line) {
@@ -1102,8 +1102,8 @@ static void history_render_line(uint32_t screen_y, uint32_t logical_line) {
             c,
             x,
             screen_y,
-            cell->fg,
-            cell->bg
+            get_color_from_palette(cell->fg),
+            get_color_from_palette(cell->bg)
         );
     }
 
