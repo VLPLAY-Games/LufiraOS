@@ -1,14 +1,26 @@
 ENTRY(_start)
 
-SECTIONS {
+SECTIONS
+{
     . = 0x100000;
-    
+
     .text : {
-        *(.text.prologue) /* Сначала точка входа */
+        *(.text.prologue)
         *(.text)
     }
-    
-    .rodata : { *(.rodata*) }
-    .data   : { *(.data*) }
-    .bss    : { *(.bss*) *(COMMON) }
+
+    .rodata : {
+        *(.rodata*)
+    }
+
+    .data : {
+        *(.data*)
+    }
+
+    .bss : {
+        *(.bss*)
+        *(COMMON)
+    }
+
+    __kernel_end = .;
 }

@@ -32,11 +32,6 @@ EFI_STATUS LoadKernel(BootInfo *bi, EFI_HANDLE ImageHandle, BOOLEAN animateSpinn
     status = uefi_call_wrapper(gBS->AllocatePages, 4,
         AllocateAddress, EfiLoaderData, Pages, &KernelBase);
     
-    if (EFI_ERROR(status)) {
-        status = uefi_call_wrapper(gBS->AllocatePages, 4,
-            AllocateAnyPages, EfiLoaderData, Pages, &KernelBase);
-    }
-    
     if (EFI_ERROR(status)) return status;
     
     bi->KernelBase = KernelBase;

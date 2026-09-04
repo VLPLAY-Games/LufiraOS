@@ -168,7 +168,7 @@ static unsigned char full_font_data[][8] = {
 
 // ==================== CONSOLE SCROLLBACK ====================
 
-#define CONSOLE_HISTORY_LINES 64
+#define CONSOLE_HISTORY_LINES 256
 #define CONSOLE_MAX_COLUMNS   256
 #define CONSOLE_LINE_HEIGHT   (CHAR_HEIGHT + CHAR_PADDING_Y)
 

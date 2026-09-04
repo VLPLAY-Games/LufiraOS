@@ -13,7 +13,7 @@ BUILD_DIR := build
 BOOTLOADER_DIR := boot
 KERNEL_DIR := kernel
 
-REQUIRED_TOOLS := gcc ld objcopy dd mkfs.fat mmd mcopy qemu-system-x86_64
+REQUIRED_TOOLS := gcc ld objcopy nm truncate dd mkfs.fat mmd mcopy qemu-system-x86_64
 $(foreach tool,$(REQUIRED_TOOLS),\
     $(if $(shell which $(tool) 2>/dev/null),,\
         $(error "Required tool '$(tool)' not found in PATH")))
@@ -138,6 +138,11 @@ $(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(KERNEL_DIR)/linker.ld
 $(BUILD_DIR)/kernel.bin: $(BUILD_DIR)/kernel.elf
 	@echo "  OBJCOPY $@"
 	$(OBJCOPY) -O binary $< $@
+	@KERNEL_END=$$(nm $(BUILD_DIR)/kernel.elf | awk '$$3=="__kernel_end"{print $$1}'); \
+	KERNEL_SIZE=$$((0x$$KERNEL_END - 0x100000)); \
+	echo "  Kernel runtime size: $$KERNEL_SIZE bytes"; \
+	echo "  Kernel end: 0x$$KERNEL_END"; \
+	truncate -s $$KERNEL_SIZE $@
 
 $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin
 	@echo "=== Creating disk image ==="
@@ -173,7 +178,7 @@ run: $(BUILD_DIR)/disk.img
 	qemu-system-x86_64 \
 		-bios /usr/share/ovmf/OVMF.fd \
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
-		-m 64M \
+		-m 128M \
 		-net none \
 		-machine pcspk-audiodev=audio \
 		-audiodev driver=alsa,id=audio \
