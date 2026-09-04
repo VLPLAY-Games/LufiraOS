@@ -21,6 +21,7 @@ $(foreach tool,$(REQUIRED_TOOLS),\
 $(shell mkdir -p $(BUILD_DIR) \
     $(BUILD_DIR)/boot \
     $(BUILD_DIR)/kernel/lib \
+	$(BUILD_DIR)/kernel/drivers/pci \
     $(BUILD_DIR)/kernel/drivers/console \
     $(BUILD_DIR)/kernel/drivers/keyboard \
 	$(BUILD_DIR)/kernel/drivers/sound \
@@ -63,6 +64,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/kernel.c \
     $(KERNEL_DIR)/lib/string.c \
     $(KERNEL_DIR)/lib/cpu.c \
+	$(KERNEL_DIR)/drivers/pci/pci.c \
     $(KERNEL_DIR)/drivers/console/console.c \
     $(KERNEL_DIR)/drivers/keyboard/keyboard.c \
     $(KERNEL_DIR)/drivers/mouse/mouse.c \

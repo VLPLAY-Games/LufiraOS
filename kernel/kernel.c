@@ -4,6 +4,7 @@
 #include "system/mm/pmm.h"
 #include "system/mm/paging.h"
 #include "system/mm/heap.h"
+#include "drivers/pci/pci.h"
 #include "drivers/keyboard/keyboard.h"
 #include "drivers/mouse/mouse.h"
 #include "drivers/console/console.h"
@@ -211,6 +212,8 @@ void _start(BootInfo* bi) {
     LOG_DONE_OK("Mouse %s", mouse_is_initialized() ? "ready" : "not found");
 
     pcspeaker_init();
+
+    pci_init();
     
     asm volatile("sti");
     irq_enable(0);  // таймер
