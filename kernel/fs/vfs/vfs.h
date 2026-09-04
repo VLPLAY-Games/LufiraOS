@@ -18,6 +18,12 @@ typedef enum {
     FT_SYMLINK = 5
 } file_type_t;
 
+typedef struct vfs_dirent {
+    uint32_t ino;
+    file_type_t type;
+    char name[256];
+} vfs_dirent_t;
+
 #define O_RDONLY  0
 #define O_WRONLY  1
 #define O_RDWR    2
@@ -92,6 +98,8 @@ inode_t* vfs_create_inode(uint32_t ino, file_type_t type,
                            inode_ops_t *ops, void *private_data);
 void vfs_register_dev(const char *name, file_ops_t *fops, file_type_t type);
 int alloc_fd(void);
+int vfs_create(const char *path);
+int vfs_unlink(const char *path);
 
 // Exported globals
 extern file_t *file_table[];

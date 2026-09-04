@@ -486,95 +486,385 @@ static fat_dir_entry_t* find_free_dir_entry(fat_fs_t *fs, uint32_t parent_cluste
 }
 
 /* ---------- Создание/удаление объектов ---------- */
-int fat_mkdir(fat_fs_t *fs, uint32_t parent_cluster, const char *name) {
-    if (!name || !*name) return -1;
+int fat_mkdir(fat_fs_t *fs,
+              uint32_t parent_cluster,
+              const char *name)
+{
+    if (!fs || !name || !*name)
+        return -1;
+
+    if (name[0] == '.')
+        return -1;
+
     char sname[11];
     to_short_name(name, sname);
 
-    fat_dir_entry_t *existing = find_entry_in_dir(fs, parent_cluster, sname,
-                                (parent_cluster == 0 && fs->fat_type != 32) ? 1 : 0);
-    if (existing) return -2;
+    /*
+     * Проверяем существование.
+     */
+    fat_dir_entry_t *existing =
+        find_entry_in_dir(
+            fs,
+            parent_cluster,
+            sname,
+            (parent_cluster == 0 &&
+             fs->fat_type != 32)
+                ? 1
+                : 0
+        );
 
+    if (existing)
+        return -2;
+
+    /*
+     * Свободная dir entry.
+     */
     fat_dir_entry_t *next_entry = NULL;
-    fat_dir_entry_t *free_entry = find_free_dir_entry(fs, parent_cluster, &next_entry);
-    if (!free_entry) return -3;
 
-    uint32_t new_cluster = find_free_cluster(fs);
-    if (!new_cluster) return -4;
+    fat_dir_entry_t *free_entry =
+        find_free_dir_entry(
+            fs,
+            parent_cluster,
+            &next_entry
+        );
 
-    if (fs->fat_type == 32)
-        set_fat_entry(fs, new_cluster, 0x0FFFFFFF);
-    else
+    if (!free_entry)
+        return -3;
+
+    /*
+     * Выделяем кластер каталога.
+     */
+    uint32_t new_cluster =
+        find_free_cluster(fs);
+
+    if (!new_cluster)
+        return -4;
+
+    /*
+     * Помечаем как EOC.
+     */
+    if (fs->fat_type == 12)
+        set_fat_entry(fs, new_cluster, 0xFFF);
+    else if (fs->fat_type == 16)
         set_fat_entry(fs, new_cluster, 0xFFFF);
+    else
+        set_fat_entry(fs, new_cluster, 0x0FFFFFFF);
 
-    uint8_t *data = (uint8_t*)cluster_to_sector(fs, new_cluster);
-    memset(data, 0, 512 * fs->cluster_size);
-    mark_cluster_dirty(fs, new_cluster);
+    /*
+     * Очищаем каталог.
+     */
+    uint8_t *data =
+        (uint8_t*)cluster_to_sector(
+            fs,
+            new_cluster
+        );
 
-    fat_dir_entry_t *dot = (fat_dir_entry_t*)data;
+    if (!data) {
+        set_fat_entry(fs, new_cluster, 0);
+        return -5;
+    }
+
+    memset(data,
+           0,
+           fs->cluster_size * 512);
+
+    /*
+     * "."
+     */
+    fat_dir_entry_t *dot =
+        (fat_dir_entry_t*)data;
+
     memset(dot->name, ' ', 11);
+
     dot->name[0] = '.';
     dot->attr = 0x10;
-    write_le16((uint8_t*)&dot->first_cluster_low, new_cluster & 0xFFFF);
 
-    fat_dir_entry_t *dotdot = (fat_dir_entry_t*)(data + 32);
-    memset(dotdot->name, ' ', 11);
-    dotdot->name[0] = '.'; dotdot->name[1] = '.';
-    dotdot->attr = 0x10;
-    write_le16((uint8_t*)&dotdot->first_cluster_low, parent_cluster & 0xFFFF);
+    write_le16(
+        (uint8_t*)&dot->first_cluster_low,
+        new_cluster & 0xFFFF
+    );
 
-    memset(free_entry, 0, sizeof(fat_dir_entry_t));
-    memcpy(free_entry->name, sname, 11);
-    free_entry->attr = 0x10;
-    write_le16((uint8_t*)&free_entry->first_cluster_low, new_cluster & 0xFFFF);
-    write_le32((uint8_t*)&free_entry->file_size, 0);
-
-    uint32_t parent_lba;
-    if (parent_cluster == 0 && fs->fat_type != 32) {
-        parent_lba = fs->root_dir_start + ((uint8_t*)free_entry - (fs->image + fs->root_dir_start*512))/512;
-    } else {
-        parent_lba = fs->data_start + (parent_cluster - 2) * fs->cluster_size
-                     + ((uint8_t*)free_entry - cluster_to_sector(fs, parent_cluster))/512;
+    if (fs->fat_type == 32) {
+        write_le16(
+            (uint8_t*)&dot->first_cluster_high,
+            (new_cluster >> 16) & 0xFFFF
+        );
     }
+
+    /*
+     * ".."
+     */
+    fat_dir_entry_t *dotdot =
+        (fat_dir_entry_t*)(data + 32);
+
+    memset(dotdot->name, ' ', 11);
+
+    dotdot->name[0] = '.';
+    dotdot->name[1] = '.';
+    dotdot->attr = 0x10;
+
+    write_le16(
+        (uint8_t*)&dotdot->first_cluster_low,
+        parent_cluster & 0xFFFF
+    );
+
+    if (fs->fat_type == 32) {
+        write_le16(
+            (uint8_t*)&dotdot->first_cluster_high,
+            (parent_cluster >> 16) & 0xFFFF
+        );
+    }
+
+    /*
+     * Реальная directory entry.
+     */
+    memset(free_entry,
+           0,
+           sizeof(fat_dir_entry_t));
+
+    memcpy(free_entry->name,
+           sname,
+           11);
+
+    free_entry->attr = 0x10;
+
+    write_le16(
+        (uint8_t*)&free_entry->first_cluster_low,
+        new_cluster & 0xFFFF
+    );
+
+    if (fs->fat_type == 32) {
+        write_le16(
+            (uint8_t*)&free_entry->first_cluster_high,
+            (new_cluster >> 16) & 0xFFFF
+        );
+    }
+
+    write_le32(
+        (uint8_t*)&free_entry->file_size,
+        0
+    );
+
+    /*
+     * Dirty.
+     */
+    uint32_t parent_lba;
+
+    if (parent_cluster == 0 &&
+        fs->fat_type != 32)
+    {
+        parent_lba =
+            fs->root_dir_start +
+            (
+                (
+                    (uint8_t*)free_entry -
+                    (
+                        fs->image +
+                        fs->root_dir_start * 512
+                    )
+                ) / 512
+            );
+    }
+    else
+    {
+        parent_lba =
+            fs->data_start +
+            (parent_cluster - 2) *
+                fs->cluster_size +
+            (
+                (
+                    (uint8_t*)free_entry -
+                    cluster_to_sector(
+                        fs,
+                        parent_cluster
+                    )
+                ) / 512
+            );
+    }
+
     fat_mark_sector_dirty(fs, parent_lba);
 
-    if (next_entry && next_entry->name[0] != 0x00)
+    /*
+     * Если использовалась последняя запись старого
+     * конца каталога — сохраняем новый конец.
+     */
+    if (next_entry &&
+        next_entry->name[0] != 0x00)
+    {
         next_entry->name[0] = 0x00;
+    }
 
     return 0;
 }
 
-int fat_rm(fat_fs_t *fs, uint32_t parent_cluster, const char *name) {
-    if (!name || !*name) return -1;
+int fat_rm(fat_fs_t *fs,
+           uint32_t parent_cluster,
+           const char *name)
+{
+    if (!fs || !name || !*name)
+        return -1;
+
+    if (strcmp(name, ".") == 0 ||
+        strcmp(name, "..") == 0)
+    {
+        return -3;
+    }
+
     char sname[11];
     to_short_name(name, sname);
 
-    fat_dir_entry_t *entry = find_entry_in_dir(fs, parent_cluster, sname,
-                             (parent_cluster == 0 && fs->fat_type != 32) ? 1 : 0);
-    if (!entry) return -2;
-    if (entry->name[0] == '.' && entry->name[1] == ' ') return -3;
+    fat_dir_entry_t *entry =
+        find_entry_in_dir(
+            fs,
+            parent_cluster,
+            sname,
+            (parent_cluster == 0 &&
+             fs->fat_type != 32)
+                ? 1
+                : 0
+        );
 
-    uint32_t cluster = read_le16((const uint8_t*)&entry->first_cluster_low);
-    if (entry->attr & 0x10) {
-        uint8_t *data = (uint8_t*)cluster_to_sector(fs, cluster);
-        uint32_t epc = (fs->cluster_size * 512) / 32;
-        for (uint32_t i = 2; i < epc; i++) {
-            fat_dir_entry_t *e = (fat_dir_entry_t*)(data + i*32);
-            if (e->name[0] != 0x00 && e->name[0] != 0xE5) return -4;
-        }
-        free_cluster_chain(fs, cluster);
-    } else {
-        free_cluster_chain(fs, cluster);
+    if (!entry)
+        return -2;
+
+    uint16_t low =
+        read_le16(
+            (const uint8_t*)&entry->first_cluster_low
+        );
+
+    uint16_t high = 0;
+
+    if (fs->fat_type == 32) {
+        high =
+            read_le16(
+                (const uint8_t*)&entry->first_cluster_high
+            );
     }
+
+    uint32_t cluster =
+        ((uint32_t)high << 16) | low;
+
+    /*
+     * Каталог?
+     */
+    if (entry->attr & 0x10) {
+
+        /*
+         * Проверяем ВСЮ цепочку каталога.
+         */
+        uint32_t dir_cluster = cluster;
+
+        while (dir_cluster >= 2) {
+
+            uint8_t *data =
+                (uint8_t*)cluster_to_sector(
+                    fs,
+                    dir_cluster
+                );
+
+            if (!data)
+                return -4;
+
+            uint32_t epc =
+                (fs->cluster_size * 512) / 32;
+
+            for (uint32_t i = 0; i < epc; i++) {
+
+                fat_dir_entry_t *e =
+                    (fat_dir_entry_t*)
+                    (data + i * 32);
+
+                if (e->name[0] == 0x00)
+                    break;
+
+                if (e->name[0] == 0xE5 ||
+                    e->attr == 0x0F)
+                {
+                    continue;
+                }
+
+                /*
+                 * "." и ".." разрешены.
+                 */
+                if (e->name[0] == '.' &&
+                    (e->name[1] == ' ' ||
+                     e->name[1] == '.'))
+                {
+                    continue;
+                }
+
+                /*
+                 * Нашли реальный объект.
+                 */
+                return -4;
+            }
+
+            uint32_t next =
+                get_fat_entry(
+                    fs,
+                    dir_cluster
+                );
+
+            if (is_eoc(fs, next))
+                break;
+
+            if (next < 2)
+                return -4;
+
+            dir_cluster = next;
+        }
+    }
+
+    /*
+     * Освобождаем цепочку.
+     */
+    if (cluster >= 2)
+        free_cluster_chain(fs, cluster);
+
+    /*
+     * Удаляем dir entry.
+     */
     entry->name[0] = 0xE5;
 
+    /*
+     * Dirty parent entry.
+     */
     uint32_t parent_lba;
-    if (parent_cluster == 0 && fs->fat_type != 32)
-        parent_lba = fs->root_dir_start + ((uint8_t*)entry - (fs->image + fs->root_dir_start*512))/512;
+
+    if (parent_cluster == 0 &&
+        fs->fat_type != 32)
+    {
+        parent_lba =
+            fs->root_dir_start +
+            (
+                (
+                    (uint8_t*)entry -
+                    (
+                        fs->image +
+                        fs->root_dir_start * 512
+                    )
+                ) / 512
+            );
+    }
     else
-        parent_lba = fs->data_start + (parent_cluster - 2) * fs->cluster_size
-                     + ((uint8_t*)entry - cluster_to_sector(fs, parent_cluster))/512;
+    {
+        parent_lba =
+            fs->data_start +
+            (parent_cluster - 2) *
+                fs->cluster_size +
+            (
+                (
+                    (uint8_t*)entry -
+                    cluster_to_sector(
+                        fs,
+                        parent_cluster
+                    )
+                ) / 512
+            );
+    }
+
     fat_mark_sector_dirty(fs, parent_lba);
+
     return 0;
 }
 

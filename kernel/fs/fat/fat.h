@@ -108,3 +108,13 @@ int fat_rename_file(fat_fs_t *fs, const char *old_name, const char *new_name);
 uint32_t get_fat_entry(fat_fs_t *fs, uint32_t cluster);
 int is_eoc(fat_fs_t *fs, uint32_t cluster);
 void to_short_name(const char *filename, char out[11]);
+
+int fat_lookup_path(fat_fs_t *fs,
+                    const char *path,
+                    fat_dir_entry_t *out_entry,
+                    uint32_t *out_cluster);
+
+int fat_resolve_parent(fat_fs_t *fs,
+                       const char *path,
+                       uint32_t *out_parent_cluster,
+                       char *out_name);

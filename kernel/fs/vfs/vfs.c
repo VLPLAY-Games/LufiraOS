@@ -5,6 +5,13 @@
 
 extern int vfs_open_fat(const char *path, int flags);
 
+extern int vfs_fat_create(const char *path);
+extern int vfs_fat_mkdir(const char *path);
+extern int vfs_fat_unlink(const char *path);
+
+extern inode_t* vfs_fat_lookup(const char *path);
+extern inode_t* vfs_fat_get_root(void);
+
 /* ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ========== */
 
 file_t *file_table[MAX_FILES_SYSTEM] = {0};
@@ -136,13 +143,42 @@ static int vfs_open_console(int flags) {
 
 /* ========== VFS OPEN ========== */
 
-int vfs_open(const char *path, int flags) {
-    if (!path || !*path) return -1;
+int vfs_open(const char *path, int flags)
+{
+    if (!path || !*path)
+        return -1;
 
-    int fd = vfs_open_fat(path, flags);
-    if (fd >= 0) return fd;
+    /*
+     * FAT сначала.
+     */
+    int fd =
+        vfs_open_fat(path, flags);
 
-    if (strcmp(path, "/dev/console") == 0 || strcmp(path, "console") == 0) {
+    if (fd >= 0)
+        return fd;
+
+    /*
+     * O_CREAT:
+     *
+     * Если файла нет — создаём.
+     */
+    if (flags & O_CREAT) {
+
+        if (vfs_fat_create(path) != 0)
+            return -1;
+
+        /*
+         * После создания открываем обычным способом.
+         */
+        return vfs_open_fat(path, flags);
+    }
+
+    /*
+     * Console.
+     */
+    if (strcmp(path, "/dev/console") == 0 ||
+        strcmp(path, "console") == 0)
+    {
         return vfs_open_console(flags);
     }
 
@@ -255,8 +291,92 @@ void vfs_register_dev(const char *name, file_ops_t *fops, file_type_t type) {
     (void)name; (void)fops; (void)type;
 }
 
-int vfs_mkdir(const char *path) { (void)path; return -1; }
-int vfs_rmdir(const char *path) { (void)path; return -1; }
-int vfs_readdir(int fd, void *buf) { (void)fd; (void)buf; return -1; }
-inode_t* vfs_lookup(const char *path) { (void)path; return NULL; }
-inode_t* vfs_get_root(void) { return NULL; }
+int vfs_create(const char *path)
+{
+    if (!path || !*path)
+        return -1;
+
+    return vfs_fat_create(path);
+}
+
+
+int vfs_mkdir(const char *path)
+{
+    if (!path || !*path)
+        return -1;
+
+    return vfs_fat_mkdir(path);
+}
+
+
+int vfs_unlink(const char *path)
+{
+    if (!path || !*path)
+        return -1;
+
+    return vfs_fat_unlink(path);
+}
+
+
+int vfs_rmdir(const char *path)
+{
+    if (!path || !*path)
+        return -1;
+
+    return vfs_fat_unlink(path);
+}
+
+
+int vfs_readdir(int fd, void *buf)
+{
+    if (fd < 0 ||
+        fd >= MAX_FD_PER_PROCESS)
+    {
+        return -1;
+    }
+
+    if (!current_fd_table)
+        return -1;
+
+    file_t *f =
+        current_fd_table->files[fd];
+
+    if (!f || !f->inode)
+        return -1;
+
+    if (f->inode->type != FT_DIRECTORY)
+        return -1;
+
+    if (!f->inode->ops ||
+        !f->inode->ops->readdir)
+    {
+        return -1;
+    }
+
+    int result =
+        f->inode->ops->readdir(
+            f->inode,
+            buf,
+            (int)f->offset
+        );
+
+    if (result > 0)
+        f->offset++;
+
+    return result;
+}
+
+
+inode_t* vfs_lookup(const char *path)
+{
+    if (!path || !*path)
+        return NULL;
+
+    return vfs_fat_lookup(path);
+}
+
+
+inode_t* vfs_get_root(void)
+{
+    return vfs_fat_get_root();
+}

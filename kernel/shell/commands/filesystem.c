@@ -263,18 +263,38 @@ void command_cat(const char* filename) {
         printf("\nUsage: cat <filename>\n");
         return;
     }
+
     uint32_t fsize;
+
     if (fat_open(&fatfs, filename, &fsize) == 0) {
         static uint8_t file_buf[4096];
-        uint32_t to_read = fsize > sizeof(file_buf) ? sizeof(file_buf) : fsize;
-        int br = fat_read_file(&fatfs, filename, file_buf, to_read);
-        if (br > 0) {
+
+        uint32_t to_read =
+            fsize > sizeof(file_buf) ? sizeof(file_buf) : fsize;
+
+        int br = fat_read_file(
+            &fatfs,
+            filename,
+            file_buf,
+            to_read
+        );
+
+        if (br >= 0) {
             printf("\n--- %s (%u bytes) ---\n", filename, fsize);
-            for (int i=0; i<br; i++) put_char(file_buf[i]);
+
+            for (int i = 0; i < br; i++) {
+                put_char(file_buf[i]);
+            }
+
             printf("\n--- end ---\n");
-        } else printf("\nError reading file.\n");
-    } else printf("\nFile not found: %s\n", filename);
+        } else {
+            printf("\nError reading file.\n");
+        }
+    } else {
+        printf("\nFile not found: %s\n", filename);
+    }
 }
+
 
 // run - запуск ELF файла
 void command_run(const char *filename) {
