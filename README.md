@@ -32,11 +32,37 @@
 
 ---
 
+## Screenshots
+
+### Bootloader Menu
+
+![Bootloader Menu](documentation/screenshots/bootloader.jpg)
+
+### Kernel Boot Process
+
+![Kernel Boot](documentation/screenshots/boot.jpg)
+
+### Interactive Shell
+
+![Shell](documentation/screenshots/shell.jpg)
+
+### Filesystem Operations
+
+![Filesystem](documentation/screenshots/filesystem.jpg)
+
+### Debug Mode
+
+![Debug Memory Map](documentation/screenshots/debug.jpg)
+
+### Running ELF Programs
+
+![ELF Programs](documentation/screenshots/elf.jpg)
+
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Features](#features)
-3. [System Requirements](#system-requirements)
+2. [Screenshots](#screenshots)
+3. [Features](#features)
 4. [Architecture Overview](#architecture-overview)
 5. [Getting Started](#getting-started)
    - [Prerequisites](#prerequisites)
@@ -44,8 +70,9 @@
    - [Running](#running)
 6. [Documentation](#documentation)
 7. [Project Structure](#project-structure)
-8. [Contributing](#contributing)
-9. [License](#license)
+8. [Known Issues and Limitations](#known-issues-and-limitations)
+9. [Contributing](#contributing)
+10. [License](#license)
 
 ---
 
@@ -163,8 +190,6 @@ UEFI Bootloader
 |
 BootInfo Structure
 
-text
-
 ````
 ---
 
@@ -187,22 +212,15 @@ text
 git clone https://github.com/yourusername/lufiraos.git
 cd lufiraos
 
-# Build everything
-make all
-
-# Or build individual components
-make bootloader      # Builds build/BOOTX64.EFI
-make kernel          # Builds build/kernel.bin
-make disk            # Creates build/disk.img
+# Build everything and run
+make clean && make run
 ````
-
-svgsvg
 
 ### Running
 
-bash
 
-```
+
+``` bash
 # Run in QEMU
 make run
 
@@ -215,8 +233,6 @@ make monitor
 # Clean build artefacts
 make clean
 ```
-
-svgsvg
 
 **QEMU Parameters:**
 
