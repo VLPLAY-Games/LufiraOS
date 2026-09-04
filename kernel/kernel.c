@@ -213,6 +213,7 @@ void _start(BootInfo* bi) {
     asm volatile("sti");
     irq_enable(0);  // таймер
     irq_enable(1);  // клавиатура
+    irq_enable(2);
     irq_enable(12); // мышь
 
     printf("\n");

@@ -120,15 +120,40 @@ int keyboard_scancode_to_key(uint8_t scancode) {
 
     if (scancode & 0x80) {
         uint8_t keycode = scancode & 0x7F;
+
         if (extended_scancode) {
+            switch (keycode) {
+                case 0x1D: // Right Ctrl
+                    ctrl_pressed = 0;
+                    break;
+
+                case 0x38: // Right Alt
+                    alt_pressed = 0;
+                    break;
+
+                default:
+                    break;
+            }
+
             extended_scancode = 0;
             return 0;
         }
+
         switch (keycode) {
-            case 0x2A: case 0x36: shift_pressed = 0; break;
-            case 0x1D: ctrl_pressed = 0; break;
-            case 0x38: alt_pressed = 0; break;
+            case 0x2A:
+            case 0x36:
+                shift_pressed = 0;
+                break;
+
+            case 0x1D:
+                ctrl_pressed = 0;
+                break;
+
+            case 0x38:
+                alt_pressed = 0;
+                break;
         }
+
         return 0;
     }
 
@@ -200,13 +225,12 @@ void process_keypress(int key) {
 
 // ============ НОВЫЙ ОБРАБОТЧИК ПРЕРЫВАНИЯ IRQ1 ============
 void keyboard_irq_handler(void) {
-    uint8_t status = inb(KEYBOARD_STATUS_PORT);
-    if (!(status & 1))
-        return;
+    while (inb(KEYBOARD_STATUS_PORT) & 1) {
+        uint8_t scancode = keyboard_read_scancode();
 
-    uint8_t scancode = keyboard_read_scancode();
-    int key = keyboard_scancode_to_key(scancode);
-    process_keypress(key);
+        int key = keyboard_scancode_to_key(scancode);
+        process_keypress(key);
+    }
 }
 
 int keyboard_is_initialized(void) {
