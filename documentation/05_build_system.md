@@ -1,4 +1,3 @@
-```
 # Build System
 
 This document describes the build system used to compile the LufiraOS bootloader, kernel, and disk image. The build is managed by a comprehensive Makefile that handles all build steps, dependency checking, and QEMU execution.

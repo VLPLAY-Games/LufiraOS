@@ -1,4 +1,3 @@
-````
 # BootInfo Structure
 
 This document describes the `BootInfo` structure, which is the primary data transfer mechanism between the LufiraOS UEFI bootloader and the kernel. It contains all the essential hardware and system information needed for the kernel to initialise properly.
@@ -108,9 +107,7 @@ svgsvg
 
 **Memory Map Descriptor (UEFI):**
 
-c
-
-```
+```c
 typedef struct {
     uint32_t Type;           // Memory type (EfiConventionalMemory, EfiLoaderCode, etc.)
     uint64_t PhysicalStart;  // Physical address of the memory region
@@ -119,8 +116,6 @@ typedef struct {
     uint64_t Attribute;      // Memory attributes (cacheable, write-protected, etc.)
 } EFI_MEMORY_DESCRIPTOR;
 ```
-
-svgsvg
 
 **Memory Types:**
 

@@ -309,5 +309,3 @@ The LufiraOS bootloader is a robust and modular foundation for launching the ope
 For more information, please refer to the source code and comments. Contributions and feedback are welcome!
 
 ---
-
-**End of README**
