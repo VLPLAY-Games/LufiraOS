@@ -39,6 +39,9 @@ void command_help(void) {
     printf(" run <file> - Execute ELF program\n");
     printf(" runbg <file> - Execute ELF program in background\n");
     printf(" kill <pid> - Terminate process\n");
+    printf(" beep - Play beep to check sound\n");
+    printf(" music - Play sample music to check sound\n");
+    printf(" mixer <volume> - Change sound volume\n");
 }
 
 void command_clear(void) { clear_screen(); show_prompt(); }
@@ -62,7 +65,7 @@ void command_shutdown(void) {
     printf("Shutdown command sent. System may require manual power off.\n");
 }
 void command_version(void) {
-    printf("\nLufiraOS Kernel v0.2\nBuilt: %s %s\nArchitecture: x86_64\n", __DATE__, __TIME__);
+    printf("\nLufiraOS Kernel v0.1.0\nBuilt: %s %s\nArchitecture: x86_64\n", __DATE__, __TIME__);
 }
 void command_status(void) {
     printf("\nSYSTEM STATUS:\n");

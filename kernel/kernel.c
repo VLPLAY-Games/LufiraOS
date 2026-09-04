@@ -231,7 +231,7 @@ void _start(BootInfo* bi) {
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
     printf("================================================\n");
-    printf("     LufiraOS Kernel v0.6 (Stable)              \n");
+    printf("     LufiraOS Kernel v0.1.0                     \n");
     printf("================================================\n");
     set_foreground_color(LOG_COLOR_INFO);
     
@@ -242,7 +242,7 @@ void _start(BootInfo* bi) {
     LOG_STATUS_LINE("Console", 1, "READY");
     LOG_STATUS_LINE("Keyboard", keyboard_is_initialized(), keyboard_is_initialized() ? "READY" : "NOT FOUND");
     LOG_STATUS_LINE("Mouse", mouse_is_initialized(), mouse_is_initialized() ? "READY" : "NOT FOUND");
-    LOG_STATUS_LINE("Syscalls", 1, "ACTIVE (16 syscalls)");
+    LOG_STATUS_LINE("Syscalls", 1, "ACTIVE (18 syscalls)");
     LOG_STATUS_LINE("VFS", 1, "READY");
     
     set_foreground_color(STATUS_READY);
