@@ -67,6 +67,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/drivers/keyboard/keyboard.c \
     $(KERNEL_DIR)/drivers/mouse/mouse.c \
     $(KERNEL_DIR)/drivers/disk/disk.c \
+	$(KERNEL_DIR)/drivers/sound/sound.c \
 	$(KERNEL_DIR)/drivers/sound/pcspeaker.c \
     $(KERNEL_DIR)/shell/shell.c \
     $(KERNEL_DIR)/shell/commands/system.c \

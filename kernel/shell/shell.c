@@ -235,6 +235,10 @@ void execute_command(void) {
         else command_edit(args);
     } else if (strcmp(cmd_lower, "beep") == 0) {
         command_beep();
+    } else if (strcmp(cmd_lower, "mixer") == 0) {
+        command_mixer(args); 
+    } else if (strcmp(cmd_lower, "music") == 0) {
+        command_music();
     } else {
         printf("\nUnknown command: %s\n", input_buffer);
         printf("Type 'help' for available commands.\n");
@@ -264,7 +268,7 @@ void shell_handle_tab(void) {
         "echo", "history", "status", "trap",
         "color", "colors", "fg", "bg", "reset",
         "pwd", "cd", "ls", "mkdir", "rm", "touch", "cat",
-        "run", "write", "beep",
+        "run", "write", "beep", "mixer", "music",
         NULL
     };
     

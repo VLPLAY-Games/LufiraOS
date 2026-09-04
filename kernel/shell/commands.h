@@ -37,3 +37,7 @@ void command_edit(const char* args);
 
 // ELF loader
 void command_run(const char* filename);
+
+// Звук
+void command_mixer(const char* args);
+void command_music(void);

@@ -1,24 +1,21 @@
-#ifndef LUFIRAOS_PCSPEAKER_H
-#define LUFIRAOS_PCSPEAKER_H
+#pragma once
 
 #include <stdint.h>
 
-/*
- * PC Speaker driver.
- *
- * Uses:
- *   PIT channel 2
- *   I/O port 0x42 - PIT channel 2 data
- *   I/O port 0x61 - PC speaker control
- */
+#define PCSPEAKER_MIN_FREQUENCY 20
+#define PCSPEAKER_MAX_FREQUENCY 20000
 
 void pcspeaker_init(void);
 
 void pcspeaker_start(uint32_t frequency);
 void pcspeaker_stop(void);
 
-void pcspeaker_beep(uint32_t frequency, uint32_t duration_ms);
+void pcspeaker_set_gate(int enabled);
+int  pcspeaker_get_gate(void);
+
+uint8_t pcspeaker_get_volume(void);
+void pcspeaker_set_volume(uint8_t volume);
+
+void pcspeaker_tone(uint32_t frequency, uint32_t duration_ms);
 
 int pcspeaker_is_available(void);
-
-#endif
