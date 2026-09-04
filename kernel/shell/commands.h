@@ -39,5 +39,6 @@ void command_edit(const char* args);
 void command_run(const char* filename);
 
 // Звук
+void command_beep(void);
 void command_mixer(const char* args);
 void command_music(void);

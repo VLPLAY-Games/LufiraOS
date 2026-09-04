@@ -73,6 +73,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/shell/commands/system.c \
     $(KERNEL_DIR)/shell/commands/colors.c \
     $(KERNEL_DIR)/shell/commands/filesystem.c \
+	$(KERNEL_DIR)/shell/commands/sound.c \
     $(KERNEL_DIR)/system/cpu/gdt.c \
     $(KERNEL_DIR)/system/cpu/idt.c \
     $(KERNEL_DIR)/system/cpu/irq.c \
