@@ -248,7 +248,7 @@ System calls return `-1` on error (or an appropriate negative value). The error 
 
 ## Conclusion
 
-The system call interface provides a clean and efficient mechanism for user-mode programs to request kernel services. With 17 implemented system calls, it covers the essential functionality needed for basic user programs. The use of the `syscall` instruction ensures fast transitions, and the calling convention follows the x86-64 ABI for compatibility.
+The system call interface provides a clean and efficient mechanism for user-mode programs to request kernel services. With 18 implemented system calls, it covers the essential functionality needed for basic user programs. The use of the `syscall` instruction ensures fast transitions, and the calling convention follows the x86-64 ABI for compatibility.
 
 For more details, refer to the source code in `system/syscall/`.
 

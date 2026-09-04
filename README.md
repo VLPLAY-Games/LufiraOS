@@ -5,16 +5,17 @@
 # 🚨 VERSION 0.1.0 (ALPHA) 🚨
 
 > ## ⚠️ IMPORTANT NOTICE
-> 
 > ### This is a **PRE-ALPHA** hobby operating system.
-> 
 > ### It contains **MANY BUGS**, incomplete features, and rough edges.
-> 
 > ### It is **NOT** intended for production use or daily driving.
-> 
 > ### The system is a work in progress, and many features are either partially implemented or not yet functional.
-> 
 > ### Use at your own risk, and expect crashes, instability, and missing functionality.
+
+# ⚠️ Documentation Notice
+
+> This documentation is provided for LufiraOS v0.1.0 and may contain inaccuracies, outdated information, or minor inconsistencies with the current source code. LufiraOS is an actively developed project, and its architecture and implementation may change over time.
+>If a discrepancy exists between this documentation and the source code, the source code should be considered the authoritative reference.
+> Documentation will be continuously reviewed and updated as the project evolves.
 
 ## System Requirements
 
@@ -355,7 +356,7 @@ Contributions are welcome! Here are some areas for improvement:
 
 ## License
 
-This project is licensed under the AGPL-3.0 License. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the GPL-3.0 License. See the [LICENSE](LICENSE) file for details.
 
 ---
 
