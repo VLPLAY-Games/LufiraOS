@@ -81,3 +81,8 @@ const char* get_color_name(ConsoleColor color);
 
 // Функция для отображения системной информации
 void display_system_info(BootInfo* bi);
+
+void console_scroll_up(void);
+void console_scroll_down(void);
+void console_scroll_to_bottom(void);
+int console_is_scrolled(void);

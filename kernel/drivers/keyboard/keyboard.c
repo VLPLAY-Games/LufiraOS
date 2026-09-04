@@ -195,15 +195,40 @@ void process_keypress(int key) {
 
     switch (key) {
         case KEY_LEFT_ARROW:
+            if (console_is_scrolled())
+                console_scroll_to_bottom();
+
             shell_handle_left_arrow();
             return;
+
         case KEY_RIGHT_ARROW:
+            if (console_is_scrolled())
+                console_scroll_to_bottom();
+
             shell_handle_right_arrow();
             return;
+
         case KEY_UP_ARROW:
+            if (keyboard_ctrl_pressed()) {
+                console_scroll_up();
+                return;
+            }
+
+            if (console_is_scrolled())
+                console_scroll_to_bottom();
+
             shell_handle_up_arrow();
             return;
+
         case KEY_DOWN_ARROW:
+            if (keyboard_ctrl_pressed()) {
+                console_scroll_down();
+                return;
+            }
+
+            if (console_is_scrolled())
+                console_scroll_to_bottom();
+
             shell_handle_down_arrow();
             return;
         case '\t':  // Tab!
@@ -235,4 +260,8 @@ void keyboard_irq_handler(void) {
 
 int keyboard_is_initialized(void) {
     return keyboard_initialized;
+}
+
+int keyboard_ctrl_pressed(void) {
+    return ctrl_pressed;
 }

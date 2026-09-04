@@ -166,6 +166,27 @@ static unsigned char full_font_data[][8] = {
     {0x00, 0x76, 0xDC, 0x00, 0x00, 0x00, 0x00, 0x00}, /* ~ */
 };
 
+// ==================== CONSOLE SCROLLBACK ====================
+
+#define CONSOLE_HISTORY_LINES 1000
+#define CONSOLE_MAX_COLUMNS   256
+
+static char console_history[CONSOLE_HISTORY_LINES][CONSOLE_MAX_COLUMNS];
+
+static uint32_t console_history_count = 1;
+static uint32_t console_history_start = 0;
+static uint32_t console_history_scroll = 0;
+
+static int console_rendering_history = 0;
+static uint32_t history_current_column = 0;
+
+
+// Прототипы
+static void history_clear_line(uint32_t index);
+static void history_new_line(void);
+static void history_set_visible_char(uint32_t x, uint32_t y, char c);
+static void history_render(void);
+
 
 static int interrupts_enabled(void) {
     uint64_t rflags;
@@ -244,6 +265,16 @@ void initialize_console(BootInfo* bi) {
     // Вычисляем количество символов, которые поместятся на экране
     screen_width_chars = screen_width_pixels / (CHAR_WIDTH + CHAR_PADDING_X);
     screen_height_chars = screen_height_pixels / (CHAR_HEIGHT + CHAR_PADDING_Y);
+
+    // Инициализация scrollback
+    console_history_count = 1;
+    console_history_start = 0;
+    console_history_scroll = 0;
+    history_current_column = 0;
+
+    for (uint32_t i = 0; i < CONSOLE_HISTORY_LINES; i++) {
+        history_clear_line(i);
+    }
     
     // Гарантируем хотя бы минимальный размер
     if (screen_width_chars < 10) screen_width_chars = 10;
@@ -276,6 +307,11 @@ const char* get_color_name(ConsoleColor color) {
 
 // Отрисовка символа 8x8
 void put_char_graphic(int c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color) {
+    if (!console_rendering_history) {
+        if (!console_is_scrolled()) {
+            history_set_visible_char(x, y, (char)c);
+        }
+    }
     if (c < 32 || c > 127) c = '?';
     
     unsigned char* glyph = full_font_data[c - 32];
@@ -311,73 +347,118 @@ void put_char_graphic(int c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t
 }
 
 void put_char(char c) {
-    // Стираем курсор перед отрисовкой символа
+    // Если пользователь смотрит старый вывод,
+    // любой обычный вывод возвращает нас вниз.
+    if (console_is_scrolled()) {
+        console_scroll_to_bottom();
+    }
+
     if (cursor_enabled && cursor_visible) {
         erase_cursor();
     }
-    
+
     if (c == '\n') {
+
         current_x = 0;
         current_y++;
-    } else if (c == '\r') { // Carriage return - возврат в начало строки
+
+        history_new_line();
+
+    } else if (c == '\r') {
+
         current_x = 0;
-    } else if (c == '\b') { // Backspace
+        history_current_column = 0;
+
+    } else if (c == '\b') {
+
         if (current_x > 0) {
             current_x--;
-            put_char_graphic(' ', current_x, current_y, current_color, current_bg_color);
+
+            put_char_graphic(
+                ' ',
+                current_x,
+                current_y,
+                current_color,
+                current_bg_color
+            );
+
+            if (history_current_column > 0)
+                history_current_column--;
         }
-    } else if (c == '\t') { // Tab - 4 пробела
+
+    } else if (c == '\t') {
+
         for (int i = 0; i < 4; i++) {
-            put_char_graphic(' ', current_x, current_y, current_color, current_bg_color);
+
+            put_char_graphic(
+                ' ',
+                current_x,
+                current_y,
+                current_color,
+                current_bg_color
+            );
+
             current_x++;
+            history_current_column++;
+
             if (current_x >= screen_width_chars) {
+
                 current_x = 0;
                 current_y++;
+
+                history_new_line();
             }
         }
+
     } else {
-        put_char_graphic(c, current_x, current_y, current_color, current_bg_color);
+
+        put_char_graphic(
+            c,
+            current_x,
+            current_y,
+            current_color,
+            current_bg_color
+        );
+
         current_x++;
+        history_current_column++;
+
+        if (current_x >= screen_width_chars) {
+
+            current_x = 0;
+            current_y++;
+
+            history_new_line();
+        }
     }
-    
-    if (current_x >= screen_width_chars) {
-        current_x = 0;
-        current_y++;
-    }
-    
+
     if (current_y >= screen_height_chars) {
         scroll_screen();
-        current_y = screen_height_chars - 1;
-        current_x = 0;
     }
-    
-    // Восстанавливаем курсор после отрисовки символа
+
     if (cursor_enabled && cursor_visible) {
         draw_cursor();
     }
 }
 
 void scroll_screen(void) {
-    uint32_t char_height_pixels = CHAR_HEIGHT + CHAR_PADDING_Y;
-    
-    // Сдвигаем содержимое экрана вверх на высоту одного символа
-    for (uint32_t y = char_height_pixels; y < screen_height_pixels; y++) {
-        for (uint32_t x = 0; x < screen_width_pixels; x++) {
-            uint32_t src_pixel = framebuffer[y * pixels_per_scan_line + x];
-            framebuffer[(y - char_height_pixels) * pixels_per_scan_line + x] = src_pixel;
-        }
-    }
-    
-    // Очищаем последнюю строку
-    uint32_t last_line_start = screen_height_pixels - char_height_pixels;
-    for (uint32_t y = last_line_start; y < screen_height_pixels; y++) {
-        for (uint32_t x = 0; x < screen_width_pixels; x++) {
-            put_pixel(x, y, current_bg_color);
-        }
-    }
-    
+    // При обычном переполнении всегда остаёмся
+    // внизу scrollback.
+    console_history_scroll = 0;
+
     current_x = 0;
-    current_y = screen_height_chars - 1;
+
+    if (screen_height_chars > 0)
+        current_y = screen_height_chars - 1;
+    else
+        current_y = 0;
+
+    history_render();
+
+    cursor_visible = 0;
+
+    if (cursor_enabled)
+        draw_cursor();
 }
 
 // Очищает только область консоли (для символов)
@@ -886,10 +967,212 @@ void move_cursor_right(void) {
 
 // Установка позиции курсора
 void set_cursor_position(uint32_t x, uint32_t y) {
-    if (x >= screen_width_chars || y >= screen_height_chars) return;
-    
+
+    if (console_is_scrolled()) {
+        console_scroll_to_bottom();
+    }
+
+    if (x >= screen_width_chars || y >= screen_height_chars)
+        return;
+
     erase_cursor();
+
     current_x = x;
     current_y = y;
+
     draw_cursor();
+}
+
+static void history_clear_line(uint32_t index) {
+    for (uint32_t i = 0; i < CONSOLE_MAX_COLUMNS; i++) {
+        console_history[index][i] = ' ';
+    }
+}
+
+static uint32_t history_get_index(uint32_t logical_line) {
+    if (logical_line >= console_history_count)
+        return 0;
+
+    return (console_history_start + logical_line) % CONSOLE_HISTORY_LINES;
+}
+
+static void history_new_line(void) {
+    uint32_t index;
+
+    if (console_history_count < CONSOLE_HISTORY_LINES) {
+        index = history_get_index(console_history_count);
+        console_history_count++;
+    } else {
+        // Буфер заполнен — удаляем самую старую строку
+        console_history_start =
+            (console_history_start + 1) % CONSOLE_HISTORY_LINES;
+
+        index = history_get_index(console_history_count - 1);
+    }
+
+    history_clear_line(index);
+    history_current_column = 0;
+}
+
+static void history_set_visible_char(uint32_t x, uint32_t y, char c) {
+    if (console_rendering_history)
+        return;
+
+    if (console_history_count == 0)
+        return;
+
+    if (screen_width_chars == 0)
+        return;
+
+    if (screen_width_chars > CONSOLE_MAX_COLUMNS)
+        return;
+
+    // Когда мы в обычном режиме, экран показывает последние строки.
+    // Вычисляем логическую строку scrollback, соответствующую y.
+    uint32_t visible_lines = screen_height_chars;
+
+    uint32_t top_line = 0;
+
+    if (console_history_count > visible_lines) {
+        top_line = console_history_count - visible_lines;
+    }
+
+    if (console_history_scroll > 0) {
+        if (top_line >= console_history_scroll)
+            top_line -= console_history_scroll;
+        else
+            top_line = 0;
+    }
+
+    uint32_t logical_line = top_line + y;
+
+    if (logical_line >= console_history_count)
+        return;
+
+    if (x >= CONSOLE_MAX_COLUMNS)
+        return;
+
+    uint32_t index = history_get_index(logical_line);
+    console_history[index][x] = c;
+}
+
+static void history_render(void) {
+    console_rendering_history = 1;
+
+    // Полностью очищаем framebuffer
+    for (uint32_t y = 0; y < screen_height_pixels; y++) {
+        for (uint32_t x = 0; x < screen_width_pixels; x++) {
+            framebuffer[y * pixels_per_scan_line + x] = current_bg_color;
+        }
+    }
+
+    uint32_t max_scroll = 0;
+
+    if (console_history_count > screen_height_chars) {
+        max_scroll = console_history_count - screen_height_chars;
+    }
+
+    if (console_history_scroll > max_scroll)
+        console_history_scroll = max_scroll;
+
+    uint32_t top_line = 0;
+
+    if (console_history_count > screen_height_chars) {
+        top_line = console_history_count - screen_height_chars;
+    }
+
+    if (console_history_scroll > 0) {
+        if (top_line >= console_history_scroll)
+            top_line -= console_history_scroll;
+        else
+            top_line = 0;
+    }
+
+    for (uint32_t y = 0; y < screen_height_chars; y++) {
+        uint32_t logical_line = top_line + y;
+
+        if (logical_line >= console_history_count)
+            break;
+
+        uint32_t index = history_get_index(logical_line);
+
+        for (uint32_t x = 0;
+             x < screen_width_chars && x < CONSOLE_MAX_COLUMNS;
+             x++) {
+
+            char c = console_history[index][x];
+
+            if (c == '\0')
+                c = ' ';
+
+            if (c != ' ') {
+                put_char_graphic(
+                    c,
+                    x,
+                    y,
+                    current_color,
+                    current_bg_color
+                );
+            }
+        }
+    }
+
+    console_rendering_history = 0;
+}
+
+void console_scroll_up(void) {
+    uint32_t max_scroll = 0;
+
+    if (console_history_count > screen_height_chars) {
+        max_scroll = console_history_count - screen_height_chars;
+    }
+
+    if (max_scroll == 0)
+        return;
+
+    if (console_history_scroll < max_scroll) {
+        if (cursor_enabled && cursor_visible)
+            erase_cursor();
+
+        console_history_scroll++;
+
+        cursor_visible = 0;
+        history_render();
+    }
+}
+
+void console_scroll_down(void) {
+    if (console_history_scroll == 0)
+        return;
+
+    if (cursor_enabled && cursor_visible)
+        erase_cursor();
+
+    console_history_scroll--;
+
+    history_render();
+
+    if (console_history_scroll == 0) {
+        cursor_visible = 0;
+        draw_cursor();
+    }
+}
+
+void console_scroll_to_bottom(void) {
+    if (console_history_scroll == 0)
+        return;
+
+    if (cursor_enabled && cursor_visible)
+        erase_cursor();
+
+    console_history_scroll = 0;
+
+    history_render();
+
+    cursor_visible = 0;
+    draw_cursor();
+}
+
+int console_is_scrolled(void) {
+    return console_history_scroll != 0;
 }
