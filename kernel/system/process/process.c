@@ -1,4 +1,5 @@
 #include "process.h"
+#include "system/timer/pit.h"
 #include "system/mm/heap.h"
 #include "system/mm/pmm.h"
 #include "system/mm/paging.h"
@@ -12,7 +13,7 @@ static void *memset(void *s, int c, size_t n) {
     return s;
 }
 
-static process_t *process_list = NULL;
+process_t *process_list = NULL;
 process_t *current_process = NULL;
 uint64_t current_kernel_rsp = 0; // Глобальная переменная для asm
 static uint32_t next_pid = 1;
@@ -415,6 +416,18 @@ void process_reap(void) {
     }
 }
 
+void process_sleep(uint64_t milliseconds) {
+    if (!current_process || milliseconds == 0)
+        return;
+
+    uint64_t ticks = (milliseconds + 9) / 10;
+
+    current_process->wakeup_tick = pit_get_ticks() + ticks;
+    current_process->state = PROCESS_SLEEPING;
+
+    schedule();
+}
+
 void schedule(void) {
     /*
      * Scheduler должен уметь работать и при IF=0.
@@ -504,4 +517,58 @@ void switch_to_process(process_t *next) {
     current_kernel_rsp = next->ring0_stack;
     
     context_switch(prev_context, &next->context);
+}
+
+static const char *process_state_name(process_state_t state)
+{
+    switch (state) {
+        case PROCESS_READY:
+            return "READY";
+
+        case PROCESS_RUNNING:
+            return "RUNNING";
+
+        case PROCESS_BLOCKED:
+            return "BLOCKED";
+
+        case PROCESS_SLEEPING:
+            return "SLEEPING";
+
+        case PROCESS_TERMINATED:
+            return "TERMINATED";
+
+        default:
+            return "UNKNOWN";
+    }
+}
+
+void process_ps(void)
+{
+    irq_disable();
+
+    printf("\n");
+    printf("PID   STATE       NAME\n");
+    printf("-------------------------------\n");
+
+    if (!process_list) {
+        printf("No processes\n");
+        irq_enable();
+        return;
+    }
+
+    process_t *p = process_list;
+    process_t *start = p;
+
+    do {
+        printf("%u     %s     %s\n",
+               p->pid,
+               process_state_name(p->state),
+               p->name);
+
+        p = p->next;
+    } while (p && p != start);
+
+    printf("\n");
+
+    irq_enable();
 }

@@ -239,6 +239,8 @@ void execute_command(void) {
         command_mixer(args); 
     } else if (strcmp(cmd_lower, "music") == 0) {
         command_music();
+    } else if (strcmp(cmd_lower, "ps") == 0) {
+        process_ps();
     } else {
         printf("\nUnknown command: %s\n", input_buffer);
         printf("Type 'help' for available commands.\n");

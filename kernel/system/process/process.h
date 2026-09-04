@@ -15,7 +15,8 @@ typedef enum {
     PROCESS_READY = 0,
     PROCESS_RUNNING = 1,
     PROCESS_BLOCKED = 2,
-    PROCESS_TERMINATED = 3
+    PROCESS_SLEEPING = 3,
+    PROCESS_TERMINATED = 4
 } process_state_t;
 
 typedef struct __attribute__((packed)) {
@@ -33,6 +34,7 @@ typedef struct process {
     uint32_t pid;
     char name[32];
     process_state_t state;
+    uint64_t wakeup_tick;
     process_context_t context;
     uint64_t stack_base;
     uint64_t stack_size;
@@ -48,6 +50,8 @@ void process_exit(void);
 void schedule(void);
 void switch_to_process(process_t *next);
 void process_reap(void);
+void process_sleep(uint64_t milliseconds);
+void process_ps(void);
 
 
 extern uint64_t kernel_cr3;
@@ -56,3 +60,4 @@ extern void context_switch(process_context_t *old_context,
                           process_context_t *new_context);
 
 extern process_t *current_process;
+extern process_t *process_list;

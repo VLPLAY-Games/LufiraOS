@@ -45,7 +45,22 @@ uint64_t pit_get_ticks(void) {
 // Обработчик прерывания таймера
 void timer_irq_handler(void) {
     pit_ticks++;
-    
-    // Обновляем курсор (мигание)
+
+    process_t *p = process_list;
+
+    if (p) {
+        process_t *start = p;
+
+        do {
+            if (p->state == PROCESS_SLEEPING &&
+                pit_ticks >= p->wakeup_tick)
+            {
+                p->state = PROCESS_READY;
+            }
+
+            p = p->next;
+        } while (p && p != start);
+    }
+
     update_cursor();
 }
