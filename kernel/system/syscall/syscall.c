@@ -197,6 +197,25 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
     return (uint64_t)-1;
 }
 
+// SYS_SLEEP (16): milliseconds
+static uint64_t sys_sleep(uint64_t milliseconds,
+                          uint64_t unused1,
+                          uint64_t unused2,
+                          uint64_t unused3,
+                          uint64_t unused4) {
+    (void)unused1;
+    (void)unused2;
+    (void)unused3;
+    (void)unused4;
+
+    if (milliseconds == 0)
+        return 0;
+
+    process_sleep(milliseconds);
+
+    return 0;
+}
+
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
 
 static syscall_fn_t syscall_table[256] = {
@@ -216,6 +235,7 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_WAIT]    = sys_wait,
     [SYS_GETCWD]  = sys_getcwd,
     [SYS_CHDIR]   = sys_chdir,
+    [SYS_SLEEP]   = sys_sleep,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
@@ -246,7 +266,7 @@ void syscall_init(void) {
     asm volatile("wrmsr" : : "c"(0xC0000080), "a"((uint32_t)efer),
                  "d"((uint32_t)(efer >> 32)));
     
-    printf("[SYSCALL] 16 system calls registered\n");
+    printf("[SYSCALL] 17 system calls registered\n");
 }
 
 // ========== ДИСПАТЧЕР ==========
