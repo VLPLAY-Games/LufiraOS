@@ -1,6 +1,10 @@
 # LufiraOS
 
-**LufiraOS** is a 64-bit hobby operating system for the x86_64 architecture, written in C and assembly. It is designed to be educational, modular, and extensible, with a focus on understanding the core concepts of operating system development.
+![Version](https://img.shields.io/badge/version-0.1.0-blue)
+![License](https://img.shields.io/badge/license-GPL--3.0-green)
+![Status](https://img.shields.io/badge/status-alpha-orange)
+
+**LufiraOS** is a 64-bit hobby operating system for the x86_64 architecture, written from scratch in C and assembly by a single developer with some assistance from AI tools. It is designed to be educational, modular, and extensible, with a focus on understanding the core concepts of operating system development.
 
 # 🚨 VERSION 0.1.0 (ALPHA) 🚨
 
