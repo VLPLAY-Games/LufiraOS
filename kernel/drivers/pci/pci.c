@@ -768,13 +768,14 @@ int pci_get_bar(
         return -2;
     }
 
+    /*
+     * Clear result.
+     */
     for (uint32_t i = 0; i < sizeof(pci_bar_t); i++) {
         ((uint8_t*)bar)[i] = 0;
     }
 
-    offset =
-        PCI_BAR0 +
-        (bar_index * 4);
+    offset = PCI_BAR0 + (bar_index * 4);
 
     original = pci_config_read32(
         dev->bus,
@@ -784,17 +785,28 @@ int pci_get_bar(
     );
 
     /*
-     * BAR is unused.
+     * BAR unused.
      */
     if (original == 0) {
-        return 0;
+        return 1;
     }
 
-    /* -----------------------------------------------------
+    /* =====================================================
      * I/O BAR
-     * ----------------------------------------------------- */
+     * ===================================================== */
 
-    if (original & PCI_BAR_TYPE_IO) {
+    if (original & 0x1U) {
+
+        /*
+         * Save original value.
+         */
+        pci_config_write32(
+            dev->bus,
+            dev->device,
+            dev->function,
+            offset,
+            0xFFFFFFFF
+        );
 
         probe = pci_config_read32(
             dev->bus,
@@ -803,14 +815,44 @@ int pci_get_bar(
             offset
         );
 
-        bar->address =
-            (uint64_t)(original & ~0x3U);
+        /*
+         * Restore original.
+         */
+        pci_config_write32(
+            dev->bus,
+            dev->device,
+            dev->function,
+            offset,
+            original
+        );
 
-        bar->size =
-            (uint64_t)pci_bar_size32(
-                dev,
-                offset
-            );
+        /*
+         * Mask I/O BAR flags.
+         */
+        uint32_t base =
+            original & ~0x3U;
+
+        uint32_t mask =
+            probe & ~0x3U;
+
+        /*
+         * Invalid / unimplemented BAR.
+         */
+        if (mask == 0 ||
+            mask == 0xFFFFFFFFU) {
+
+            /*
+             * Some virtual devices can still expose
+             * an I/O BAR without a useful probe mask.
+             * Keep address, but report size 0.
+             */
+            bar->address = (uint64_t)base;
+            bar->size = 0;
+        }
+        else {
+            bar->address = (uint64_t)base;
+            bar->size = (uint64_t)((~mask) + 1U);
+        }
 
         bar->is_io = 1;
         bar->is_64bit = 0;
@@ -819,41 +861,37 @@ int pci_get_bar(
         return 0;
     }
 
-    /* -----------------------------------------------------
+    /* =====================================================
      * Memory BAR
-     * ----------------------------------------------------- */
+     * ===================================================== */
 
     bar->is_io = 0;
 
     bar->prefetchable =
-        (original & PCI_BAR_PREFETCHABLE)
-        ? 1
-        : 0;
+        (original & PCI_BAR_PREFETCHABLE) ? 1 : 0;
 
-    /*
-     * 64-bit memory BAR.
-     */
-    if ((original & PCI_BAR_MEMORY_TYPE_MASK) ==
-        PCI_BAR_MEMORY_64) {
+    uint32_t memory_type =
+        original & PCI_BAR_MEMORY_TYPE_MASK;
 
-        uint32_t upper;
-        uint32_t probe_low;
-        uint32_t probe_high;
-        uint64_t original_address;
-        uint64_t probe_address;
+    /* =====================================================
+     * 64-bit Memory BAR
+     * ===================================================== */
+
+    if (memory_type == PCI_BAR_MEMORY_64) {
 
         if (bar_index >= 5) {
             return -3;
         }
 
-        upper = pci_config_read32(
-            dev->bus,
-            dev->device,
-            dev->function,
-            offset + 4
-        );
+        uint32_t upper =
+            pci_config_read32(
+                dev->bus,
+                dev->device,
+                dev->function,
+                offset + 4
+            );
 
-        original_address =
+        uint64_t original_address =
             ((uint64_t)upper << 32) |
             (uint64_t)(original & ~0xFULL);
 
@@ -879,19 +917,21 @@ int pci_get_bar(
             0xFFFFFFFF
         );
 
-        probe_low = pci_config_read32(
-            dev->bus,
-            dev->device,
-            dev->function,
-            offset
-        );
+        uint32_t probe_low =
+            pci_config_read32(
+                dev->bus,
+                dev->device,
+                dev->function,
+                offset
+            );
 
-        probe_high = pci_config_read32(
-            dev->bus,
-            dev->device,
-            dev->function,
-            offset + 4
-        );
+        uint32_t probe_high =
+            pci_config_read32(
+                dev->bus,
+                dev->device,
+                dev->function,
+                offset + 4
+            );
 
         /*
          * Restore.
@@ -912,42 +952,76 @@ int pci_get_bar(
             upper
         );
 
-        probe_address =
+        uint64_t probe_address =
             ((uint64_t)probe_high << 32) |
             (uint64_t)(probe_low & ~0xFULL);
 
         if (probe_address == 0 ||
             probe_address == 0xFFFFFFFFFFFFFFFFULL) {
 
-            return -4;
+            bar->address = original_address;
+            bar->size = 0;
+            bar->is_64bit = 1;
+
+            return 0;
         }
 
-        bar->address =
-            original_address;
-
-        bar->size =
-            (~probe_address) + 1;
-
+        bar->address = original_address;
+        bar->size = (~probe_address) + 1ULL;
         bar->is_64bit = 1;
 
         return 0;
     }
 
-    /*
-     * 32-bit memory BAR.
-     */
-    bar->address =
-        (uint64_t)(original & ~0xFULL);
+    /* =====================================================
+     * 32-bit Memory BAR
+     * ===================================================== */
 
-    bar->size =
-        (uint64_t)pci_bar_size32(
-            dev,
-            offset
-        );
+    pci_config_write32(
+        dev->bus,
+        dev->device,
+        dev->function,
+        offset,
+        0xFFFFFFFF
+    );
+
+    probe = pci_config_read32(
+        dev->bus,
+        dev->device,
+        dev->function,
+        offset
+    );
+
+    /*
+     * Restore.
+     */
+    pci_config_write32(
+        dev->bus,
+        dev->device,
+        dev->function,
+        offset,
+        original
+    );
+
+    uint32_t base =
+        original & ~0xFULL;
+
+    uint32_t mask =
+        probe & ~0xFULL;
+
+    bar->address = (uint64_t)base;
+
+    if (mask == 0 ||
+        mask == 0xFFFFFFFFU) {
+
+        bar->size = 0;
+    }
+    else {
+        bar->size =
+            (uint64_t)((~mask) + 1U);
+    }
 
     bar->is_64bit = 0;
-
-    (void)probe;
 
     return 0;
 }

@@ -8,6 +8,7 @@
 #include "drivers/keyboard/keyboard.h"
 #include "drivers/mouse/mouse.h"
 #include "drivers/console/console.h"
+#include "drivers/sound/ac97.h"
 #include "shell/shell.h"
 #include "system/cpu/gdt.h"
 #include "system/cpu/idt.h"
@@ -211,9 +212,15 @@ void _start(BootInfo* bi) {
     mouse_init();
     LOG_DONE_OK("Mouse %s", mouse_is_initialized() ? "ready" : "not found");
 
-    pcspeaker_init();
+    // pcspeaker_init();
 
     pci_init();
+
+    if (ac97_init()) {
+        printf("[ OK ] AC'97 ready\n");
+    } else {
+        printf("[WARN] AC'97 unavailable\n");
+    }
     
     asm volatile("sti");
     irq_enable(0);  // таймер

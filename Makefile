@@ -70,6 +70,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/drivers/mouse/mouse.c \
     $(KERNEL_DIR)/drivers/disk/disk.c \
 	$(KERNEL_DIR)/drivers/sound/sound.c \
+	$(KERNEL_DIR)/drivers/sound/ac97.c \
 	$(KERNEL_DIR)/drivers/sound/pcspeaker.c \
     $(KERNEL_DIR)/shell/shell.c \
     $(KERNEL_DIR)/shell/commands/system.c \
@@ -176,8 +177,9 @@ run: $(BUILD_DIR)/disk.img
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
 		-m 64M \
 		-net none \
-		-audiodev driver=sdl,id=audio \
 		-machine pcspk-audiodev=audio \
+		-audiodev driver=alsa,id=audio \
+		-device AC97,audiodev=audio \
 		-serial stdio
 
 debug: $(BUILD_DIR)/disk.img
