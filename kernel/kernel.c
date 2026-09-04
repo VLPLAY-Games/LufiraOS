@@ -209,6 +209,8 @@ void _start(BootInfo* bi) {
     LOG_PENDING("Initializing mouse...");
     mouse_init();
     LOG_DONE_OK("Mouse %s", mouse_is_initialized() ? "ready" : "not found");
+
+    pcspeaker_init();
     
     asm volatile("sti");
     irq_enable(0);  // таймер

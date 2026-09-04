@@ -5,6 +5,7 @@
 #include "../shell.h"
 #include "fs/fat/fat.h"
 #include "system/acpi/acpi.h"
+#include "drivers/sound/pcspeaker.h"
 
 extern fat_fs_t fatfs;
 
@@ -85,4 +86,13 @@ void command_trap(void) {
 void command_echo(const char* args) {
     if (*args == '\0') printf("\nUsage: echo <text>\n");
     else printf("\n%s\n", args);
+}
+
+void command_beep(void)
+{
+    printf("\nPlaying 440 Hz beep...\n");
+
+    pcspeaker_beep(440, 250);
+
+    printf("Done.\n");
 }

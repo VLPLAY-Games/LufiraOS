@@ -23,6 +23,7 @@ $(shell mkdir -p $(BUILD_DIR) \
     $(BUILD_DIR)/kernel/lib \
     $(BUILD_DIR)/kernel/drivers/console \
     $(BUILD_DIR)/kernel/drivers/keyboard \
+	$(BUILD_DIR)/kernel/drivers/sound \
     $(BUILD_DIR)/kernel/drivers/mouse \
     $(BUILD_DIR)/kernel/drivers/disk \
     $(BUILD_DIR)/kernel/shell \
@@ -66,6 +67,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/drivers/keyboard/keyboard.c \
     $(KERNEL_DIR)/drivers/mouse/mouse.c \
     $(KERNEL_DIR)/drivers/disk/disk.c \
+	$(KERNEL_DIR)/drivers/sound/pcspeaker.c \
     $(KERNEL_DIR)/shell/shell.c \
     $(KERNEL_DIR)/shell/commands/system.c \
     $(KERNEL_DIR)/shell/commands/colors.c \
@@ -170,6 +172,8 @@ run: $(BUILD_DIR)/disk.img
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
 		-m 64M \
 		-net none \
+		-audiodev driver=sdl,id=audio \
+		-machine pcspk-audiodev=audio \
 		-serial stdio
 
 debug: $(BUILD_DIR)/disk.img

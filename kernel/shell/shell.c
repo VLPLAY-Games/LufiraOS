@@ -233,6 +233,8 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "edit") == 0) {
         if (*args == '\0') printf("\nUsage: edit <filename> <text>\n");
         else command_edit(args);
+    } else if (strcmp(cmd_lower, "beep") == 0) {
+        command_beep();
     } else {
         printf("\nUnknown command: %s\n", input_buffer);
         printf("Type 'help' for available commands.\n");
@@ -261,7 +263,8 @@ void shell_handle_tab(void) {
         "help", "clear", "reboot", "shutdown", "version",
         "echo", "history", "status", "trap",
         "color", "colors", "fg", "bg", "reset",
-        "pwd", "cd", "ls", "mkdir", "rm", "touch", "cat", "run", "write",
+        "pwd", "cd", "ls", "mkdir", "rm", "touch", "cat",
+        "run", "write", "beep",
         NULL
     };
     
