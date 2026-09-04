@@ -52,7 +52,7 @@ void switch_to_process(process_t *next);
 void process_reap(void);
 void process_sleep(uint64_t milliseconds);
 void process_ps(void);
-
+int process_kill(uint32_t pid);
 
 extern uint64_t kernel_cr3;
 

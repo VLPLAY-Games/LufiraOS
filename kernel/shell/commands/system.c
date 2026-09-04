@@ -38,6 +38,7 @@ void command_help(void) {
     printf(" edit <file> <text> - Append text to file\n");
     printf(" run <file> - Execute ELF program\n");
     printf(" runbg <file> - Execute ELF program in background\n");
+    printf(" kill <pid> - Terminate process\n");
 }
 
 void command_clear(void) { clear_screen(); show_prompt(); }
@@ -151,4 +152,27 @@ void command_runbg(const char *filename)
      * Как и в command_run(), буфер пока НЕ освобождаем.
      * Он используется процессом.
      */
+}
+
+void command_kill(const char *args)
+{
+    if (!args || *args == '\0') {
+        printf("\nUsage: kill <pid>\n");
+        return;
+    }
+
+    int pid = atoi(args);
+
+    if (pid <= 0) {
+        printf("\nInvalid PID\n");
+        return;
+    }
+
+    int result = process_kill((uint32_t)pid);
+
+    if (result == 0) {
+        printf("Process %d killed\n", pid);
+    } else {
+        printf("Process %d not found\n", pid);
+    }
 }

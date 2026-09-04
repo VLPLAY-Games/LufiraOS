@@ -572,3 +572,41 @@ void process_ps(void)
 
     irq_enable();
 }
+
+int process_kill(uint32_t pid)
+{
+    if (!process_list)
+        return -1;
+
+    process_t *p = process_list;
+
+    do {
+        if (p->pid == pid) {
+
+            if (p == idle_process)
+                return -1;
+
+            if (p->state == PROCESS_TERMINATED)
+                return 0;
+
+            printf("[PROCESS] Killing PID %u ('%s')\n",
+                   p->pid, p->name);
+
+            p->state = PROCESS_TERMINATED;
+
+            if (p == current_process) {
+                schedule();
+
+                while (1)
+                    asm volatile("hlt");
+            }
+
+            return 0;
+        }
+
+        p = p->next;
+
+    } while (p && p != process_list);
+
+    return -1;
+}

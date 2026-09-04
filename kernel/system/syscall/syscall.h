@@ -20,6 +20,7 @@
 #define SYS_GETCWD   14
 #define SYS_CHDIR    15
 #define SYS_SLEEP    16
+#define SYS_KILL     17
 
 // Флаги для sys_open
 #define O_RDONLY    0

@@ -244,6 +244,8 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "runbg") == 0) {
         if (*args == '\0') printf("\nUsage: runbg <filename>\n");
         else command_runbg(args);
+    } else if (strcmp(cmd_lower, "kill") == 0) {
+        command_kill(args);
     } else {
         printf("\nUnknown command: %s\n", input_buffer);
         printf("Type 'help' for available commands.\n");
@@ -274,6 +276,7 @@ void shell_handle_tab(void) {
         "color", "colors", "fg", "bg", "reset",
         "pwd", "cd", "ls", "mkdir", "rm", "touch", "cat",
         "run", "runbg", "write", "beep", "mixer", "music",
+        "kill",
         NULL
     };
     
