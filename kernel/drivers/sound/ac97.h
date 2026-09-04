@@ -33,7 +33,7 @@
 #define AC97_REG_VENDOR_ID2         0x7E
 
 /* Extended audio control */
-#define AC97_EACS_VRA               (1 << 0)   /* Variable Rate Audio */
+#define AC97_EACS_VRA               (1 << 0)
 
 /* Powerdown */
 #define AC97_POWER_ADC              (1 << 8)
@@ -87,19 +87,22 @@
 /* Global status */
 #define AC97_GLOB_PCR              (1 << 8)
 
-/* BDL */
+/* ======================================================================== */
+/* BDL                                                                       */
+/* ======================================================================== */
+
 #define AC97_BDL_ENTRIES           32
 #define AC97_BDL_ENTRY_SIZE        8
 
-#define AC97_BDL_IOC               (1 << 31)
-#define AC97_BDL_BUP               (1 << 30)
+#define AC97_BDL_IOC               (1 << 15)
+#define AC97_BDL_BUP               (1 << 14)
 
 /*
- * One DMA page.
+ * One DMA page = 4096 bytes
  *
- * 4096 bytes / 4 bytes per stereo frame = 1024 frames.
- *
- * At 48000 Hz this is ~21.3 ms.
+ * Stereo 16-bit:
+ * 4 bytes per frame
+ * 4096 / 4 = 1024 stereo frames
  */
 #define AC97_DMA_PAGE_SIZE         4096
 
@@ -108,6 +111,11 @@ typedef struct {
     uint16_t samples;
     uint16_t flags;
 } ac97_bdl_entry_t;
+
+typedef struct {
+    uint32_t frequency;
+    uint32_t duration_ms;
+} ac97_tone_t;
 
 typedef struct {
     uint16_t vendor_id1;
@@ -125,11 +133,9 @@ int ac97_init(void);
 int ac97_is_available(void);
 
 void ac97_set_volume(uint8_t volume);
-
 uint8_t ac97_get_volume(void);
 
 void ac97_set_sample_rate(uint32_t rate);
-
 uint32_t ac97_get_sample_rate(void);
 
 int ac97_play_pcm_stereo(
