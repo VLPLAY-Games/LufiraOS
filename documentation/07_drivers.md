@@ -242,17 +242,6 @@ Interrupt handlers are registered in the IDT before enabling IRQs.
 
 ---
 
-## Future Extensions
-
-- **AHCI/SATA** – replace ATA PIO with a more modern driver.
-- **USB** – HID and mass storage support.
-- **Interrupt‑driven audio** – replace polling with completion interrupts.
-- **Framebuffer acceleration** – improve console performance with double‑buffering.
-- **Mouse cursor overlay** – integrate mouse pointer with the console/GUI.
-- **Power management** – suspend/resume for audio and PCI devices.
-
----
-
 ## Conclusion
 
 The LufiraOS driver subsystem provides a solid foundation for basic hardware interaction. The modular design and clear APIs make it easy to add new devices or improve existing ones. The console driver alone is powerful enough for debugging and shell interaction, while the audio driver adds a touch of fun to the system.
