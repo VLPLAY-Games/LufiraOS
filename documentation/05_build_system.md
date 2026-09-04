@@ -78,7 +78,7 @@ The Makefile assumes the following default paths:
 
 | Command | Description |
 |---------|-------------|
-| `make` or `make all` | Builds the complete disk image (bootloader + kernel). |
+| `make run` | Builds the complete disk image (bootloader + kernel). |
 | `make bootloader` | Builds only the UEFI bootloader (`BOOTX64.EFI`). |
 | `make kernel` | Builds only the kernel binary (`kernel.bin`). |
 | `make disk` | Creates the disk image (requires bootloader and kernel). |
@@ -385,7 +385,7 @@ sudo dnf install gcc binutils make dosfstools mtools qemu-system-x86 edk2-ovmf
 
 ```
 make clean
-make all
+make run
 ```
 
 
