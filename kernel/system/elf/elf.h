@@ -69,3 +69,6 @@ int elf_validate(const elf64_header_t *header);
 void* elf_load_to_process(const void *elf_data, uint64_t elf_size, 
                           process_t *proc, const char *name);
 int elf_exec(const void *elf_data, uint64_t elf_size, const char *name);
+int elf_exec_background(const void *elf_data,
+                        uint64_t elf_size,
+                        const char *name);

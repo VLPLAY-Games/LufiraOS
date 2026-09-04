@@ -37,6 +37,7 @@ void command_edit(const char* args);
 
 // ELF loader
 void command_run(const char* filename);
+void command_runbg(const char* filename);
 
 // Звук
 void command_beep(void);

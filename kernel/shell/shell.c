@@ -241,6 +241,9 @@ void execute_command(void) {
         command_music();
     } else if (strcmp(cmd_lower, "ps") == 0) {
         process_ps();
+    } else if (strcmp(cmd_lower, "runbg") == 0) {
+        if (*args == '\0') printf("\nUsage: runbg <filename>\n");
+        else command_runbg(args);
     } else {
         printf("\nUnknown command: %s\n", input_buffer);
         printf("Type 'help' for available commands.\n");
@@ -270,7 +273,7 @@ void shell_handle_tab(void) {
         "echo", "history", "status", "trap",
         "color", "colors", "fg", "bg", "reset",
         "pwd", "cd", "ls", "mkdir", "rm", "touch", "cat",
-        "run", "write", "beep", "mixer", "music",
+        "run", "runbg", "write", "beep", "mixer", "music",
         NULL
     };
     

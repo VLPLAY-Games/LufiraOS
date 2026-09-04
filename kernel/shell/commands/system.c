@@ -37,6 +37,7 @@ void command_help(void) {
     printf(" write <file> <text> - Write text to file\n");
     printf(" edit <file> <text> - Append text to file\n");
     printf(" run <file> - Execute ELF program\n");
+    printf(" runbg <file> - Execute ELF program in background\n");
 }
 
 void command_clear(void) { clear_screen(); show_prompt(); }
@@ -85,4 +86,69 @@ void command_trap(void) {
 void command_echo(const char* args) {
     if (*args == '\0') printf("\nUsage: echo <text>\n");
     else printf("\n%s\n", args);
+}
+
+void command_runbg(const char *filename)
+{
+    if (!filename || *filename == '\0') {
+        printf("\nUsage: runbg <filename>\n");
+        printf("Example: runbg hello.elf\n");
+        return;
+    }
+
+    // Открываем файл
+    uint32_t fsize;
+
+    if (fat_open(&fatfs, filename, &fsize) != 0) {
+        printf("\nFile not found: %s\n", filename);
+        return;
+    }
+
+    // Выделяем буфер
+    uint8_t *file_buf = (uint8_t *)kmalloc(fsize);
+
+    if (!file_buf) {
+        printf("\nNot enough memory to load %s (%u bytes)\n",
+               filename,
+               fsize);
+        return;
+    }
+
+    // Читаем ELF
+    int br = fat_read_file(
+        &fatfs,
+        filename,
+        file_buf,
+        fsize
+    );
+
+    if (br <= 0) {
+        printf("\nError reading file: %s\n", filename);
+        kfree(file_buf);
+        return;
+    }
+
+    printf("\nLoading ELF in background: %s (%u bytes)...\n",
+           filename,
+           fsize);
+
+    // Запускаем, но НЕ переключаемся на него
+    int pid = elf_exec_background(
+        file_buf,
+        fsize,
+        filename
+    );
+
+    if (pid < 0) {
+        printf("Failed to start background process\n");
+        kfree(file_buf);
+        return;
+    }
+
+    printf("Started background process PID %u\n", (uint32_t)pid);
+
+    /*
+     * Как и в command_run(), буфер пока НЕ освобождаем.
+     * Он используется процессом.
+     */
 }

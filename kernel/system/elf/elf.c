@@ -494,17 +494,22 @@ void* elf_load_to_process(const void *elf_data,
 }
 
 // Загрузка ELF и создание процесса
-int elf_exec(const void *elf_data, uint64_t elf_size, const char *name) {
+static int elf_exec_internal(const void *elf_data,
+                             uint64_t elf_size,
+                             const char *name,
+                             int background)
+{
     printf("[ELF] DEBUG: Step 0 - entry\n");
-    
+
     asm volatile("cli");
-    
+
     // Сохраняем CR3
     uint64_t cr3_before;
     asm volatile("mov %%cr3, %0" : "=r"(cr3_before));
+
     printf("[ELF] DEBUG: CR3 before = 0x%lx, kernel_cr3 = 0x%lx, match=%d\n",
            cr3_before, kernel_cr3, (cr3_before == kernel_cr3));
-    
+
     // Создаём процесс
     process_t *proc = process_create(name, NULL);
     if (!proc) {
@@ -512,52 +517,107 @@ int elf_exec(const void *elf_data, uint64_t elf_size, const char *name) {
         asm volatile("sti");
         return -1;
     }
-    
-    // Проверяем, что мы всё ещё в kernel_cr3
+
+    // Проверяем CR3
     uint64_t cr3_after_create;
     asm volatile("mov %%cr3, %0" : "=r"(cr3_after_create));
+
     printf("[ELF] DEBUG: CR3 after create = 0x%lx, match=%d\n",
            cr3_after_create, (cr3_after_create == kernel_cr3));
-    
+
     printf("[ELF] DEBUG: Trying proc->pid...\n");
     uint32_t pid = proc->pid;
     printf("[ELF] DEBUG: proc->pid = %u (OK!)\n", pid);
-    
+
     printf("[ELF] DEBUG: Trying proc->page_table...\n");
     uint64_t pt = proc->page_table;
     printf("[ELF] DEBUG: proc->page_table = 0x%lx (OK!)\n", pt);
-    
-    // Загружаем ELF в процесс
+
+    // Загружаем ELF
     printf("[ELF] DEBUG: Now loading ELF...\n");
-    void *entry = elf_load_to_process(elf_data, elf_size, proc, name);
-    
-    // Убеждаемся, что мы в kernel_cr3
+
+    void *entry = elf_load_to_process(
+        elf_data,
+        elf_size,
+        proc,
+        name
+    );
+
+    // Проверяем CR3 после загрузки
     uint64_t cr3_after_load;
     asm volatile("mov %%cr3, %0" : "=r"(cr3_after_load));
+
     printf("[ELF] DEBUG: CR3 after load = 0x%lx, match=%d\n",
            cr3_after_load, (cr3_after_load == kernel_cr3));
-    
+
     if (cr3_after_load != kernel_cr3) {
         asm volatile("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
     }
-    
+
     if (!entry) {
         printf("[ELF] Failed to load ELF\n");
         proc->state = PROCESS_TERMINATED;
+
         asm volatile("sti");
         return -1;
     }
-    
+
     // Устанавливаем точку входа
     printf("[ELF] DEBUG: Setting up entry point...\n");
+
     proc->context.rip = (uint64_t)entry;
-    printf("[ELF] DEBUG: proc->context.rip = 0x%lx (OK!)\n", proc->context.rip);
-    
+
+    printf("[ELF] DEBUG: proc->context.rip = 0x%lx (OK!)\n",
+           proc->context.rip);
+
     printf("[ELF] DEBUG: ALL OK!\n");
-    
-    // Запускаем процесс, если это первый пользовательский процесс
+
+    /*
+     * FOREGROUND:
+     * сразу передаём CPU процессу.
+     *
+     * BACKGROUND:
+     * оставляем процесс в READY.
+     * Планировщик сам запустит его позже.
+     */
+    if (background) {
+        proc->state = PROCESS_READY;
+
+        printf("[ELF] Background process ready: PID %u\n", proc->pid);
+
+        // Мы сделали cli выше — обязательно включаем IRQ обратно.
+        asm volatile("sti");
+
+        return (int)proc->pid;
+    }
+
+    // FOREGROUND
     asm volatile("cli");
     switch_to_process(proc);
-    
+
     return 0;
+}
+
+int elf_exec(const void *elf_data,
+             uint64_t elf_size,
+             const char *name)
+{
+    return elf_exec_internal(
+        elf_data,
+        elf_size,
+        name,
+        0
+    );
+}
+
+int elf_exec_background(const void *elf_data,
+                        uint64_t elf_size,
+                        const char *name)
+{
+    return elf_exec_internal(
+        elf_data,
+        elf_size,
+        name,
+        1
+    );
 }
