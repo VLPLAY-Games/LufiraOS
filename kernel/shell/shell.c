@@ -257,6 +257,12 @@ void execute_command(void) {
         else command_runbg(args);
     } else if (strcmp(cmd_lower, "kill") == 0) {
         command_kill(args);
+    } else if (strcmp(cmd_lower, "wait") == 0) {
+        if (*args == '\0') printf("\nUsage: wait <pid>\n");
+        else command_wait(args);
+    } else if (strcmp(cmd_lower, "exec") == 0) {
+        if (*args == '\0') printf("\nUsage: exec <filename>\n");
+        else command_exec(args);
     } else {
         printf("\nUnknown command: %s\n", input_buffer);
         printf("Type 'help' for available commands.\n");
@@ -287,8 +293,8 @@ void shell_handle_tab(void) {
         "echo", "history", "status", "trap",
         "color", "colors", "fg", "bg", "reset",
         "pwd", "cd", "ls", "mkdir", "rm", "touch", "cat",
-        "run", "runbg", "write", "beep", "mixer", "music",
-        "kill",
+        "run", "runbg", "exec", "write", "beep", "mixer", "music",
+        "kill", "wait",
         NULL
     };
     

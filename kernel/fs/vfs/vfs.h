@@ -101,6 +101,27 @@ int alloc_fd(void);
 int vfs_create(const char *path);
 int vfs_unlink(const char *path);
 
+// Заполняет table стандартными stdin/stdout/stderr (консоль). Используется
+// для инициализации fd-таблицы КАЖДОГО процесса (см. process_create()),
+// а не только самого первого — раньше в системе была только ОДНА реальная
+// fd-таблица на всех.
+void vfs_init_fd_table(fd_table_t *table);
+
+// Анонимный pipe: fds[0] = конец на чтение, fds[1] = конец на запись
+// (оба — в fd-таблице ТЕКУЩЕГО процесса). Блокирующие read()/write().
+int vfs_pipe(int fds[2]);
+
+// dup2()-подобная функция: делает newfd ссылающимся на тот же file_t, что
+// и oldfd (закрывая newfd, если он уже был занят). Нужна и для настоящего
+// dup2(), и как строительный блок будущего перенаправления stdin/stdout
+// шелла на пайпы (см. vfs_dup_fd()).
+int vfs_dup2(int oldfd, int newfd);
+
+// Регистрирует ЕЩЁ ОДНУ ссылку на уже открытый file_t f (используется
+// fork()'ом при копировании fd-таблицы родителя и vfs_dup2()) — помимо
+// inode->ref_count, для пайпов корректно учитывает и readers/writers.
+void vfs_dup_fd(file_t *f);
+
 // Exported globals
 extern file_t *file_table[];
 extern fd_table_t *current_fd_table;

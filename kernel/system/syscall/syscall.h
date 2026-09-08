@@ -21,6 +21,7 @@
 #define SYS_CHDIR    15
 #define SYS_SLEEP    16
 #define SYS_KILL     17
+#define SYS_PIPE     18
 
 // Флаги для sys_open
 #define O_RDONLY    0
@@ -42,6 +43,13 @@
 
 // Прототипы
 void syscall_init(void);
-uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, 
-                         uint64_t arg2, uint64_t arg3, 
-                         uint64_t arg4, uint64_t arg5);
+// frame_ptr — указатель на кадр регистров, сохранённый syscall_entry.S на
+// ядерном стеке (см. syscall_frame_t в process.c); нужен только SYS_FORK.
+uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1,
+                         uint64_t arg2, uint64_t arg3,
+                         uint64_t arg4, uint64_t arg5,
+                         uint64_t frame_ptr);
+
+// Открывает filename и заменяет им текущий процесс (execve()-подобно).
+// Используется и SYS_EXEC, и командой shell "exec".
+int do_exec(const char *filename);

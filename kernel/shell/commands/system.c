@@ -5,6 +5,7 @@
 #include "../shell.h"
 #include "fs/fat/fat.h"
 #include "system/acpi/acpi.h"
+#include "system/process/process.h"
 
 extern fat_fs_t fatfs;
 
@@ -38,7 +39,8 @@ void command_help(void) {
     printf(" edit <file> <text> - Append text to file\n");
     printf(" run <file> - Execute ELF program\n");
     printf(" runbg <file> - Execute ELF program in background\n");
-    printf(" kill <pid> - Terminate process\n");
+    printf(" kill [-SIGNAL] <pid> - Send a signal (-TERM/-KILL/-STOP/-CONT, default -TERM)\n");
+    printf(" wait <pid> - Wait for a child process to exit\n");
     printf(" beep - Play beep to check sound\n");
     printf(" music - Play sample music to check sound\n");
     printf(" mixer <volume> - Change sound volume\n");
@@ -139,7 +141,62 @@ void command_runbg(const char *filename) {
 void command_kill(const char *args)
 {
     if (!args || *args == '\0') {
-        printf("\nUsage: kill <pid>\n");
+        printf("\nUsage: kill [-SIGNAL] <pid>\n");
+        printf("Signals: -TERM (default), -KILL, -STOP, -CONT (or numeric: -15, -9, -19, -18)\n");
+        printf("Example: kill -STOP 3\n");
+        return;
+    }
+
+    int sig = SIGTERM;
+    const char *pid_str = args;
+
+    if (*args == '-') {
+        const char *sig_arg = args + 1;
+        int len = token_length(sig_arg);
+
+        if (token_equals(sig_arg, "KILL")) sig = SIGKILL;
+        else if (token_equals(sig_arg, "TERM")) sig = SIGTERM;
+        else if (token_equals(sig_arg, "STOP")) sig = SIGSTOP;
+        else if (token_equals(sig_arg, "CONT")) sig = SIGCONT;
+        else {
+            int n = atoi(sig_arg);
+            if (n <= 0) {
+                printf("\nUnknown signal: %s\n", args);
+                return;
+            }
+            sig = n;
+        }
+
+        pid_str = skip_spaces(sig_arg + len);
+    }
+
+    if (*pid_str == '\0') {
+        printf("\nUsage: kill [-SIGNAL] <pid>\n");
+        return;
+    }
+
+    int pid = atoi(pid_str);
+
+    if (pid <= 0) {
+        printf("\nInvalid PID\n");
+        return;
+    }
+
+    int result = process_signal((uint32_t)pid, sig);
+
+    if (result == 0) {
+        printf("Signal %d sent to PID %d\n", sig, pid);
+    } else {
+        printf("Process %d not found\n", pid);
+    }
+}
+
+// wait <pid> - блокируется, пока указанный (свой) ребёнок не завершится
+void command_wait(const char *args)
+{
+    if (!args || *args == '\0') {
+        printf("\nUsage: wait <pid>\n");
+        printf("Example: wait 2\n");
         return;
     }
 
@@ -150,11 +207,14 @@ void command_kill(const char *args)
         return;
     }
 
-    int result = process_kill((uint32_t)pid);
+    printf("\nWaiting for PID %d...\n", pid);
 
-    if (result == 0) {
-        printf("Process %d killed\n", pid);
+    int status = 0;
+    int result = process_wait((uint32_t)pid, &status);
+
+    if (result < 0) {
+        printf("PID %d is not a child of this shell (or was already reaped)\n", pid);
     } else {
-        printf("Process %d not found\n", pid);
+        printf("PID %d exited with code %d\n", result, status);
     }
 }

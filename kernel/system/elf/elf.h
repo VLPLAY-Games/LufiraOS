@@ -72,3 +72,8 @@ int elf_exec(const void *elf_data, uint64_t elf_size, const char *name);
 int elf_exec_background(const void *elf_data,
                         uint64_t elf_size,
                         const char *name);
+
+// Настоящий execve(): заменяет ТЕКУЩИЙ процесс образом новой программы
+// вместо создания нового процесса (используется командой shell "exec" и
+// системным вызовом SYS_EXEC).
+int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name);

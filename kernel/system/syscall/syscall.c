@@ -1,11 +1,53 @@
 #include "syscall.h"
 #include "drivers/console/console.h"
 #include "system/process/process.h"
+#include "system/elf/elf.h"
 #include "system/timer/pit.h"
 #include "system/cpu/gdt.h"
 #include "system/mm/heap.h"
 #include "lib/stddef.h"
 #include "fs/vfs/vfs.h"
+
+// Открывает filename через VFS, читает его целиком и заменяет им текущий
+// процесс через elf_exec_replace() (настоящий execve()). Используется и
+// шеллом (команда "exec"), и системным вызовом SYS_EXEC.
+int do_exec(const char *filename) {
+    if (!filename || !*filename) return -1;
+
+    int fd = vfs_open(filename, O_RDONLY);
+    if (fd < 0) {
+        printf("[EXEC] Failed to open %s\n", filename);
+        return -1;
+    }
+
+    file_t *f = current_fd_table->files[fd];
+    if (!f || !f->inode) {
+        vfs_close(fd);
+        return -1;
+    }
+    uint32_t size = f->inode->size;
+    if (size == 0) {
+        vfs_close(fd);
+        return -1;
+    }
+
+    uint8_t *buf = (uint8_t *)kmalloc(size);
+    if (!buf) {
+        vfs_close(fd);
+        return -1;
+    }
+
+    int bytes_read = vfs_read(fd, buf, size);
+    vfs_close(fd);
+    if (bytes_read != (int)size) {
+        kfree(buf);
+        return -1;
+    }
+
+    // elf_exec_replace() освобождает buf при любом исходе (успех или
+    // неудача), поэтому здесь его повторно не освобождаем.
+    return elf_exec_replace(buf, size, filename);
+}
 
 typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
@@ -47,7 +89,7 @@ static uint64_t sys_exit(uint64_t exit_code, uint64_t unused1, uint64_t unused2,
            current_process ? current_process->pid : 0, 
            (uint32_t)exit_code);
     
-    process_exit();
+    process_exit((int)exit_code);
     while (1) __asm__("hlt");
     return 0;
 }
@@ -137,29 +179,32 @@ static uint64_t sys_exec(uint64_t filename_ptr, uint64_t argv_ptr,
     (void)argv_ptr; (void)envp_ptr; (void)unused1; (void)unused2;
     if (filename_ptr == 0) return (uint64_t)-1;
     const char *filename = (const char *)filename_ptr;
+
+    // do_exec() -> elf_exec_replace() не возвращается по этому стеку
+    // вызовов при успехе (настоящий execve()) — возврат сюда возможен
+    // только при ошибке.
     return (uint64_t)do_exec(filename);
 }
 
-// SYS_FORK (12)
-static uint64_t sys_fork(uint64_t unused1, uint64_t unused2, uint64_t unused3,
-                         uint64_t unused4, uint64_t unused5) {
-    (void)unused1; (void)unused2; (void)unused3; (void)unused4; (void)unused5;
-    
-    // Заглушка: создание копии процесса
-    return (uint64_t)-1;
-}
+// SYS_FORK (12) обрабатывается отдельно в syscall_handler() (см. ниже) —
+// ему нужен указатель на весь сохранённый кадр регистров, а не только
+// обычные 5 аргументов, поэтому он не попадает в общую syscall_table.
 
-// SYS_WAIT (13): pid_ptr, status_ptr, options
-static uint64_t sys_wait(uint64_t pid_ptr, uint64_t status_ptr, uint64_t options,
+// SYS_WAIT (13): pid (0 = любой ребёнок), status_ptr (может быть 0), options
+static uint64_t sys_wait(uint64_t pid, uint64_t status_ptr, uint64_t options,
                          uint64_t unused1, uint64_t unused2) {
-    (void)pid_ptr;
-    (void)status_ptr;
     (void)options;
     (void)unused1;
     (void)unused2;
-    
-    // Заглушка: ожидание завершения дочернего процесса
-    return (uint64_t)-1;
+
+    int status = 0;
+    int result = process_wait((uint32_t)pid, &status);
+
+    if (result >= 0 && status_ptr != 0) {
+        *(int *)status_ptr = status;
+    }
+
+    return (uint64_t)result;
 }
 
 // SYS_GETCWD (14): buffer, size
@@ -207,8 +252,27 @@ static uint64_t sys_sleep(uint64_t milliseconds,
     return 0;
 }
 
-// SYS_KILL (17): pid
+// SYS_KILL (17): pid, sig (0 = SIGTERM по умолчанию)
 static uint64_t sys_kill(uint64_t pid,
+                         uint64_t sig,
+                         uint64_t unused1,
+                         uint64_t unused2,
+                         uint64_t unused3) {
+    (void)unused1;
+    (void)unused2;
+    (void)unused3;
+
+    if (pid == 0)
+        return (uint64_t)-1;
+
+    int signal = sig ? (int)sig : SIGTERM;
+
+    return (uint64_t)process_signal((uint32_t)pid, signal);
+}
+
+// SYS_PIPE (18): fds_ptr (указывает на int[2] в памяти вызывающего:
+// fds[0] = конец на чтение, fds[1] = конец на запись)
+static uint64_t sys_pipe(uint64_t fds_ptr,
                          uint64_t unused1,
                          uint64_t unused2,
                          uint64_t unused3,
@@ -218,10 +282,18 @@ static uint64_t sys_kill(uint64_t pid,
     (void)unused3;
     (void)unused4;
 
-    if (pid == 0)
+    if (fds_ptr == 0)
         return (uint64_t)-1;
 
-    return (uint64_t)process_kill((uint32_t)pid);
+    int fds[2];
+    if (vfs_pipe(fds) != 0)
+        return (uint64_t)-1;
+
+    int *out = (int *)fds_ptr;
+    out[0] = fds[0];
+    out[1] = fds[1];
+
+    return 0;
 }
 
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
@@ -239,12 +311,13 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_MMAP]    = sys_mmap,
     [SYS_MUNMAP]  = sys_munmap,
     [SYS_EXEC]    = sys_exec,
-    [SYS_FORK]    = sys_fork,
+    // SYS_FORK намеренно не в этой таблице — см. syscall_handler().
     [SYS_WAIT]    = sys_wait,
     [SYS_GETCWD]  = sys_getcwd,
     [SYS_CHDIR]   = sys_chdir,
     [SYS_SLEEP]   = sys_sleep,
     [SYS_KILL]    = sys_kill,
+    [SYS_PIPE]    = sys_pipe,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
@@ -275,18 +348,26 @@ void syscall_init(void) {
     asm volatile("wrmsr" : : "c"(0xC0000080), "a"((uint32_t)efer),
                  "d"((uint32_t)(efer >> 32)));
     
-    printf("[SYSCALL] 18 system calls registered\n");
+    printf("[SYSCALL] 19 system calls registered\n");
 }
 
 // ========== ДИСПАТЧЕР ==========
 
 uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_t arg2,
-                         uint64_t arg3, uint64_t arg4, uint64_t arg5) {
+                         uint64_t arg3, uint64_t arg4, uint64_t arg5,
+                         uint64_t frame_ptr) {
+    // SYS_FORK — особый случай: ему нужен указатель на весь сохранённый
+    // кадр регистров (rip/rflags/callee-saved), а не только 5 обычных
+    // аргументов, поэтому он обрабатывается до общей таблицы диспетчера.
+    if (syscall_num == SYS_FORK) {
+        return process_fork(frame_ptr);
+    }
+
     if (syscall_num >= 256 || !syscall_table[syscall_num]) {
         printf("[SYSCALL] Unknown: %u\n", (uint32_t)syscall_num);
         return (uint64_t)-1;
     }
-    
+
     return syscall_table[syscall_num](arg1, arg2, arg3, arg4, arg5);
 }
 
