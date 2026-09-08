@@ -4,3 +4,6 @@ hello.c
 test/hello_simple.o
 test/fork_test.o
 test/pipe_test.o
+pipe_test.o
+fork_test.o
+hello_simple.o
