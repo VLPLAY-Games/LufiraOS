@@ -257,8 +257,27 @@ static uint64_t sys_sleep(uint64_t milliseconds,
     return 0;
 }
 
-// SYS_KILL (17): pid
+// SYS_KILL (17): pid, sig (0 = SIGTERM по умолчанию)
 static uint64_t sys_kill(uint64_t pid,
+                         uint64_t sig,
+                         uint64_t unused1,
+                         uint64_t unused2,
+                         uint64_t unused3) {
+    (void)unused1;
+    (void)unused2;
+    (void)unused3;
+
+    if (pid == 0)
+        return (uint64_t)-1;
+
+    int signal = sig ? (int)sig : SIGTERM;
+
+    return (uint64_t)process_signal((uint32_t)pid, signal);
+}
+
+// SYS_PIPE (18): fds_ptr (указывает на int[2] в памяти вызывающего:
+// fds[0] = конец на чтение, fds[1] = конец на запись)
+static uint64_t sys_pipe(uint64_t fds_ptr,
                          uint64_t unused1,
                          uint64_t unused2,
                          uint64_t unused3,
@@ -268,10 +287,18 @@ static uint64_t sys_kill(uint64_t pid,
     (void)unused3;
     (void)unused4;
 
-    if (pid == 0)
+    if (fds_ptr == 0)
         return (uint64_t)-1;
 
-    return (uint64_t)process_kill((uint32_t)pid);
+    int fds[2];
+    if (vfs_pipe(fds) != 0)
+        return (uint64_t)-1;
+
+    int *out = (int *)fds_ptr;
+    out[0] = fds[0];
+    out[1] = fds[1];
+
+    return 0;
 }
 
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
@@ -295,6 +322,7 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_CHDIR]   = sys_chdir,
     [SYS_SLEEP]   = sys_sleep,
     [SYS_KILL]    = sys_kill,
+    [SYS_PIPE]    = sys_pipe,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
@@ -325,7 +353,7 @@ void syscall_init(void) {
     asm volatile("wrmsr" : : "c"(0xC0000080), "a"((uint32_t)efer),
                  "d"((uint32_t)(efer >> 32)));
     
-    printf("[SYSCALL] 18 system calls registered\n");
+    printf("[SYSCALL] 19 system calls registered\n");
 }
 
 // ========== ДИСПАТЧЕР ==========

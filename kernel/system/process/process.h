@@ -16,13 +16,22 @@
 // PID никогда не достигают этого значения.
 #define WAIT_ANY_PID ((uint32_t)-1)
 
+// Сигналы: только действия по умолчанию (нет sigaction()/обработчиков в
+// user-space) — доставка синхронная, прямо в момент отправки (см.
+// process_signal() в process.c). Номера взяты как у настоящих POSIX-сигналов
+// просто для привычности.
+#define SIGKILL 9
+#define SIGTERM 15
+#define SIGCONT 18
+#define SIGSTOP 19
 
 typedef enum {
     PROCESS_READY = 0,
     PROCESS_RUNNING = 1,
     PROCESS_BLOCKED = 2,
     PROCESS_SLEEPING = 3,
-    PROCESS_TERMINATED = 4
+    PROCESS_TERMINATED = 4,
+    PROCESS_STOPPED = 5     // остановлен SIGSTOP, ждёт SIGCONT
 } process_state_t;
 
 typedef struct __attribute__((packed)) {
@@ -63,6 +72,14 @@ void process_reap(void);
 void process_sleep(uint64_t milliseconds);
 void process_ps(void);
 int process_kill(uint32_t pid);
+
+// Отправляет сигнал sig процессу pid и сразу применяет его действие по
+// умолчанию (см. SIGKILL/SIGTERM/SIGSTOP/SIGCONT выше): SIGKILL/SIGTERM
+// завершают процесс (exit_code = 128+sig, как в реальных шеллах),
+// SIGSTOP/SIGCONT останавливают/возобновляют его. process_kill() — просто
+// process_signal(pid, SIGKILL). Возвращает 0 при успехе, -1 если процесс
+// не найден (или сигнал неизвестен).
+int process_signal(uint32_t pid, int sig);
 
 // Немедленно убирает proc из списка планировщика (используется только для
 // отката недостроенного процесса, например если fork() не смог

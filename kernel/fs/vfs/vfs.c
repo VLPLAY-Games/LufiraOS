@@ -1,5 +1,6 @@
 #include "vfs.h"
 #include "system/mm/heap.h"
+#include "system/process/process.h"
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
 
@@ -124,6 +125,219 @@ static file_ops_t console_fops = {
 };
 
 static uint32_t dev_inode_counter = 200;
+
+/* ========== PIPES ========== */
+
+#define PIPE_BUF_SIZE 4096
+
+// Общее состояние одного анонимного pipe(). У read-конца и write-конца —
+// СВОИ отдельные inode_t (каждый со своим ref_count, который увеличивает
+// vfs_dup_fd() при fork()/dup2()), но оба указывают через
+// inode->private_data на ОДИН и тот же pipe_t. readers/writers считают
+// именно количество живых file_t-ссылок на соответствующий конец (а не
+// просто "открыт/закрыт"), чтобы fork() не путал дело.
+typedef struct pipe {
+    uint8_t *buffer;
+    uint32_t size;
+    uint32_t read_pos;
+    uint32_t write_pos;
+    uint32_t count;      // байт сейчас в буфере
+    int readers;
+    int writers;
+} pipe_t;
+
+static void pipe_free_if_orphaned(pipe_t *p) {
+    if (p->readers == 0 && p->writers == 0) {
+        kfree(p->buffer);
+        kfree(p);
+    }
+}
+
+static int pipe_read(file_t *f, void *buf, size_t count) {
+    pipe_t *p = (pipe_t *)(f->inode ? f->inode->private_data : NULL);
+    if (!p || !buf) return -1;
+
+    uint8_t *out = (uint8_t *)buf;
+    size_t total = 0;
+
+    while (total < count) {
+        if (p->count == 0) {
+            if (p->writers == 0) {
+                break; // писателей больше нет и буфер пуст - EOF
+            }
+            // Ждём данных: уступаем CPU, пока кто-то не запишет или не
+            // закроет последний write-конец (тот же приём, что и в
+            // process_sleep()/process_wait()).
+            current_process->state = PROCESS_BLOCKED;
+            schedule();
+            continue;
+        }
+
+        out[total] = p->buffer[p->read_pos];
+        p->read_pos = (p->read_pos + 1) % p->size;
+        p->count--;
+        total++;
+    }
+
+    return (int)total;
+}
+
+static int pipe_write(file_t *f, const void *buf, size_t count) {
+    pipe_t *p = (pipe_t *)(f->inode ? f->inode->private_data : NULL);
+    if (!p || !buf) return -1;
+
+    const uint8_t *in = (const uint8_t *)buf;
+    size_t total = 0;
+
+    while (total < count) {
+        if (p->readers == 0) {
+            break; // никто больше не читает - "сломанная труба"
+        }
+
+        if (p->count == p->size) {
+            current_process->state = PROCESS_BLOCKED;
+            schedule();
+            continue;
+        }
+
+        p->buffer[p->write_pos] = in[total];
+        p->write_pos = (p->write_pos + 1) % p->size;
+        p->count++;
+        total++;
+    }
+
+    if (total == 0 && count > 0)
+        return -1;
+
+    return (int)total;
+}
+
+static int pipe_seek(file_t *f, off_t offset, int whence) {
+    (void)f; (void)offset; (void)whence;
+    return -1; // пайпы не поддерживают seek
+}
+
+static int pipe_close_read(file_t *f) {
+    pipe_t *p = (pipe_t *)(f->inode ? f->inode->private_data : NULL);
+    if (p) {
+        p->readers--;
+        pipe_free_if_orphaned(p);
+    }
+    return 0;
+}
+
+static int pipe_close_write(file_t *f) {
+    pipe_t *p = (pipe_t *)(f->inode ? f->inode->private_data : NULL);
+    if (p) {
+        p->writers--;
+        pipe_free_if_orphaned(p);
+    }
+    return 0;
+}
+
+static file_ops_t pipe_read_fops = {
+    .read = pipe_read,
+    .write = NULL,
+    .seek = pipe_seek,
+    .close = pipe_close_read,
+};
+
+static file_ops_t pipe_write_fops = {
+    .read = NULL,
+    .write = pipe_write,
+    .seek = pipe_seek,
+    .close = pipe_close_write,
+};
+
+// Регистрирует ещё одну ссылку на уже открытый file_t (используется
+// fork()'ом и vfs_dup2() — оба случая, когда один и тот же file_t
+// оказывается в двух разных fd-слотах/процессах одновременно). Помимо
+// обычного inode->ref_count, для пайпов дополнительно увеличивает
+// readers/writers — иначе fork() ребёнка пайпа "потерял" бы одну из двух
+// независимых будущих vfs_close().
+void vfs_dup_fd(file_t *f) {
+    if (!f || !f->inode)
+        return;
+
+    f->inode->ref_count++;
+
+    if (f->inode->type == FT_PIPE && f->inode->private_data) {
+        pipe_t *p = (pipe_t *)f->inode->private_data;
+        if (f->ops == &pipe_read_fops) p->readers++;
+        else if (f->ops == &pipe_write_fops) p->writers++;
+    }
+}
+
+int vfs_pipe(int fds[2]) {
+    if (!fds || !current_fd_table)
+        return -1;
+
+    pipe_t *p = (pipe_t *)kmalloc(sizeof(pipe_t));
+    if (!p) return -1;
+
+    p->buffer = (uint8_t *)kmalloc(PIPE_BUF_SIZE);
+    if (!p->buffer) { kfree(p); return -1; }
+
+    p->size = PIPE_BUF_SIZE;
+    p->read_pos = 0;
+    p->write_pos = 0;
+    p->count = 0;
+    p->readers = 1;
+    p->writers = 1;
+
+    int read_fd = alloc_fd();
+    file_t *rf = (read_fd >= 0) ? alloc_file() : NULL;
+    if (!rf) { kfree(p->buffer); kfree(p); return -1; }
+
+    rf->fd = read_fd;
+    rf->inode = vfs_create_inode(dev_inode_counter++, FT_PIPE, NULL, p);
+    rf->flags = O_RDONLY;
+    rf->offset = 0;
+    rf->ops = &pipe_read_fops;
+    current_fd_table->files[read_fd] = rf;
+    current_fd_table->count++;
+
+    int write_fd = alloc_fd();
+    file_t *wf = (write_fd >= 0) ? alloc_file() : NULL;
+    if (!wf) {
+        vfs_close(read_fd); // откатываем уже открытый read-конец целиком
+        return -1;
+    }
+
+    wf->fd = write_fd;
+    wf->inode = vfs_create_inode(dev_inode_counter++, FT_PIPE, NULL, p);
+    wf->flags = O_WRONLY;
+    wf->offset = 0;
+    wf->ops = &pipe_write_fops;
+    current_fd_table->files[write_fd] = wf;
+    current_fd_table->count++;
+
+    fds[0] = read_fd;
+    fds[1] = write_fd;
+    return 0;
+}
+
+int vfs_dup2(int oldfd, int newfd) {
+    if (!current_fd_table)
+        return -1;
+    if (oldfd < 0 || oldfd >= MAX_FD_PER_PROCESS) return -1;
+    if (newfd < 0 || newfd >= MAX_FD_PER_PROCESS) return -1;
+    if (!current_fd_table->files[oldfd]) return -1;
+
+    if (oldfd == newfd)
+        return newfd;
+
+    if (current_fd_table->files[newfd]) {
+        vfs_close(newfd);
+    }
+
+    file_t *f = current_fd_table->files[oldfd];
+    vfs_dup_fd(f);
+    current_fd_table->files[newfd] = f;
+    current_fd_table->count++;
+
+    return newfd;
+}
 
 static int vfs_open_console(int flags) {
     int fd = alloc_fd();

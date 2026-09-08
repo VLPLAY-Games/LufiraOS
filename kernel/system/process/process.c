@@ -866,6 +866,9 @@ static const char *process_state_name(process_state_t state)
         case PROCESS_TERMINATED:
             return "TERMINATED";
 
+        case PROCESS_STOPPED:
+            return "STOPPED";
+
         default:
             return "UNKNOWN";
     }
@@ -902,7 +905,37 @@ void process_ps(void)
     irq_enable();
 }
 
-int process_kill(uint32_t pid)
+// Общая часть SIGKILL/SIGTERM (единственная разница между ними в этом
+// ядре — только в exit_code, т.к. пользовательских обработчиков сигналов
+// нет и оба в итоге просто завершают процесс).
+static int terminate_process_by_signal(process_t *p, int sig) {
+    if (p->state == PROCESS_TERMINATED)
+        return 0;
+
+    printf("[PROCESS] PID %u ('%s') terminated by signal %d\n",
+           p->pid, p->name, sig);
+
+    // Как и в настоящих шеллах: $? для процесса, убитого сигналом, — 128+sig.
+    p->exit_code = 128 + sig;
+    p->state = PROCESS_TERMINATED;
+
+    process_t *waiter = wake_waiting_parent(p);
+
+    if (p == current_process) {
+        if (waiter) {
+            switch_to_process(waiter);
+        } else {
+            schedule();
+        }
+
+        while (1)
+            asm volatile("hlt");
+    }
+
+    return 0;
+}
+
+int process_signal(uint32_t pid, int sig)
 {
     if (!process_list)
         return -1;
@@ -915,29 +948,37 @@ int process_kill(uint32_t pid)
             if (p == idle_process)
                 return -1;
 
-            if (p->state == PROCESS_TERMINATED)
-                return 0;
+            switch (sig) {
+                case SIGKILL:
+                case SIGTERM:
+                    return terminate_process_by_signal(p, sig);
 
-            printf("[PROCESS] Killing PID %u ('%s')\n",
-                   p->pid, p->name);
+                case SIGSTOP:
+                    if (p->state == PROCESS_TERMINATED)
+                        return 0;
 
-            p->exit_code = -1;
-            p->state = PROCESS_TERMINATED;
+                    printf("[PROCESS] PID %u ('%s') stopped\n",
+                           p->pid, p->name);
+                    p->state = PROCESS_STOPPED;
 
-            process_t *waiter = wake_waiting_parent(p);
+                    if (p == current_process) {
+                        // Останавливаем сами себя: уступаем CPU и
+                        // возобновимся здесь же, когда придёт SIGCONT.
+                        schedule();
+                    }
+                    return 0;
 
-            if (p == current_process) {
-                if (waiter) {
-                    switch_to_process(waiter);
-                } else {
-                    schedule();
-                }
+                case SIGCONT:
+                    if (p->state == PROCESS_STOPPED) {
+                        printf("[PROCESS] PID %u ('%s') continued\n",
+                               p->pid, p->name);
+                        p->state = PROCESS_READY;
+                    }
+                    return 0;
 
-                while (1)
-                    asm volatile("hlt");
+                default:
+                    return -1;
             }
-
-            return 0;
         }
 
         p = p->next;
@@ -945,6 +986,11 @@ int process_kill(uint32_t pid)
     } while (p && p != process_list);
 
     return -1;
+}
+
+int process_kill(uint32_t pid)
+{
+    return process_signal(pid, SIGKILL);
 }
 
 // Раскладка кадра регистров, который syscall_entry.S сохраняет на
@@ -1008,12 +1054,16 @@ uint64_t process_fork(uint64_t frame_ptr) {
 
     // fd-таблица: родитель и ребёнок получают собственные fd, но
     // указывающие на ОДНИ И ТЕ ЖЕ открытые file_t/inode — как и должно
-    // быть у настоящего fork().
+    // быть у настоящего fork(). vfs_dup_fd() увеличивает inode->ref_count
+    // и (для пайпов) readers/writers — этим счётчикам иначе неоткуда
+    // узнать, что у одного и того же file_t теперь два независимых
+    // "владельца" (родитель и ребёнок), каждый со своим будущим
+    // vfs_close().
     child->fd_table = parent->fd_table;
     for (int i = 0; i < MAX_FD_PER_PROCESS; i++) {
         file_t *f = child->fd_table.files[i];
-        if (f && f->inode) {
-            f->inode->ref_count++;
+        if (f) {
+            vfs_dup_fd(f);
         }
     }
 
