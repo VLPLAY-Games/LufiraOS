@@ -109,10 +109,19 @@ void shell_handle_enter(void) {
     input_buffer[current_line_length] = '\0';
     input_buffer_index = current_line_length;
     if (current_line_length > 0) add_to_history(input_buffer);
+    
+    char cmd_lower[INPUT_BUFFER_SIZE];
+    for (uint32_t i = 0; i < input_buffer_index; i++) cmd_lower[i] = to_lower(input_buffer[i]);
+    cmd_lower[input_buffer_index] = '\0';
+    
     put_char('\n');
     execute_command();
-    show_prompt();
+
+    if (strcmp(cmd_lower, "clear") != 0) {
+        show_prompt();
+    }
 }
+
 void shell_handle_left_arrow(void) {
     if (cursor_position_in_line > 0) {
         cursor_position_in_line--;
