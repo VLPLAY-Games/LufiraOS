@@ -1062,29 +1062,16 @@ static void history_set_visible_char(uint32_t x, uint32_t y, char c) {
 }
 
 static void history_render_line(uint32_t screen_y, uint32_t logical_line) {
-    if (screen_y >= screen_height_chars)
-        return;
+    if (screen_y >= screen_height_chars) return;
+
+    // Очищаем строку перед рендерингом
+    clear_console_line(screen_y);
 
     if (logical_line >= console_history_count) {
-        // Пустая строка
-        for (uint32_t x = 0;
-             x < screen_width_chars && x < CONSOLE_MAX_COLUMNS;
-             x++) {
-
-            put_char_graphic(
-                ' ',
-                x,
-                screen_y,
-                current_color,
-                current_bg_color
-            );
-        }
-
         return;
     }
 
     uint32_t index = history_get_index(logical_line);
-
     console_rendering_history = 1;
 
     for (uint32_t x = 0;
@@ -1092,11 +1079,8 @@ static void history_render_line(uint32_t screen_y, uint32_t logical_line) {
          x++) {
 
         console_history_cell_t *cell = &console_history[index][x];
-
         char c = cell->ch;
-
-        if (c == '\0')
-            c = ' ';
+        if (c == '\0') c = ' ';
 
         put_char_graphic(
             c,
@@ -1114,52 +1098,52 @@ static void history_render_line(uint32_t screen_y, uint32_t logical_line) {
 // ==================== FRAMEBUFFER SHIFT ====================
 
 static void framebuffer_shift_up(uint32_t lines) {
-    if (lines == 0)
-        return;
-
-    if (lines >= screen_height_chars)
-        return;
+    if (lines == 0) return;
+    if (lines >= screen_height_chars) return;
 
     uint32_t pixel_lines = lines * CONSOLE_LINE_HEIGHT;
+    if (pixel_lines >= screen_height_pixels) return;
 
-    if (pixel_lines >= screen_height_pixels)
-        return;
-
-    // Двигаем изображение вверх.
+    // Двигаем изображение вверх
     for (uint32_t y = pixel_lines; y < screen_height_pixels; y++) {
-
         uint32_t src_y = y;
         uint32_t dst_y = y - pixel_lines;
-
         for (uint32_t x = 0; x < screen_width_pixels; x++) {
             framebuffer[dst_y * pixels_per_scan_line + x] =
                 framebuffer[src_y * pixels_per_scan_line + x];
         }
     }
+
+    // Очищаем освободившиеся строки снизу
+    uint32_t clear_start = screen_height_pixels - pixel_lines;
+    for (uint32_t y = clear_start; y < screen_height_pixels; y++) {
+        for (uint32_t x = 0; x < screen_width_pixels; x++) {
+            framebuffer[y * pixels_per_scan_line + x] = current_bg_color;
+        }
+    }
 }
 
 static void framebuffer_shift_down(uint32_t lines) {
-    if (lines == 0)
-        return;
-
-    if (lines >= screen_height_chars)
-        return;
+    if (lines == 0) return;
+    if (lines >= screen_height_chars) return;
 
     uint32_t pixel_lines = lines * CONSOLE_LINE_HEIGHT;
+    if (pixel_lines >= screen_height_pixels) return;
 
-    if (pixel_lines >= screen_height_pixels)
-        return;
-
-    // ВАЖНО: двигаем снизу вверх, чтобы не затереть источник.
-    for (uint32_t y = screen_height_pixels;
-         y-- > pixel_lines;) {
-
+    // Двигаем изображение вниз (снизу вверх)
+    for (uint32_t y = screen_height_pixels; y-- > pixel_lines; ) {
         uint32_t src_y = y - pixel_lines;
         uint32_t dst_y = y;
-
         for (uint32_t x = 0; x < screen_width_pixels; x++) {
             framebuffer[dst_y * pixels_per_scan_line + x] =
                 framebuffer[src_y * pixels_per_scan_line + x];
+        }
+    }
+
+    // Очищаем освободившиеся строки сверху
+    for (uint32_t y = 0; y < pixel_lines && y < screen_height_pixels; y++) {
+        for (uint32_t x = 0; x < screen_width_pixels; x++) {
+            framebuffer[y * pixels_per_scan_line + x] = current_bg_color;
         }
     }
 }
@@ -1169,25 +1153,25 @@ static void framebuffer_shift_down(uint32_t lines) {
 
 void console_scroll_up(void) {
     uint32_t max_scroll = 0;
-
     if (console_history_count > screen_height_chars)
         max_scroll = console_history_count - screen_height_chars;
 
-    if (console_history_scroll >= max_scroll)
-        return;
+    if (console_history_scroll >= max_scroll) return;
 
-    if (cursor_enabled && cursor_visible)
-        erase_cursor();
+    if (cursor_enabled && cursor_visible) erase_cursor();
 
     console_history_scroll++;
 
-    // Старое содержимое двигаем вниз.
+    // Двигаем содержимое вниз
     framebuffer_shift_down(1);
 
-    // Какая строка теперь появилась сверху?
-    uint32_t top_line =
-        console_history_count - screen_height_chars;
+    // Очищаем первую строку перед перерисовкой
+    clear_console_line(0);
 
+    // Перерисовываем первую строку из истории
+    uint32_t top_line = console_history_count > screen_height_chars
+                        ? console_history_count - screen_height_chars
+                        : 0;
     if (console_history_scroll <= top_line)
         top_line -= console_history_scroll;
     else
@@ -1199,36 +1183,33 @@ void console_scroll_up(void) {
 }
 
 void console_scroll_down(void) {
-    if (console_history_scroll == 0)
-        return;
-
-    if (cursor_enabled && cursor_visible)
-        erase_cursor();
+    if (console_history_scroll == 0) return;
+    if (cursor_enabled && cursor_visible) erase_cursor();
 
     console_history_scroll--;
 
-    // Старое содержимое двигаем вверх.
+    // Двигаем содержимое вверх
     framebuffer_shift_up(1);
 
-    // Какая строка появилась снизу?
-    uint32_t top_line =
-        console_history_count > screen_height_chars
-            ? console_history_count - screen_height_chars
-            : 0;
+    // Очищаем последнюю строку перед перерисовкой
+    clear_console_line(screen_height_chars - 1);
 
+    // Перерисовываем последнюю строку из истории
+    uint32_t top_line = console_history_count > screen_height_chars
+                        ? console_history_count - screen_height_chars
+                        : 0;
     if (console_history_scroll <= top_line)
         top_line -= console_history_scroll;
     else
         top_line = 0;
 
-    uint32_t bottom_line =
-        top_line + screen_height_chars - 1;
+    uint32_t bottom_line = top_line + screen_height_chars - 1;
+    if (bottom_line >= console_history_count)
+        bottom_line = console_history_count - 1;
 
-    history_render_line(
-        screen_height_chars - 1,
-        bottom_line
-    );
+    history_render_line(screen_height_chars - 1, bottom_line);
 
+    // Восстанавливаем курсор если внизу
     if (console_history_scroll == 0) {
         cursor_visible = 0;
         draw_cursor();
@@ -1236,43 +1217,34 @@ void console_scroll_down(void) {
 }
 
 void console_scroll_to_bottom(void) {
-    if (console_history_scroll == 0)
-        return;
-
-    if (cursor_enabled && cursor_visible)
-        erase_cursor();
+    if (console_history_scroll == 0) return;
+    if (cursor_enabled && cursor_visible) erase_cursor();
 
     uint32_t lines = console_history_scroll;
 
     if (lines >= screen_height_chars) {
-        // Слишком далеко — просто перерисовываем видимую часть.
         console_history_scroll = 0;
-
         for (uint32_t y = 0; y < screen_height_chars; y++) {
-            uint32_t logical_line =
-                console_history_count > screen_height_chars
-                    ? console_history_count - screen_height_chars + y
-                    : y;
-
-            history_render_line(y, logical_line);
+            uint32_t logical_line = console_history_count > screen_height_chars
+                                    ? console_history_count - screen_height_chars + y
+                                    : y;
+            clear_console_line(y);
+            if (logical_line < console_history_count) {
+                history_render_line(y, logical_line);
+            }
         }
     } else {
-        // Возвращаем framebuffer вниз одним большим сдвигом.
         framebuffer_shift_up(lines);
-
         console_history_scroll = 0;
-
-        uint32_t first_new_line =
-            screen_height_chars - lines;
-
-        uint32_t first_logical_line =
-            console_history_count - lines;
+        uint32_t first_new_line = screen_height_chars - lines;
+        uint32_t first_logical_line = console_history_count - lines;
 
         for (uint32_t i = 0; i < lines; i++) {
-            history_render_line(
-                first_new_line + i,
-                first_logical_line + i
-            );
+            uint32_t y = first_new_line + i;
+            clear_console_line(y);
+            if (first_logical_line + i < console_history_count) {
+                history_render_line(y, first_logical_line + i);
+            }
         }
     }
 
@@ -1282,4 +1254,24 @@ void console_scroll_to_bottom(void) {
 
 int console_is_scrolled(void) {
     return console_history_scroll != 0;
+}
+
+void clear_console_line(uint32_t y) {
+    if (y >= screen_height_chars) return;
+    
+    uint32_t base_x = 0;
+    uint32_t base_y = y * (CHAR_HEIGHT + CHAR_PADDING_Y);
+    uint32_t width = screen_width_chars * (CHAR_WIDTH + CHAR_PADDING_X);
+    uint32_t height = CHAR_HEIGHT + CHAR_PADDING_Y;
+    
+    if (base_y + height > screen_height_pixels)
+        height = screen_height_pixels - base_y;
+    if (width > screen_width_pixels)
+        width = screen_width_pixels;
+        
+    for (uint32_t py = 0; py < height; py++) {
+        for (uint32_t px = 0; px < width; px++) {
+            put_pixel(base_x + px, base_y + py, current_bg_color);
+        }
+    }
 }
