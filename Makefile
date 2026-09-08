@@ -73,6 +73,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/drivers/disk/disk.c \
 	$(KERNEL_DIR)/drivers/sound/ac97.c \
 	$(KERNEL_DIR)/drivers/usb/uhci.c \
+	$(KERNEL_DIR)/drivers/usb/usb_hid.c \
 	$(KERNEL_DIR)/drivers/input/input.c \
     $(KERNEL_DIR)/shell/shell.c \
     $(KERNEL_DIR)/shell/commands/system.c \

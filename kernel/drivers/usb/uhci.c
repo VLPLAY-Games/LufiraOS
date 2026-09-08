@@ -1,5 +1,6 @@
 #include "uhci.h"
 #include "usb.h"
+#include "usb_hid.h"
 
 #include "drivers/pci/pci.h"
 #include "system/mm/pmm.h"
@@ -149,6 +150,30 @@ static uhci_port_state_t uhci_ports[2];
 static uhci_hid_device_t uhci_hid_devices[2];
 
 /* ======================================================================== */
+/* Периодическая (interrupt) передача клавиатуры                            */
+/* ======================================================================== */
+
+// Отдельная страница под TD/буферы периодических передач — их нельзя
+// держать в uhci_td_pool, потому что control_transfer() на каждый свой
+// вызов переиспользует его с самого начала (uhci_td_pool_next = 0),
+// затерев чужой постоянно висящий в расписании TD.
+#define UHCI_PERIODIC_KBD_TD_OFFSET  0    // uhci_td_t, 32 байта
+#define UHCI_PERIODIC_MOUSE_TD_OFFSET 32  // зарезервировано под фазу E
+#define UHCI_PERIODIC_KBD_BUF_OFFSET  128 // 8-байтный boot-отчёт клавиатуры
+#define UHCI_PERIODIC_MOUSE_BUF_OFFSET 144 // зарезервировано под фазу E
+
+static uint8_t *uhci_periodic_pool = NULL;
+
+static uhci_qh_t *uhci_kbd_qh = NULL;
+static uhci_td_t *uhci_kbd_td = NULL;
+static uint8_t   *uhci_kbd_buf = NULL;
+static uint8_t uhci_kbd_addr = 0;
+static uint8_t uhci_kbd_ep = 0;
+static uint8_t uhci_kbd_max_packet = 8;
+static int uhci_kbd_low_speed = 0;
+static int uhci_kbd_toggle = 0;
+
+/* ======================================================================== */
 /* Состояние драйвера                                                       */
 /* ======================================================================== */
 
@@ -247,6 +272,21 @@ static void uhci_reset(void) {
 /* Frame List (расписание на 1024 кадра, пока пустое)                       */
 /* ======================================================================== */
 
+// Переписывает ВСЕ 1024 слота Frame List так, чтобы каждый указывал на
+// начало цепочки QH. Пока клавиатурный interrupt-QH не настроен (uhci_kbd_qh
+// == NULL), первой (и единственной) в цепочке остаётся control QH — ровно
+// как было в фазах A/B/C. Как только uhci_start_keyboard_interrupt()
+// подключит interrupt-QH перед control QH (через его head_link), эта же
+// функция вызывается повторно, и расписание становится
+// interrupt(kbd) -> control.
+static void uhci_relink_schedule(void) {
+    uhci_qh_t *first = uhci_kbd_qh ? uhci_kbd_qh : &uhci_qh_pool[0];
+    uint32_t link = (((uint32_t)(uintptr_t)first) & ~0xFu) | UHCI_LINK_QH;
+    for (int i = 0; i < 1024; i++) {
+        uhci_frame_list[i] = link;
+    }
+}
+
 static int uhci_setup_frame_list(void) {
     uint64_t phys = pmm_alloc_page();
     if (!phys) {
@@ -267,7 +307,7 @@ static int uhci_setup_frame_list(void) {
     // напрямую по физическому адресу.
     uhci_frame_list = (uint32_t *)(uintptr_t)phys;
 
-    // Постоянно линкуем один control QH в КАЖДЫЙ слот расписания. Если
+    // Постоянно линкуем control QH в КАЖДЫЙ слот расписания. Если
     // подвешивать его только в frame_list[0] (и снимать после каждой
     // передачи), контроллер сам крутит FRNUM по кругу на 1024 кадра —
     // слот 0 обслуживается примерно раз в секунду, и 100мс-таймаут
@@ -278,10 +318,7 @@ static int uhci_setup_frame_list(void) {
     // кадре (<=1мс).
     uhci_qh_pool[0].head_link = UHCI_LINK_TERMINATE;
     uhci_qh_pool[0].element_link = UHCI_LINK_TERMINATE;
-    uint32_t qh_link = (((uint32_t)(uintptr_t)&uhci_qh_pool[0]) & ~0xFu) | UHCI_LINK_QH;
-    for (int i = 0; i < 1024; i++) {
-        uhci_frame_list[i] = qh_link;
-    }
+    uhci_relink_schedule();
 
     uhci_out16(uhci_io_base + UHCI_FRNUM, 0);
     uhci_out32(uhci_io_base + UHCI_FRBASEADD, (uint32_t)uhci_frame_list_phys);
@@ -767,6 +804,62 @@ static void uhci_enumerate_device(int port_index) {
 }
 
 /* ======================================================================== */
+/* Периодическая (interrupt) передача клавиатуры                            */
+/* ======================================================================== */
+
+static int uhci_setup_periodic_pool(void) {
+    uint64_t phys = pmm_alloc_page();
+    if (!phys || phys > 0xFFFFFFFFULL) {
+        printf("[UHCI] Failed to allocate periodic transfer pool\n");
+        if (phys) pmm_free_page(phys);
+        return 0;
+    }
+
+    uhci_periodic_pool = (uint8_t *)(uintptr_t)phys;
+    memset(uhci_periodic_pool, 0, 4096);
+    return 1;
+}
+
+// Настраивает постоянный interrupt-QH для найденной клавиатуры и подвешивает
+// на него один самопереустанавливающийся TD, читающий 8-байтный
+// boot-отчёт с её endpoint'а. QH подключается ПЕРЕД control QH (через
+// head_link) и остаётся в расписании навсегда — usb_poll() лишь
+// перевооружает TD, когда предыдущая передача завершается.
+static int uhci_start_keyboard_interrupt(const uhci_hid_device_t *dev) {
+    if (!uhci_periodic_pool && !uhci_setup_periodic_pool())
+        return -1;
+
+    uhci_kbd_qh  = &uhci_qh_pool[1];
+    uhci_kbd_td  = (uhci_td_t *)(uhci_periodic_pool + UHCI_PERIODIC_KBD_TD_OFFSET);
+    uhci_kbd_buf = uhci_periodic_pool + UHCI_PERIODIC_KBD_BUF_OFFSET;
+
+    uhci_kbd_addr = dev->address;
+    uhci_kbd_ep = dev->ep_addr;
+    uhci_kbd_max_packet = (dev->max_packet == 0 || dev->max_packet > 8) ? 8 : (uint8_t)dev->max_packet;
+    uhci_kbd_low_speed = dev->low_speed;
+    // SET_CONFIGURATION в uhci_enumerate_device() сбрасывает data toggle
+    // этого endpoint'а на аппарате в DATA0 — начинаем с того же значения.
+    uhci_kbd_toggle = 0;
+
+    uhci_kbd_qh->head_link = (((uint32_t)(uintptr_t)&uhci_qh_pool[0]) & ~0xFu) | UHCI_LINK_QH;
+    uhci_kbd_qh->element_link = UHCI_LINK_TERMINATE;
+
+    uhci_kbd_td->link = UHCI_LINK_TERMINATE;
+    uhci_kbd_td->token = uhci_td_make_token(UHCI_PID_IN, uhci_kbd_addr, uhci_kbd_ep,
+                                            uhci_kbd_toggle, uhci_kbd_max_packet);
+    uhci_kbd_td->buffer = (uint32_t)(uintptr_t)uhci_kbd_buf;
+    uhci_kbd_td->status = uhci_td_make_status(uhci_kbd_low_speed);
+
+    uhci_kbd_qh->element_link = ((uint32_t)(uintptr_t)uhci_kbd_td) & ~0xFu;
+
+    // Расписание было interrupt(kbd) отсутствует -> control; теперь
+    // становится interrupt(kbd) -> control.
+    uhci_relink_schedule();
+
+    return 0;
+}
+
+/* ======================================================================== */
 /* Публичный API                                                            */
 /* ======================================================================== */
 
@@ -797,6 +890,23 @@ void uhci_init(void) {
         uhci_enumerate_device(1);
     }
 
+    // Пока поддерживаем одну активную клавиатуру одновременно — первая
+    // найденная выигрывает (моделирование двух параллельных interrupt-QH
+    // клавиатур не входит в объём этой фазы).
+    for (int i = 0; i < 2; i++) {
+        if (uhci_hid_devices[i].valid &&
+            uhci_hid_devices[i].protocol == USB_HID_PROTOCOL_KEYBOARD)
+        {
+            if (uhci_start_keyboard_interrupt(&uhci_hid_devices[i]) == 0) {
+                uhci_ready = 1;
+                printf("[UHCI] Port %d: keyboard interrupt transfer armed\n", i);
+            } else {
+                printf("[UHCI] Port %d: failed to arm keyboard interrupt transfer\n", i);
+            }
+            break;
+        }
+    }
+
     printf("[UHCI] Controller ready\n");
 }
 
@@ -812,6 +922,23 @@ void usb_poll(void) {
     if (!uhci_ready)
         return;
 
-    // Периодическое расписание (клавиатура/мышь) появится в следующих
-    // фазах — пока опрашивать нечего.
+    if (uhci_kbd_td && !(uhci_kbd_td->status & UHCI_TD_STATUS_ACTIVE)) {
+        // Active сброшен контроллером сам — либо передача успешно
+        // завершилась (данные лежат в uhci_kbd_buf), либо это жёсткая
+        // ошибка (STALL/CRC/babble после исчерпания C_ERR). Обычный NAK
+        // ("клавиатуре нечего сказать") Active не сбрасывает вообще —
+        // контроллер сам бесконечно повторяет попытку каждый кадр, сюда
+        // мы в этом случае не попадаем.
+        uint32_t st = uhci_kbd_td->status;
+
+        if (!(st & UHCI_TD_STATUS_ERROR_MASK)) {
+            usb_hid_keyboard_report(uhci_kbd_buf);
+            uhci_kbd_toggle ^= 1; // toggle продвигается только на успехе
+        }
+        // На ошибке toggle НЕ трогаем — устройство его тоже не продвинуло.
+
+        uhci_kbd_td->token = uhci_td_make_token(UHCI_PID_IN, uhci_kbd_addr, uhci_kbd_ep,
+                                                uhci_kbd_toggle, uhci_kbd_max_packet);
+        uhci_kbd_td->status = uhci_td_make_status(uhci_kbd_low_speed);
+    }
 }
