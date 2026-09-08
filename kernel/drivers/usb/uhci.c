@@ -85,17 +85,21 @@ typedef struct __attribute__((packed, aligned(16))) {
     uint32_t sw_reserved[4]; // не используется контроллером, только для выравнивания
 } uhci_td_t;
 
-// TD.status (DWORD 1)
-#define UHCI_TD_STATUS_CERR_SHIFT 24
-#define UHCI_TD_STATUS_LS       (1 << 23) // Low Speed Device
-#define UHCI_TD_STATUS_IOC      (1 << 21) // Interrupt on Complete
-#define UHCI_TD_STATUS_ACTIVE   (1 << 20)
-#define UHCI_TD_STATUS_STALLED  (1 << 19)
-#define UHCI_TD_STATUS_DBUFERR  (1 << 18)
-#define UHCI_TD_STATUS_BABBLE   (1 << 17)
-#define UHCI_TD_STATUS_NAK      (1 << 16)
-#define UHCI_TD_STATUS_CRCTO    (1 << 15)
-#define UHCI_TD_STATUS_BITSTUFF (1 << 14)
+// TD.status (DWORD 1) — точные позиции битов из UHCI 1.1 Design Guide
+// (ошибочно были сдвинуты на 3 бита ниже при первой реализации: Active
+// писался в бит 20 вместо 23, из-за чего для full-speed устройств
+// реальный Active-бит контроллера вообще никогда не выставлялся, и
+// control-передачи гарантированно "висели" до таймаута).
+#define UHCI_TD_STATUS_CERR_SHIFT 27
+#define UHCI_TD_STATUS_LS       (1 << 26) // Low Speed Device
+#define UHCI_TD_STATUS_IOC      (1 << 24) // Interrupt on Complete
+#define UHCI_TD_STATUS_ACTIVE   (1 << 23)
+#define UHCI_TD_STATUS_STALLED  (1 << 22)
+#define UHCI_TD_STATUS_DBUFERR  (1 << 21)
+#define UHCI_TD_STATUS_BABBLE   (1 << 20)
+#define UHCI_TD_STATUS_NAK      (1 << 19)
+#define UHCI_TD_STATUS_CRCTO    (1 << 18)
+#define UHCI_TD_STATUS_BITSTUFF (1 << 17)
 #define UHCI_TD_STATUS_ERROR_MASK \
     (UHCI_TD_STATUS_STALLED | UHCI_TD_STATUS_DBUFERR | UHCI_TD_STATUS_BABBLE | \
      UHCI_TD_STATUS_CRCTO | UHCI_TD_STATUS_BITSTUFF)
@@ -262,8 +266,21 @@ static int uhci_setup_frame_list(void) {
     // Физическая память в этом ядре identity-mapped, так что можно писать
     // напрямую по физическому адресу.
     uhci_frame_list = (uint32_t *)(uintptr_t)phys;
+
+    // Постоянно линкуем один control QH в КАЖДЫЙ слот расписания. Если
+    // подвешивать его только в frame_list[0] (и снимать после каждой
+    // передачи), контроллер сам крутит FRNUM по кругу на 1024 кадра —
+    // слот 0 обслуживается примерно раз в секунду, и 100мс-таймаут
+    // control-передачи почти гарантированно её не застаёт (что и
+    // вызывало "control transfer timed out" на каждой энумерации).
+    // Держа QH во всех слотах, на каждую передачу меняем только
+    // qh->element_link — контроллер подхватывает её уже на следующем
+    // кадре (<=1мс).
+    uhci_qh_pool[0].head_link = UHCI_LINK_TERMINATE;
+    uhci_qh_pool[0].element_link = UHCI_LINK_TERMINATE;
+    uint32_t qh_link = (((uint32_t)(uintptr_t)&uhci_qh_pool[0]) & ~0xFu) | UHCI_LINK_QH;
     for (int i = 0; i < 1024; i++) {
-        uhci_frame_list[i] = UHCI_LINK_TERMINATE; // слот пуст
+        uhci_frame_list[i] = qh_link;
     }
 
     uhci_out16(uhci_io_base + UHCI_FRNUM, 0);
@@ -484,13 +501,14 @@ static int uhci_control_transfer(uint8_t addr, const usb_setup_packet_t *setup,
     uhci_td_link_to(prev, status_td);
     status_td->link = UHCI_LINK_TERMINATE;
 
-    // Подключаем цепочку к control QH и временно включаем его в расписание
-    // (слот 0 Frame List — во время энумерации периодического трафика ещё нет).
+    // Control QH уже постоянно висит в каждом слоте Frame List (см.
+    // uhci_setup_frame_list()) — подключаем цепочку TD к нему, ничего не
+    // трогая в самом Frame List, чтобы контроллер увидел её уже на
+    // следующем кадре, а не раз в 1024 кадра.
     uhci_qh_t *qh = &uhci_qh_pool[0];
-    qh->head_link = UHCI_LINK_TERMINATE;
     qh->element_link = ((uint32_t)(uintptr_t)setup_td) & ~0xFu;
 
-    uhci_frame_list[0] = (((uint32_t)(uintptr_t)qh) & ~0xFu) | UHCI_LINK_QH;
+    uint32_t qh_elem_before = qh->element_link;
 
     int done = 0;
     for (int timeout = 0; timeout < 100; timeout++) { // до ~100мс
@@ -498,11 +516,32 @@ static int uhci_control_transfer(uint8_t addr, const usb_setup_packet_t *setup,
         pit_wait_ms(1);
     }
 
-    uhci_frame_list[0] = UHCI_LINK_TERMINATE; // снимаем с расписания
+    uint32_t qh_elem_after = qh->element_link;
+    qh->element_link = UHCI_LINK_TERMINATE; // снимаем цепочку TD с QH
 
     if (!done) {
-        printf("[UHCI] control transfer timed out (addr=%u req=0x%02X)\n",
-               addr, setup->bRequest);
+        printf("[UHCI] control transfer timed out (addr=%u req=0x%02X)\n", addr, setup->bRequest);
+        printf("[UHCI]   USBSTS=%04X USBCMD=%04X FRNUM=%04X qh.elem before=%08X after=%08X (setup_td phys=%08X)\n",
+               uhci_in16(uhci_io_base + UHCI_USBSTS),
+               uhci_in16(uhci_io_base + UHCI_USBCMD),
+               uhci_in16(uhci_io_base + UHCI_FRNUM),
+               qh_elem_before, qh_elem_after,
+               (uint32_t)(uintptr_t)setup_td);
+        for (int i = 0; i < uhci_td_pool_next; i++) {
+            uint32_t st = uhci_td_pool[i].status;
+            printf("[UHCI]   TD %d: %s%s%s%s%s%s%s CERR=%u actlen=%u token=%08X\n",
+                   i,
+                   (st & UHCI_TD_STATUS_ACTIVE)   ? "ACTIVE "   : "",
+                   (st & UHCI_TD_STATUS_STALLED)  ? "STALL "    : "",
+                   (st & UHCI_TD_STATUS_DBUFERR)  ? "DBUFERR "  : "",
+                   (st & UHCI_TD_STATUS_BABBLE)   ? "BABBLE "   : "",
+                   (st & UHCI_TD_STATUS_NAK)      ? "NAK "      : "",
+                   (st & UHCI_TD_STATUS_CRCTO)    ? "CRC/TO "   : "",
+                   (st & UHCI_TD_STATUS_BITSTUFF) ? "BITSTUFF " : "",
+                   (st >> UHCI_TD_STATUS_CERR_SHIFT) & 0x3,
+                   st & 0x7FFu,
+                   uhci_td_pool[i].token);
+        }
         return -1;
     }
 
@@ -737,10 +776,12 @@ void uhci_init(void) {
 
     uhci_reset();
 
-    if (!uhci_setup_frame_list())
+    // Пулы (в частности uhci_qh_pool) должны существовать ДО построения
+    // Frame List — она линкует control QH в каждый свой слот сразу же.
+    if (!uhci_setup_transfer_pools())
         return;
 
-    if (!uhci_setup_transfer_pools())
+    if (!uhci_setup_frame_list())
         return;
 
     // Порт 0 энумерируется (и, что важно, переводится с адреса 0 на
