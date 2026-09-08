@@ -42,6 +42,7 @@ void command_help(void) {
     printf(" beep - Play beep to check sound\n");
     printf(" music - Play sample music to check sound\n");
     printf(" mixer <volume> - Change sound volume\n");
+    printf(" exec <file> - Replace current process with ELF program\n");
 }
 
 void command_clear(void) { clear_screen(); show_prompt(); }

@@ -4,6 +4,7 @@
 #include "fs/fat/fat.h"
 #include "system/elf/elf.h"
 #include "system/process/process.h"
+#include "system/syscall/syscall.h"
 
 extern fat_fs_t fatfs;
 extern char cwd_path[256];
@@ -332,7 +333,21 @@ void command_run(const char *filename) {
     if (elf_exec(file_buf, fsize, filename) == 0) {
         printf("Process started!\n");
     }
-    
+}
+
+// exec - заменяет ТЕКУЩИЙ процесс (shell) программой из filename.
+// В отличие от run, ничего нового не создаёт: при успехе управление в
+// shell уже не вернётся.
+void command_exec(const char *filename) {
+    if (!filename || *filename == '\0') {
+        printf("\nUsage: exec <filename>\n");
+        printf("Example: exec hello.elf\n");
+        return;
+    }
+
+    if (do_exec(filename) != 0) {
+        printf("\nExec failed: %s\n", filename);
+    }
     // Не освобождаем буфер - он используется процессом
 }
 

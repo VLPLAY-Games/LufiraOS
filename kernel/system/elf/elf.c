@@ -23,6 +23,10 @@ static void *memcpy(void *dest, const void *src, size_t n) {
     return dest;
 }
 
+static inline void outb(uint16_t port, uint8_t val) {
+    asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
 int elf_validate(const elf64_header_t *header) {
     if (header->magic != ELF_MAGIC) {
         printf("[ELF] Invalid magic: 0x%x\n", header->magic);
@@ -620,4 +624,85 @@ int elf_exec_background(const void *elf_data,
         name,
         1
     );
+}
+
+// Настоящий execve(): заменяет ОБРАЗ текущего процесса (например, shell)
+// программой из elf_data, вместо того чтобы создавать отдельный новый
+// процесс и переключаться на него. PID, ring0-стек и место процесса в
+// списке планировщика не меняются — управление просто больше никогда не
+// возвращается к старому коду процесса.
+int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
+{
+    asm volatile("cli");
+
+    process_t *proc = current_process;
+    if (!proc) {
+        asm volatile("sti");
+        kfree((void*)elf_data);
+        return -1;
+    }
+
+    uint64_t new_pml4, new_stack;
+    if (process_prepare_exec(proc, &new_pml4, &new_stack) != 0) {
+        printf("[ELF] exec: not enough memory for new address space\n");
+        asm volatile("sti");
+        kfree((void*)elf_data);
+        return -1;
+    }
+
+    // Грузим ELF во ВРЕМЕННЫЙ локальный дескриптор с новым pml4, чтобы не
+    // трогать текущий (ещё рабочий) образ proc, пока не убедимся, что
+    // новая программа загрузилась успешно.
+    process_t shadow = *proc;
+    shadow.page_table = new_pml4;
+
+    void *entry = elf_load_to_process(elf_data, elf_size, &shadow, name);
+
+    kfree((void*)elf_data);
+
+    if (!entry) {
+        printf("[ELF] exec: failed to load '%s', old process untouched\n", name);
+        asm volatile("sti");
+        return -1;
+    }
+
+    // Готовим начальный кадр пользовательского стека новой программы —
+    // так же, как это делает process_create() для только что созданного
+    // процесса: возврат "с конца" main() уводит в process_exit().
+    uint64_t old_cr3;
+    asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
+    asm volatile("mov %0, %%cr3" : : "r"(new_pml4) : "memory");
+
+    uint64_t rsp = new_stack;
+    rsp -= 8;
+    *(uint64_t*)rsp = (uint64_t)process_exit;
+
+    asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
+
+    process_commit_exec(proc, new_pml4, new_stack, name);
+
+    process_context_t *ctx = &proc->context;
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->rsp = rsp;
+    ctx->rip = (uint64_t)entry;
+    ctx->rflags = 0x202;
+    ctx->cr3 = new_pml4;
+
+    printf("[ELF] Process %u replaced with '%s' (entry=0x%lx)\n",
+           proc->pid, name, (uint64_t)entry);
+
+    // Отсюда мы уже никогда не вернёмся по этому стеку вызовов, а shell-
+    // команда "exec" обычно вызывается прямо из обработчика IRQ1
+    // (клавиатура), и штатный send_eoi() в irq_handler() для НЕГО не
+    // выполнится. Подтверждаем прерывание вручную, иначе PIC будет
+    // считать IRQ1 "в обслуживании" и клавиатура перестанет отвечать.
+    outb(0x20, 0x20);
+
+    // Прыгаем в новый образ процесса и не возвращаемся: старый контекст
+    // (стек вызовов exec/do_exec/shell/...) сохранять некуда и незачем —
+    // это и есть "замена", а не создание нового процесса.
+    process_context_t discard;
+    context_switch(&discard, ctx);
+
+    __builtin_unreachable();
 }

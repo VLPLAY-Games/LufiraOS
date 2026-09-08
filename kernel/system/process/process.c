@@ -155,6 +155,8 @@ void process_init(void) {
     if (!idle_process) return;
     
     idle_process->pid = 0;
+    idle_process->ppid = 0;
+    idle_process->exit_code = 0;
     idle_process->state = PROCESS_READY;
     idle_process->stack_base = 0;
     idle_process->stack_size = 0;
@@ -240,6 +242,8 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     }
     
     proc->pid = next_pid++;
+    proc->ppid = current_process ? current_process->pid : 0;
+    proc->exit_code = 0;
     proc->state = PROCESS_READY;
     
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
@@ -328,7 +332,7 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     return proc;
 }
 
-void process_exit(void) {
+void process_exit(int exit_code) {
     process_t *exiting_process = current_process;
 
     if (!exiting_process) {
@@ -336,10 +340,12 @@ void process_exit(void) {
             asm volatile("hlt");
     }
 
-    printf("\n[PROCESS] Process %u ('%s') exiting\n",
+    printf("\n[PROCESS] Process %u ('%s') exiting (code %d)\n",
            exiting_process->pid,
-           exiting_process->name);
+           exiting_process->name,
+           exit_code);
 
+    exiting_process->exit_code = exit_code;
     exiting_process->state = PROCESS_TERMINATED;
 
     schedule();
@@ -349,6 +355,64 @@ void process_exit(void) {
      */
     while (1)
         asm volatile("hlt");
+}
+
+// Готовит НОВОЕ адресное пространство и пользовательский стек для exec(),
+// не трогая ничего в уже работающем процессе proc. Если памяти не хватило,
+// ничего не остаётся привязанным к proc — старый образ процесса цел и
+// вызывающий код может просто сообщить об ошибке и продолжить работу.
+int process_prepare_exec(process_t *proc,
+                          uint64_t *new_pml4_out,
+                          uint64_t *new_stack_out)
+{
+    if (!proc || !new_pml4_out || !new_stack_out)
+        return -1;
+
+    uint64_t new_pml4 = create_address_space(kernel_cr3);
+    if (!new_pml4)
+        return -1;
+
+    uint64_t current_kernel_pml4;
+    asm volatile("mov %%cr3, %0" : "=r"(current_kernel_pml4));
+    sync_kernel_mappings(new_pml4, current_kernel_pml4);
+
+    uint64_t new_stack = allocate_user_stack(USER_STACK_SIZE, new_pml4, proc->pid);
+    if (!new_stack) {
+        pmm_free_page(new_pml4);
+        return -1;
+    }
+
+    *new_pml4_out = new_pml4;
+    *new_stack_out = new_stack;
+    return 0;
+}
+
+// Подтверждает exec(): переключает proc на уже подготовленные (и
+// заполненные загруженным ELF) адресное пространство и стек. PID,
+// ring0-стек и позиция в списке планировщика не меняются — это замена
+// образа процесса на месте, а не создание нового процесса.
+//
+// Старое адресное пространство/стек proc намеренно не освобождаются:
+// в кодовой базе пока нет функции разбора/освобождения PML4 целиком
+// (process_reap() точно так же не освобождает page_table завершённых
+// процессов), так что делать это только здесь было бы половинчатым
+// решением.
+int process_commit_exec(process_t *proc,
+                        uint64_t new_pml4,
+                        uint64_t new_stack,
+                        const char *name)
+{
+    if (!proc)
+        return -1;
+
+    proc->page_table = new_pml4;
+    proc->stack_base = new_stack;
+    proc->stack_size = USER_STACK_SIZE;
+
+    for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
+    proc->name[31] = '\0';
+
+    return 0;
 }
 
 void process_reap(void) {

@@ -32,9 +32,11 @@ typedef struct __attribute__((packed)) {
 
 typedef struct process {
     uint32_t pid;
+    uint32_t ppid;          // 0 = нет родителя (например, до fork()/wait())
     char name[32];
     process_state_t state;
     uint64_t wakeup_tick;
+    int exit_code;          // валиден, когда state == PROCESS_TERMINATED
     process_context_t context;
     uint64_t stack_base;
     uint64_t stack_size;
@@ -46,13 +48,30 @@ typedef struct process {
 
 void process_init(void);
 process_t* process_create(const char *name, void (*entry)(void));
-void process_exit(void);
+void process_exit(int exit_code);
 void schedule(void);
 void switch_to_process(process_t *next);
 void process_reap(void);
 void process_sleep(uint64_t milliseconds);
 void process_ps(void);
 int process_kill(uint32_t pid);
+
+// Готовит новое адресное пространство и пользовательский стек для exec(),
+// не трогая текущий образ proc (см. elf_exec_replace()).
+int process_prepare_exec(
+    process_t *proc,
+    uint64_t *new_pml4_out,
+    uint64_t *new_stack_out
+);
+
+// Подтверждает exec(): переключает proc на уже подготовленные (и
+// заполненные) адресное пространство и стек, оставляя тот же PID.
+int process_commit_exec(
+    process_t *proc,
+    uint64_t new_pml4,
+    uint64_t new_stack,
+    const char *name
+);
 
 extern uint64_t kernel_cr3;
 

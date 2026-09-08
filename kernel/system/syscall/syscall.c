@@ -1,11 +1,53 @@
 #include "syscall.h"
 #include "drivers/console/console.h"
 #include "system/process/process.h"
+#include "system/elf/elf.h"
 #include "system/timer/pit.h"
 #include "system/cpu/gdt.h"
 #include "system/mm/heap.h"
 #include "lib/stddef.h"
 #include "fs/vfs/vfs.h"
+
+// Открывает filename через VFS, читает его целиком и заменяет им текущий
+// процесс через elf_exec_replace() (настоящий execve()). Используется и
+// шеллом (команда "exec"), и системным вызовом SYS_EXEC.
+int do_exec(const char *filename) {
+    if (!filename || !*filename) return -1;
+
+    int fd = vfs_open(filename, O_RDONLY);
+    if (fd < 0) {
+        printf("[EXEC] Failed to open %s\n", filename);
+        return -1;
+    }
+
+    file_t *f = current_fd_table->files[fd];
+    if (!f || !f->inode) {
+        vfs_close(fd);
+        return -1;
+    }
+    uint32_t size = f->inode->size;
+    if (size == 0) {
+        vfs_close(fd);
+        return -1;
+    }
+
+    uint8_t *buf = (uint8_t *)kmalloc(size);
+    if (!buf) {
+        vfs_close(fd);
+        return -1;
+    }
+
+    int bytes_read = vfs_read(fd, buf, size);
+    vfs_close(fd);
+    if (bytes_read != (int)size) {
+        kfree(buf);
+        return -1;
+    }
+
+    // elf_exec_replace() освобождает buf при любом исходе (успех или
+    // неудача), поэтому здесь его повторно не освобождаем.
+    return elf_exec_replace(buf, size, filename);
+}
 
 typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
@@ -47,7 +89,7 @@ static uint64_t sys_exit(uint64_t exit_code, uint64_t unused1, uint64_t unused2,
            current_process ? current_process->pid : 0, 
            (uint32_t)exit_code);
     
-    process_exit();
+    process_exit((int)exit_code);
     while (1) __asm__("hlt");
     return 0;
 }
@@ -142,11 +184,11 @@ static uint64_t sys_exec(uint64_t filename_ptr, uint64_t argv_ptr,
     if (filename_ptr == 0) return (uint64_t)-1;
     
     const char *filename = (const char *)filename_ptr;
-    printf("[SYS_EXEC] %s\n", filename);
-    
-    // Заглушка: загрузка и запуск ELF
-    // Будет вызывать elf_exec() после VFS
-    return (uint64_t)-1;
+
+    // do_exec() -> elf_exec_replace() не возвращается по этому стеку
+    // вызовов при успехе (настоящий execve()) — возврат сюда возможен
+    // только при ошибке.
+    return (uint64_t)do_exec(filename);
 }
 
 // SYS_FORK (12)
