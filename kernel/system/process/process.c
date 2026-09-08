@@ -6,23 +6,11 @@
 #include "system/cpu/gdt.h"
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
+#include "lib/string.h"
 
 #ifndef PAGE_PS
 #define PAGE_PS 0x80    // Page size (2MB/1GB) — как и в elf.c
 #endif
-
-static void *memset(void *s, int c, size_t n) {
-    unsigned char *p = (unsigned char *)s;
-    while (n--) *p++ = (unsigned char)c;
-    return s;
-}
-
-static void *memcpy(void *dest, const void *src, size_t n) {
-    unsigned char *d = (unsigned char *)dest;
-    const unsigned char *s = (const unsigned char *)src;
-    while (n--) *d++ = *s++;
-    return dest;
-}
 
 process_t *process_list = NULL;
 process_t *current_process = NULL;
@@ -123,14 +111,6 @@ static void free_ring0_stack(process_t *proc) {
     kfree(pages);
     proc->ring0_stack_pages = 0;
     proc->ring0_stack = 0;
-}
-
-static void idle_thread(void) {
-    while (1) {
-        asm volatile("sti");
-        asm volatile("hlt");
-        schedule();
-    }
 }
 
 // Создаёт новое адресное пространство на основе КОРНЕВОГО ядерного PML4

@@ -684,69 +684,6 @@ const pci_device_t* pci_find_class_if(
 }
 
 /* =========================================================
- * Read BAR size helper
- * ========================================================= */
-
-static uint32_t pci_bar_size32(
-    const pci_device_t* dev,
-    uint8_t offset
-)
-{
-    uint32_t original;
-    uint32_t probe;
-    uint32_t mask;
-
-    original = pci_config_read32(
-        dev->bus,
-        dev->device,
-        dev->function,
-        offset
-    );
-
-    pci_config_write32(
-        dev->bus,
-        dev->device,
-        dev->function,
-        offset,
-        0xFFFFFFFF
-    );
-
-    probe = pci_config_read32(
-        dev->bus,
-        dev->device,
-        dev->function,
-        offset
-    );
-
-    pci_config_write32(
-        dev->bus,
-        dev->device,
-        dev->function,
-        offset,
-        original
-    );
-
-    if (probe == 0 ||
-        probe == 0xFFFFFFFF) {
-
-        return 0;
-    }
-
-    /*
-     * I/O BAR.
-     */
-    if (original & PCI_BAR_TYPE_IO) {
-
-        mask = probe & ~0x3U;
-    } else {
-
-        mask = probe & ~0xFULL;
-    }
-
-    return (~mask) + 1;
-}
-
-/* =========================================================
  * Get BAR
  * ========================================================= */
 

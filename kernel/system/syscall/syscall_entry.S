@@ -88,3 +88,5 @@ syscall_entry:
     iretq
 
 .size syscall_entry, .-syscall_entry
+
+.section .note.GNU-stack,"",@progbits

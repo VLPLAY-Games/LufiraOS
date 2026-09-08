@@ -5,23 +5,11 @@
 #include "system/process/process.h"
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
+#include "lib/string.h"
 
 #ifndef PAGE_PS
 #define PAGE_PS     0x80    // Page size (2MB / 1GB)
 #endif
-
-static void *memset(void *s, int c, size_t n) {
-    unsigned char *p = (unsigned char *)s;
-    while (n--) *p++ = (unsigned char)c;
-    return s;
-}
-
-static void *memcpy(void *dest, const void *src, size_t n) {
-    unsigned char *d = (unsigned char *)dest;
-    const unsigned char *s = (const unsigned char *)src;
-    while (n--) *d++ = *s++;
-    return dest;
-}
 
 static inline void outb(uint16_t port, uint8_t val) {
     asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));

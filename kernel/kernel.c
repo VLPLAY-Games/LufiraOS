@@ -56,67 +56,6 @@ static void pic_remap(void) {
 
 fat_fs_t fatfs;
 
-// Демонстрация системного вызова
-static void test_syscall_task(void) {
-    const char *msg = "[Syscall] Hello from sys_write!\n";
-    
-    // Вызов sys_write через syscall инструкцию
-    // SYS_WRITE = 0, fd = 0 (stdout), buffer = msg, length = strlen(msg)
-    asm volatile(
-        "movq %[sys_num], %%rax\n"
-        "movq %[fd], %%rdi\n"
-        "movq %[buffer], %%rsi\n"
-        "movq %[length], %%rdx\n"
-        "syscall\n"
-        :
-        : [sys_num] "r"(0ULL),     // SYS_WRITE
-          [fd] "r"(0ULL),           // stdout
-          [buffer] "r"((uint64_t)msg),
-          [length] "r"(30ULL)
-        : "rax", "rdi", "rsi", "rdx", "rcx", "r11", "memory"
-    );
-    
-    // Получаем PID через syscall
-    uint64_t pid;
-    asm volatile(
-        "movq %[sys_num], %%rax\n"
-        "syscall\n"
-        "movq %%rax, %[result]\n"
-        : [result] "=r"(pid)
-        : [sys_num] "r"(3ULL)  // SYS_GETPID
-        : "rax", "rcx", "r11", "memory"
-    );
-    
-    printf("[Syscall] My PID is %u\n", (uint32_t)pid);
-    
-    // Получаем тики
-    uint64_t ticks;
-    asm volatile(
-        "movq %[sys_num], %%rax\n"
-        "syscall\n"
-        "movq %%rax, %[result]\n"
-        : [result] "=r"(ticks)
-        : [sys_num] "r"(5ULL)  // SYS_GETTICK
-        : "rax", "rcx", "r11", "memory"
-    );
-    
-    printf("[Syscall] Current tick: %u\n", (uint32_t)ticks);
-    
-    // Выходим через syscall
-    asm volatile(
-        "movq %[sys_num], %%rax\n"
-        "movq %[code], %%rdi\n"
-        "syscall\n"
-        :
-        : [sys_num] "r"(2ULL),  // SYS_EXIT
-          [code] "r"(0ULL)
-        : "rax", "rdi", "rcx", "r11", "memory"
-    );
-    
-    // Сюда не должны попасть
-    while(1) __asm__("hlt");
-}
-
 static void shell_task(void) {
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);

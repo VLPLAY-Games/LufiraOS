@@ -98,6 +98,7 @@ inode_t* vfs_create_inode(uint32_t ino, file_type_t type,
                            inode_ops_t *ops, void *private_data);
 void vfs_register_dev(const char *name, file_ops_t *fops, file_type_t type);
 int alloc_fd(void);
+file_t* alloc_file(void);
 int vfs_create(const char *path);
 int vfs_unlink(const char *path);
 

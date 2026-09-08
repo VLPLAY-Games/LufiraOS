@@ -3,6 +3,7 @@
 #include "drivers/console/console.h"
 #include "drivers/keyboard/keyboard.h"
 #include "fs/fat/fat.h"
+#include "system/process/process.h"
 
 extern fat_fs_t fatfs;
 
@@ -23,28 +24,6 @@ static int history_count = 0;
 static int history_index = -1;
 static int history_current = 0;
 
-int strcmp(const char* s1, const char* s2) {
-    while (*s1 && (*s1 == *s2)) { s1++; s2++; }
-    return *(const unsigned char*)s1 - *(const unsigned char*)s2;
-}
-int strncmp(const char* s1, const char* s2, size_t n) {
-    if (n == 0) return 0;
-    while (n-- && *s1 && (*s1 == *s2)) { s1++; s2++; }
-    if (n == (size_t)-1) return 0;
-    return *(const unsigned char*)s1 - *(const unsigned char*)s2;
-}
-char to_lower(char c) {
-    if (c >= 'A' && c <= 'Z') return c + ('a' - 'A');
-    return c;
-}
-int strcmp_case_insensitive(const char* s1, const char* s2) {
-    while (*s1 && *s2) {
-        char c1 = to_lower(*s1), c2 = to_lower(*s2);
-        if (c1 != c2) return c1 - c2;
-        s1++; s2++;
-    }
-    return to_lower(*s1) - to_lower(*s2);
-}
 void add_to_history(const char* command) {
     if (command[0] == '\0') return;
     if (history_count > 0 && strcmp(command_history[history_count - 1], command) == 0) return;
@@ -60,10 +39,6 @@ void add_to_history(const char* command) {
 const char* get_history_command(int index) {
     if (index < 0 || index >= history_count) return NULL;
     return command_history[index];
-}
-void strcpy(char* dest, const char* src) {
-    while (*src) *dest++ = *src++;
-    *dest = '\0';
 }
 void shell_refresh_input_line(void) {
     set_cursor_position(command_start_x, command_start_y);

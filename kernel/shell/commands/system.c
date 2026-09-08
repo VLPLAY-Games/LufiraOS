@@ -6,6 +6,8 @@
 #include "fs/fat/fat.h"
 #include "system/acpi/acpi.h"
 #include "system/process/process.h"
+#include "system/mm/heap.h"
+#include "system/elf/elf.h"
 
 extern fat_fs_t fatfs;
 

@@ -25,3 +25,4 @@
 void pit_init(void);
 void pit_set_frequency(uint32_t hz);
 uint64_t pit_get_ticks(void);
+void timer_irq_handler(void);

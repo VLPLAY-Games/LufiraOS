@@ -2,14 +2,11 @@
 
 #include "drivers/console/console.h"
 #include "drivers/keyboard/keyboard.h"
+#include "lib/string.h"
 
 // Прототипы функций
 void show_prompt(void);
 void execute_command(void);
-int strcmp(const char* s1, const char* s2);
-char to_lower(char c);
-int strcmp_case_insensitive(const char* s1, const char* s2);
-void strcpy(char* dest, const char* src);
 
 // Функции для обработки ввода с клавиатуры
 void shell_handle_char(char c);

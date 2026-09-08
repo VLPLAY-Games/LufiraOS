@@ -55,7 +55,7 @@ KERNEL_CFLAGS := -m64 -ffreestanding -fno-stack-protector -fno-stack-check \
                  -mno-red-zone -mgeneral-regs-only \
                  -Wall -Wextra -std=gnu11 -c -I$(KERNEL_DIR)
 
-KERNEL_LDFLAGS := -static -nostdlib -z max-page-size=0x1000 --gc-sections
+KERNEL_LDFLAGS := -static -nostdlib -z max-page-size=0x1000 -z separate-code --gc-sections
 
 BOOTLOADER_SOURCES := $(shell find $(BOOTLOADER_DIR) -name '*.c')
 BOOTLOADER_OBJECTS := $(patsubst $(BOOTLOADER_DIR)/%.c,$(BUILD_DIR)/boot/%.o,$(BOOTLOADER_SOURCES))

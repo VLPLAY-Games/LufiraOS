@@ -3,6 +3,7 @@
 #include "system/mm/heap.h"
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
+#include "lib/string.h"
 
 extern fat_fs_t fatfs;
 
@@ -51,19 +52,7 @@ inode_t *vfs_fat_lookup(const char *path);
 inode_t *vfs_fat_get_root(void);
 
 /* ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ========== */
-
-static void *memset(void *s, int c, size_t n) {
-    unsigned char *p = (unsigned char *)s;
-    while (n--) *p++ = (unsigned char)c;
-    return s;
-}
-
-static void *memcpy(void *dest, const void *src, size_t n) {
-    char *d = (char *)dest;
-    const char *s = (const char *)src;
-    while (n--) *d++ = *s++;
-    return dest;
-}
+// memset()/memcpy()/strcmp() теперь берутся из lib/string.h.
 
 /* ========== ОПЕРАЦИИ ДЛЯ FAT-ФАЙЛОВ ========== */
 

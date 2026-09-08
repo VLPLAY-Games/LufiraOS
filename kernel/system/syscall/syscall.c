@@ -146,15 +146,17 @@ static uint64_t sys_seek(uint64_t fd, uint64_t offset, uint64_t whence,
 }
 
 // SYS_MMAP (9): addr, length, prot, flags, fd, offset
+// Заглушка: как и остальные syscall'ы, ограничена 5 аргументами (arg1-arg5)
+// диспетчера — offset для настоящего mmap() придётся передавать иначе,
+// когда эта функция будет реально реализована.
 static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
-                         uint64_t flags, uint64_t fd, uint64_t offset) {
+                         uint64_t flags, uint64_t fd) {
     (void)addr;
     (void)length;
     (void)prot;
     (void)flags;
     (void)fd;
-    (void)offset;
-    
+
     // Заглушка: выделение памяти пользователю
     // Будет реализовано позже
     return 0;

@@ -5,6 +5,7 @@
 #include "system/elf/elf.h"
 #include "system/process/process.h"
 #include "system/syscall/syscall.h"
+#include "system/mm/heap.h"
 
 extern fat_fs_t fatfs;
 extern char cwd_path[256];

@@ -4,6 +4,8 @@
 #include "console.h"
 #include "lib/colors.h"
 
+static void clear_console_line(uint32_t y);
+
 // Глобальные переменные состояния консоли
 uint32_t current_x = 0;
 uint32_t current_y = 0;
@@ -1256,7 +1258,7 @@ int console_is_scrolled(void) {
     return console_history_scroll != 0;
 }
 
-void clear_console_line(uint32_t y) {
+static void clear_console_line(uint32_t y) {
     if (y >= screen_height_chars) return;
     
     uint32_t base_x = 0;

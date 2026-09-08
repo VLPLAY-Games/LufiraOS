@@ -131,3 +131,5 @@ context_switch:
     jmp *%r11
 
 .size context_switch, .-context_switch
+
+.section .note.GNU-stack,"",@progbits

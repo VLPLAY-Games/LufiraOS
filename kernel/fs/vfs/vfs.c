@@ -3,6 +3,7 @@
 #include "system/process/process.h"
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
+#include "lib/string.h"
 
 extern int vfs_open_fat(const char *path, int flags);
 
@@ -25,17 +26,7 @@ file_t *file_table[MAX_FILES_SYSTEM] = {0};
 fd_table_t *current_fd_table = NULL;
 
 /* ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ========== */
-
-static void *memset(void *s, int c, size_t n) {
-    unsigned char *p = (unsigned char *)s;
-    while (n--) *p++ = (unsigned char)c;
-    return s;
-}
-
-static int strcmp(const char *s1, const char *s2) {
-    while (*s1 && *s1 == *s2) { s1++; s2++; }
-    return *(unsigned char *)s1 - *(unsigned char *)s2;
-}
+// memset()/strcmp() теперь берутся из lib/string.h — общей библиотеки ядра.
 
 int alloc_fd(void) {
     for (int i = 0; i < MAX_FD_PER_PROCESS; i++) {

@@ -3,19 +3,7 @@
 #include "system/mm/heap.h"
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
-
-static void* memcpy(void* dest, const void* src, unsigned int n) {
-    char* d = (char*)dest;
-    const char* s = (const char*)src;
-    while (n--) *d++ = *s++;
-    return dest;
-}
-
-static void* memset(void* s, int c, unsigned int n) {
-    unsigned char* p = (unsigned char*)s;
-    while (n--) *p++ = (unsigned char)c;
-    return s;
-}
+#include "lib/string.h"
 
 uint32_t read_le32(const uint8_t *p) {
     return p[0] | (p[1]<<8) | (p[2]<<16) | (p[3]<<24);
