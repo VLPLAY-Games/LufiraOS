@@ -1,6 +1,7 @@
 #include "pit.h"
 #include "drivers/console/console.h"
 #include "system/process/process.h"
+#include "drivers/usb/uhci.h"
 
 // Порты I/O
 static inline void outb(uint16_t port, uint8_t val) {
@@ -42,6 +43,20 @@ uint64_t pit_get_ticks(void) {
     return pit_ticks;
 }
 
+// Настоящая, откалиброванная по тикам PIT задержка (в отличие от
+// разбросанных по драйверам циклов "for (volatile int i = 0; i < N; i++)"
+// без привязки к реальному времени). Требует, чтобы прерывания уже были
+// разрешены (sti + irq_enable(0)) — иначе pit_ticks никогда не вырастет.
+void pit_wait_ms(uint32_t ms) {
+    if (ms == 0) return;
+
+    uint64_t target = pit_ticks + (ms + 9) / 10; // PIT_FREQUENCY = 100 Гц = 10 мс/тик
+
+    while (pit_ticks < target) {
+        asm volatile("hlt");
+    }
+}
+
 // Обработчик прерывания таймера
 void timer_irq_handler(void) {
     pit_ticks++;
@@ -63,4 +78,6 @@ void timer_irq_handler(void) {
     }
 
     update_cursor();
+
+    usb_poll();
 }

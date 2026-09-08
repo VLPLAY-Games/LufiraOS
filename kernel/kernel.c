@@ -9,6 +9,7 @@
 #include "drivers/mouse/mouse.h"
 #include "drivers/console/console.h"
 #include "drivers/sound/ac97.h"
+#include "drivers/usb/uhci.h"
 #include "shell/shell.h"
 #include "system/cpu/gdt.h"
 #include "system/cpu/idt.h"
@@ -166,6 +167,10 @@ void _start(BootInfo* bi) {
     irq_enable(1);  // клавиатура
     irq_enable(2);
     irq_enable(12); // мышь
+
+    // Требует, чтобы прерывания таймера уже тикали (pit_wait_ms() внутри
+    // сброса UHCI-контроллера), поэтому вызывается только после sti/irq_enable.
+    uhci_init();
 
     printf("\n");
     set_foreground_color(LOG_COLOR_HEADER);
