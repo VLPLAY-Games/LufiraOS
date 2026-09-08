@@ -98,3 +98,42 @@ typedef struct __attribute__((packed)) {
     uint8_t  iSerialNumber;
     uint8_t  bNumConfigurations;
 } usb_device_descriptor_t;
+
+/* =========================================================
+ * Дескриптор конфигурации (9 байт) — первый ответ содержит только
+ * заголовок; wTotalLength сообщает полный размер конфигурации со всеми
+ * вложенными interface/HID/endpoint-дескрипторами, которые идут следом
+ * (их нужно запрашивать отдельно, повторным GET_DESCRIPTOR на всю длину).
+ * ========================================================= */
+
+typedef struct __attribute__((packed)) {
+    uint8_t  bLength;
+    uint8_t  bDescriptorType;
+    uint16_t wTotalLength;
+    uint8_t  bNumInterfaces;
+    uint8_t  bConfigurationValue;
+    uint8_t  iConfiguration;
+    uint8_t  bmAttributes;
+    uint8_t  bMaxPower;
+} usb_config_descriptor_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t bLength;
+    uint8_t bDescriptorType;
+    uint8_t bInterfaceNumber;
+    uint8_t bAlternateSetting;
+    uint8_t bNumEndpoints;
+    uint8_t bInterfaceClass;
+    uint8_t bInterfaceSubClass;
+    uint8_t bInterfaceProtocol;
+    uint8_t iInterface;
+} usb_interface_descriptor_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  bLength;
+    uint8_t  bDescriptorType;
+    uint8_t  bEndpointAddress; // бит 7: 1 = IN
+    uint8_t  bmAttributes;     // биты 1:0: 11 = interrupt
+    uint16_t wMaxPacketSize;
+    uint8_t  bInterval;
+} usb_endpoint_descriptor_t;
