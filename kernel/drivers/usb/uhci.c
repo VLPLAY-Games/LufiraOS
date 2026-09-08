@@ -922,23 +922,44 @@ void usb_poll(void) {
     if (!uhci_ready)
         return;
 
-    if (uhci_kbd_td && !(uhci_kbd_td->status & UHCI_TD_STATUS_ACTIVE)) {
-        // Active сброшен контроллером сам — либо передача успешно
-        // завершилась (данные лежат в uhci_kbd_buf), либо это жёсткая
-        // ошибка (STALL/CRC/babble после исчерпания C_ERR). Обычный NAK
-        // ("клавиатуре нечего сказать") Active не сбрасывает вообще —
-        // контроллер сам бесконечно повторяет попытку каждый кадр, сюда
-        // мы в этом случае не попадаем.
-        uint32_t st = uhci_kbd_td->status;
+    if (!uhci_kbd_td)
+        return;
 
-        if (!(st & UHCI_TD_STATUS_ERROR_MASK)) {
-            usb_hid_keyboard_report(uhci_kbd_buf);
-            uhci_kbd_toggle ^= 1; // toggle продвигается только на успехе
-        }
-        // На ошибке toggle НЕ трогаем — устройство его тоже не продвинуло.
+    if (uhci_kbd_td->status & UHCI_TD_STATUS_ACTIVE)
+        return;
 
-        uhci_kbd_td->token = uhci_td_make_token(UHCI_PID_IN, uhci_kbd_addr, uhci_kbd_ep,
-                                                uhci_kbd_toggle, uhci_kbd_max_packet);
-        uhci_kbd_td->status = uhci_td_make_status(uhci_kbd_low_speed);
+    uint32_t st = uhci_kbd_td->status;
+
+    if (!(st & UHCI_TD_STATUS_ERROR_MASK)) {
+        usb_hid_keyboard_report(uhci_kbd_buf);
+        uhci_kbd_toggle ^= 1;
     }
+
+    /*
+     * После completion UHCI продвигает QH.element_link.
+     * Для единственного TD он обычно становится TERMINATE.
+     *
+     * Поэтому для повторной interrupt-передачи нужно не только
+     * перевооружить сам TD, но и снова прикрепить его к QH.
+     */
+    uhci_kbd_qh->element_link = UHCI_LINK_TERMINATE;
+
+    uhci_kbd_td->token = uhci_td_make_token(
+        UHCI_PID_IN,
+        uhci_kbd_addr,
+        uhci_kbd_ep,
+        uhci_kbd_toggle,
+        uhci_kbd_max_packet
+    );
+
+    uhci_kbd_td->status = uhci_td_make_status(uhci_kbd_low_speed);
+
+    /*
+     * Убедимся, что новый TD полностью записан до того,
+     * как снова публикуем его через QH.
+     */
+    __asm__ volatile ("" ::: "memory");
+
+    uhci_kbd_qh->element_link =
+        ((uint32_t)(uintptr_t)uhci_kbd_td) & ~0xFu;
 }
