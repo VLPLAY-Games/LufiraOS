@@ -173,9 +173,9 @@ check-disk: $(BUILD_DIR)/disk.img
 	@echo "Test directory:" && mdir -i $@ ::/test
 
 run: $(BUILD_DIR)/disk.img
-	mcopy -i build/disk.img hello.elf ::/hello.elf
-	mcopy -i build/disk.img fork_test.elf ::/fork.elf
-	mcopy -i build/disk.img pipe_test.elf ::/pipe.elf
+	mcopy -i build/disk.img test/hello.elf ::/hello.elf
+	mcopy -i build/disk.img test/fork_test.elf ::/fork.elf
+	mcopy -i build/disk.img test/pipe_test.elf ::/pipe.elf
 	@echo "=== Starting QEMU ==="
 	qemu-system-x86_64 \
 		-bios /usr/share/ovmf/OVMF.fd \

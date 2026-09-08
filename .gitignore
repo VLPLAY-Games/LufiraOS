@@ -1,4 +1,5 @@
 build/
 hello.c
-hello.elf
-hello_simple.o
+test/hello_simple.o
+test/fork_test.o
+test/pipe_test.o

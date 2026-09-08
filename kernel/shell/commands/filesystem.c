@@ -592,16 +592,3 @@ void command_edit(const char *args) {
     
     kfree(buf);
 }
-
-// exec - замена текущего процесса
-void command_exec(const char *filename) {
-    if (!filename || *filename == '\0') {
-        printf("\nUsage: exec <filename>\n");
-        return;
-    }
-    int result = do_exec(filename);
-    if (result != 0) {
-        printf("\nExec failed\n");
-    }
-    // При успехе управление не возвращается
-}
