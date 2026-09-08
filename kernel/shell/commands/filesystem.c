@@ -415,6 +415,12 @@ void command_cp(const char *args) {
     while (dst[i] && dst[i] != ' ' && i < 255) { dst_name[i] = dst[i]; i++; }
     dst_name[i] = '\0';
     
+    // Проверяем, не совпадают ли имена файлов
+    if (strcmp(src_name, dst_name) == 0) {
+        printf("\ncp: cannot copy '%s' to itself\n", src_name);
+        return;
+    }
+    
     // Читаем исходный файл
     uint32_t fsize;
     if (fat_open(&fatfs, src_name, &fsize) != 0) {
@@ -478,6 +484,12 @@ void command_mv(const char *args) {
     i = 0;
     while (dst[i] && dst[i] != ' ' && i < 255) { dst_name[i] = dst[i]; i++; }
     dst_name[i] = '\0';
+    
+    // Проверяем, не совпадают ли имена файлов
+    if (strcmp(src_name, dst_name) == 0) {
+        printf("\nmv: cannot move '%s' to itself\n", src_name);
+        return;
+    }
     
     // Копируем файл
     uint32_t fsize;
