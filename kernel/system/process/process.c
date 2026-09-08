@@ -7,10 +7,21 @@
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
 
+#ifndef PAGE_PS
+#define PAGE_PS 0x80    // Page size (2MB/1GB) — как и в elf.c
+#endif
+
 static void *memset(void *s, int c, size_t n) {
     unsigned char *p = (unsigned char *)s;
     while (n--) *p++ = (unsigned char)c;
     return s;
+}
+
+static void *memcpy(void *dest, const void *src, size_t n) {
+    unsigned char *d = (unsigned char *)dest;
+    const unsigned char *s = (const unsigned char *)src;
+    while (n--) *d++ = *s++;
+    return dest;
 }
 
 process_t *process_list = NULL;
@@ -147,6 +158,103 @@ static uint64_t create_address_space(uint64_t kernel_pml4_phys) {
     return new_pml4_phys;
 }
 
+// Настоящий глубокий клон адресного пространства для fork(): ядерная
+// половина (индексы PML4 256-511) заводится штатно, как для любого нового
+// процесса (create_address_space(kernel_cr3) + sync_kernel_mappings) —
+// она в любом случае общая для всех процессов. Пользовательская половина
+// (индексы 0-255) рекурсивно обходится по src_pml4_phys, и КАЖДАЯ занятая
+// страница данных копируется в новую физическую страницу (eager copy, без
+// copy-on-write — в paging.c сейчас нет инфраструктуры под COW).
+//
+// При нехватке памяти на каком-либо уровне возвращает 0; уже выделенные
+// до этого момента страницы частично построенного дерева намеренно не
+// освобождаются — как и во всей остальной работе с адресными
+// пространствами в этом файле (см. process_reap()), полного разбора PML4
+// здесь пока нет, а fork() при нехватке памяти — редкий крайний случай.
+static uint64_t clone_address_space_deep(uint64_t src_pml4_phys) {
+    uint64_t new_pml4_phys = create_address_space(kernel_cr3);
+    if (!new_pml4_phys)
+        return 0;
+
+    uint64_t current_kernel_pml4;
+    asm volatile("mov %%cr3, %0" : "=r"(current_kernel_pml4));
+    sync_kernel_mappings(new_pml4_phys, current_kernel_pml4);
+
+    uint64_t *src_pml4 = (uint64_t*)src_pml4_phys;
+    uint64_t *dst_pml4 = (uint64_t*)new_pml4_phys;
+
+    for (int pml4_idx = 0; pml4_idx < 256; pml4_idx++) {
+        if (!(src_pml4[pml4_idx] & PAGE_PRESENT))
+            continue;
+
+        uint64_t new_pdpt_phys = pmm_alloc_page();
+        if (!new_pdpt_phys) return 0;
+        uint64_t *new_pdpt = (uint64_t*)new_pdpt_phys;
+        for (int i = 0; i < 512; i++) new_pdpt[i] = 0;
+
+        uint64_t *src_pdpt = (uint64_t*)(src_pml4[pml4_idx] & ~0xFFFULL);
+
+        for (int pdpt_idx = 0; pdpt_idx < 512; pdpt_idx++) {
+            if (!(src_pdpt[pdpt_idx] & PAGE_PRESENT))
+                continue;
+
+            uint64_t new_pd_phys = pmm_alloc_page();
+            if (!new_pd_phys) return 0;
+            uint64_t *new_pd = (uint64_t*)new_pd_phys;
+            for (int i = 0; i < 512; i++) new_pd[i] = 0;
+
+            uint64_t *src_pd = (uint64_t*)(src_pdpt[pdpt_idx] & ~0xFFFULL);
+
+            for (int pd_idx = 0; pd_idx < 512; pd_idx++) {
+                if (!(src_pd[pd_idx] & PAGE_PRESENT))
+                    continue;
+
+                if (src_pd[pd_idx] & PAGE_PS) {
+                    // 2MB/1GB user-страницы в этой кодовой базе не
+                    // создаются (map_page_in_space всегда работает по
+                    // 4KB) — на всякий случай просто пропускаем.
+                    continue;
+                }
+
+                uint64_t new_pt_phys = pmm_alloc_page();
+                if (!new_pt_phys) return 0;
+                uint64_t *new_pt = (uint64_t*)new_pt_phys;
+                for (int i = 0; i < 512; i++) new_pt[i] = 0;
+
+                uint64_t *src_pt = (uint64_t*)(src_pd[pd_idx] & ~0xFFFULL);
+
+                for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
+                    if (!(src_pt[pt_idx] & PAGE_PRESENT))
+                        continue;
+
+                    uint64_t src_phys = src_pt[pt_idx] & ~0xFFFULL;
+                    uint64_t flags = src_pt[pt_idx] & (0xFFFULL | PAGE_NX);
+
+                    uint64_t new_phys = pmm_alloc_page();
+                    if (!new_phys) return 0;
+
+                    // Все физические адреса в этом ядре доступны через
+                    // identity mapping, поэтому можно копировать напрямую.
+                    memcpy((void*)new_phys, (void*)src_phys, PAGE_SIZE);
+
+                    new_pt[pt_idx] = (new_phys & ~0xFFFULL) | flags;
+                }
+
+                new_pd[pd_idx] = (new_pt_phys & ~0xFFFULL) |
+                                 (src_pd[pd_idx] & 0xFFFULL);
+            }
+
+            new_pdpt[pdpt_idx] = (new_pd_phys & ~0xFFFULL) |
+                                 (src_pdpt[pdpt_idx] & 0xFFFULL);
+        }
+
+        dst_pml4[pml4_idx] = (new_pdpt_phys & ~0xFFFULL) |
+                             (src_pml4[pml4_idx] & 0xFFFULL);
+    }
+
+    return new_pml4_phys;
+}
+
 void process_init(void) {
     // Сохраняем корневой ядерный PML4 на раннем этапе (до загрузки процессов)
     asm volatile("mov %%cr3, %0" : "=r"(kernel_cr3));
@@ -175,7 +283,12 @@ void process_init(void) {
     process_list = idle_process;
     idle_process->next = idle_process;
     current_process = idle_process;
-    
+
+    // fd-таблица idle-процесса: пока пустая (memset), содержимым (stdio)
+    // её заполнит vfs_init(), который выполняется позже при загрузке.
+    memset(&idle_process->fd_table, 0, sizeof(fd_table_t));
+    current_fd_table = &idle_process->fd_table;
+
     printf("[PROCESS] Process manager initialized\n");
 }
 
@@ -250,7 +363,13 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
     proc->name[31] = '\0';
-    
+
+    // Собственная fd-таблица процесса со свежими stdin/stdout/stderr
+    // (консоль). Реального наследования fd родителя здесь нет — это
+    // подходящее поведение для run/runbg; fork() (см. process_fork())
+    // отдельно дублирует именно РОДИТЕЛЬСКУЮ таблицу поверх этой.
+    vfs_init_fd_table(&proc->fd_table);
+
     // Используем КОРНЕВОЙ ядерный PML4 для создания нового адресного пространства
     uint64_t new_pml4 = create_address_space(kernel_cr3);
     if (!new_pml4) {
@@ -400,6 +519,16 @@ static void process_remove_from_list(process_t *target) {
     }
 
     kfree(target);
+}
+
+// Немедленно убирает недостроенный процесс из списка планировщика (см.
+// process.h) — например, если process_fork() не смог доделать ребёнка.
+void process_discard(process_t *proc) {
+    if (!proc)
+        return;
+
+    proc->state = PROCESS_TERMINATED;
+    process_remove_from_list(proc);
 }
 
 void process_exit(int exit_code) {
@@ -709,7 +838,8 @@ void switch_to_process(process_t *next) {
     }
     
     current_process = next;
-    
+    current_fd_table = &next->fd_table;
+
     process_context_t *prev_context = (prev && prev != next) ? &prev->context : &idle_process->context;
 
     current_process = next;
@@ -815,4 +945,107 @@ int process_kill(uint32_t pid)
     } while (p && p != process_list);
 
     return -1;
+}
+
+// Раскладка кадра регистров, который syscall_entry.S сохраняет на
+// ядерном стеке перед вызовом syscall_handler() (см. комментарии в этом
+// файле). Указатель на начало этого кадра передаётся syscall_handler()
+// 7-м аргументом — только SYS_FORK его использует.
+typedef struct __attribute__((packed)) {
+    uint64_t r9;
+    uint64_t r8;
+    uint64_t r10;
+    uint64_t rdx;
+    uint64_t rsi;
+    uint64_t rdi;
+    uint64_t rax;      // номер syscall на входе
+    uint64_t r15;
+    uint64_t r14;
+    uint64_t r13;
+    uint64_t r12;
+    uint64_t rbp;
+    uint64_t rbx;
+    uint64_t rflags;   // r11 на входе в syscall
+    uint64_t rip;      // rcx на входе в syscall — адрес возврата в user-коде
+} syscall_frame_t;
+
+extern uint64_t user_rsp_save;
+
+// Настоящий fork(). См. подробное описание в process.h.
+uint64_t process_fork(uint64_t frame_ptr) {
+    process_t *parent = current_process;
+    if (!parent || !frame_ptr)
+        return (uint64_t)-1;
+
+    syscall_frame_t *frame = (syscall_frame_t *)frame_ptr;
+
+    process_t *child = process_create(parent->name, NULL);
+    if (!child)
+        return (uint64_t)-1;
+
+    // process_create() уже выделил ребёнку "пустое" адресное пространство
+    // и собственный (незанятый) пользовательский стек по АДРЕСУ, вычисленному
+    // из pid ребёнка. Для fork() нам нужно совсем другое — точная копия
+    // адресного пространства РОДИТЕЛЯ (включая его виртуальный адрес
+    // стека), так что этот плейсхолдер просто заменяется ниже.
+    uint64_t placeholder_pml4 = child->page_table;
+
+    uint64_t new_pml4 = clone_address_space_deep(parent->page_table);
+    if (!new_pml4) {
+        printf("[FORK] Not enough memory to clone address space\n");
+        process_discard(child);
+        return (uint64_t)-1;
+    }
+
+    child->page_table = new_pml4;
+    pmm_free_page(placeholder_pml4);
+
+    // Ребёнок наследует ТОТ ЖЕ виртуальный адрес стека, что и родитель —
+    // он был скопирован вместе со всем остальным пользовательским
+    // адресным пространством выше.
+    child->stack_base = parent->stack_base;
+    child->stack_size = parent->stack_size;
+
+    // fd-таблица: родитель и ребёнок получают собственные fd, но
+    // указывающие на ОДНИ И ТЕ ЖЕ открытые file_t/inode — как и должно
+    // быть у настоящего fork().
+    child->fd_table = parent->fd_table;
+    for (int i = 0; i < MAX_FD_PER_PROCESS; i++) {
+        file_t *f = child->fd_table.files[i];
+        if (f && f->inode) {
+            f->inode->ref_count++;
+        }
+    }
+
+    // Контекст ребёнка продолжает выполнение СРАЗУ ПОСЛЕ инструкции
+    // syscall в родителе — тот же rip/rflags и те же callee-saved регистры
+    // (rbx/rbp/r12-r15, которые компилятор родителя рассчитывает получить
+    // в неизменном виде после возврата из "обёртки" fork()), но с rax = 0
+    // — это и есть возвращаемое значение fork() для ребёнка.
+    //
+    // Одно отличие от родителя: родитель вернётся в user mode штатным
+    // iretq в syscall_entry.S (ring 3), а ребёнок стартует через обычный
+    // context_switch()/jmp, как и любой другой новый процесс в этом ядре,
+    // и поэтому первое время выполняется в ring 0 — точно так же, как
+    // процесс, созданный через elf_exec_background(), до своего первого
+    // собственного системного вызова.
+    process_context_t *ctx = &child->context;
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->rip = frame->rip;
+    ctx->rsp = user_rsp_save;
+    ctx->rflags = frame->rflags;
+    ctx->rbx = frame->rbx;
+    ctx->rbp = frame->rbp;
+    ctx->r12 = frame->r12;
+    ctx->r13 = frame->r13;
+    ctx->r14 = frame->r14;
+    ctx->r15 = frame->r15;
+    ctx->rax = 0;
+    ctx->cr3 = new_pml4;
+
+    child->state = PROCESS_READY;
+
+    printf("[FORK] PID %u forked into PID %u\n", parent->pid, child->pid);
+
+    return (uint64_t)child->pid;
 }

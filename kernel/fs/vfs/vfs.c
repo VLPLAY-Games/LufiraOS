@@ -16,9 +16,11 @@ extern inode_t* vfs_fat_get_root(void);
 
 file_t *file_table[MAX_FILES_SYSTEM] = {0};
 
-#define MAX_PROCESSES 4
-fd_table_t fd_tables[MAX_PROCESSES];
-int current_process_id = 0;
+// current_fd_table указывает на fd_table ТЕКУЩЕГО процесса — сама её
+// память живёт внутри соответствующего process_t (process.h), а не здесь.
+// process_init() наводит указатель на idle-процесс ДО вызова vfs_init();
+// process_create()/switch_to_process() дальше переставляют его на fd_table
+// каждого нового/текущего процесса.
 fd_table_t *current_fd_table = NULL;
 
 /* ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ========== */
@@ -244,14 +246,16 @@ int vfs_seek(int fd, off_t offset, int whence) {
 
 /* ========== ИНИЦИАЛИЗАЦИЯ ========== */
 
-void vfs_init(void) {
-    for (int i = 0; i < MAX_FILES_SYSTEM; i++) {
-        file_table[i] = NULL;
-    }
+// Заполняет table стандартными stdin/stdout/stderr (консоль). alloc_fd()/
+// alloc_file() всегда работают через current_fd_table, поэтому на время
+// заполнения ЧУЖОЙ (не обязательно текущей) таблицы временно подменяем
+// указатель и возвращаем его обратно.
+void vfs_init_fd_table(fd_table_t *table) {
+    if (!table) return;
 
-    /* Выделяем таблицу дескрипторов для текущего процесса */
-    current_fd_table = &fd_tables[current_process_id];
-    memset(current_fd_table, 0, sizeof(fd_table_t));
+    fd_table_t *saved = current_fd_table;
+    current_fd_table = table;
+    memset(table, 0, sizeof(fd_table_t));
 
     file_t *stdin_f = alloc_file();
     if (stdin_f) {
@@ -277,10 +281,25 @@ void vfs_init(void) {
         stderr_f->ops = &console_fops;
     }
 
-    current_fd_table->files[0] = stdin_f;
-    current_fd_table->files[1] = stdout_f;
-    current_fd_table->files[2] = stderr_f;
-    current_fd_table->count = 3;
+    table->files[0] = stdin_f;
+    table->files[1] = stdout_f;
+    table->files[2] = stderr_f;
+    table->count = 3;
+
+    current_fd_table = saved;
+}
+
+void vfs_init(void) {
+    for (int i = 0; i < MAX_FILES_SYSTEM; i++) {
+        file_table[i] = NULL;
+    }
+
+    /*
+     * current_fd_table уже указывает на fd_table idle-процесса — его
+     * туда наводит process_init(), который выполняется раньше vfs_init()
+     * при загрузке. Заполняем её стандартными stdin/stdout/stderr.
+     */
+    vfs_init_fd_table(current_fd_table);
 
     printf("[VFS] Initialized (FAT + console, per-process fd tables)\n");
 }

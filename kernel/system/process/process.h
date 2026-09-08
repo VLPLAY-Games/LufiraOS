@@ -2,6 +2,7 @@
 
 #include "lib/types.h"
 #include "system/cpu/tss.h"
+#include "fs/vfs/vfs.h"
 
 #define KERNEL_HEAP_START       0xFFFF900000000000ULL  // Куча ядра
 #define KERNEL_STACK_AREA_START 0xFFFF880000000000ULL  // Область стеков
@@ -49,6 +50,7 @@ typedef struct process {
     uint64_t ring0_stack;
     uint64_t ring0_stack_pages;
     uint64_t page_table;
+    fd_table_t fd_table;    // собственная таблица дескрипторов процесса
     struct process *next;
 } process_t;
 
@@ -61,6 +63,11 @@ void process_reap(void);
 void process_sleep(uint64_t milliseconds);
 void process_ps(void);
 int process_kill(uint32_t pid);
+
+// Немедленно убирает proc из списка планировщика (используется только для
+// отката недостроенного процесса, например если fork() не смог
+// скопировать адресное пространство ребёнка).
+void process_discard(process_t *proc);
 
 // Ждёт завершения ребёнка текущего процесса: pid == 0 значит "любой
 // ребёнок" (внутри хранится как WAIT_ANY_PID), иначе конкретный pid.
@@ -85,6 +92,13 @@ int process_commit_exec(
     uint64_t new_stack,
     const char *name
 );
+
+// Настоящий fork(): дублирует текущий процесс (адресное пространство —
+// eager copy, fd-таблица — общие file_t/inode с увеличенным ref_count).
+// frame_ptr — указатель на кадр регистров, сохранённый syscall_entry.S
+// (нужен, чтобы ребёнок продолжил выполнение с той же инструкции user-кода,
+// что и родитель). Возвращает pid ребёнка (родителю) или (uint64_t)-1.
+uint64_t process_fork(uint64_t frame_ptr);
 
 extern uint64_t kernel_cr3;
 

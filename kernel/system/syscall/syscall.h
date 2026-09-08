@@ -42,9 +42,12 @@
 
 // Прототипы
 void syscall_init(void);
+// frame_ptr — указатель на кадр регистров, сохранённый syscall_entry.S на
+// ядерном стеке (см. syscall_frame_t в process.c); нужен только SYS_FORK.
 uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1,
                          uint64_t arg2, uint64_t arg3,
-                         uint64_t arg4, uint64_t arg5);
+                         uint64_t arg4, uint64_t arg5,
+                         uint64_t frame_ptr);
 
 // Открывает filename и заменяет им текущий процесс (execve()-подобно).
 // Используется и SYS_EXEC, и командой shell "exec".

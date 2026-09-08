@@ -37,7 +37,14 @@ syscall_entry:
     pushq %r8                 # arg5
     pushq %r9                 # arg6
 
-    subq $8, %rsp
+    # %rsp сейчас указывает точно на начало сохранённого кадра регистров
+    # (см. process.c: syscall_frame_t). Передаём этот указатель 7-м
+    # (стековым, по System V ABI) аргументом в syscall_handler — нужен
+    # только SYS_FORK, чтобы скопировать точное состояние родителя в
+    # дочерний процесс. Этот push одновременно служит и той же
+    # выравнивающей рамкой, что раньше давал "subq $8, %rsp".
+    mov %rsp, %r11
+    pushq %r11
 
     movq 56(%rsp), %rdi       # syscall number
     movq 48(%rsp), %rsi       # arg1

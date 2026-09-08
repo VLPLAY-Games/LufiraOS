@@ -191,14 +191,9 @@ static uint64_t sys_exec(uint64_t filename_ptr, uint64_t argv_ptr,
     return (uint64_t)do_exec(filename);
 }
 
-// SYS_FORK (12)
-static uint64_t sys_fork(uint64_t unused1, uint64_t unused2, uint64_t unused3,
-                         uint64_t unused4, uint64_t unused5) {
-    (void)unused1; (void)unused2; (void)unused3; (void)unused4; (void)unused5;
-    
-    // Заглушка: создание копии процесса
-    return (uint64_t)-1;
-}
+// SYS_FORK (12) обрабатывается отдельно в syscall_handler() (см. ниже) —
+// ему нужен указатель на весь сохранённый кадр регистров, а не только
+// обычные 5 аргументов, поэтому он не попадает в общую syscall_table.
 
 // SYS_WAIT (13): pid (0 = любой ребёнок), status_ptr (может быть 0), options
 static uint64_t sys_wait(uint64_t pid, uint64_t status_ptr, uint64_t options,
@@ -294,7 +289,7 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_MMAP]    = sys_mmap,
     [SYS_MUNMAP]  = sys_munmap,
     [SYS_EXEC]    = sys_exec,
-    [SYS_FORK]    = sys_fork,
+    // SYS_FORK намеренно не в этой таблице — см. syscall_handler().
     [SYS_WAIT]    = sys_wait,
     [SYS_GETCWD]  = sys_getcwd,
     [SYS_CHDIR]   = sys_chdir,
@@ -336,11 +331,19 @@ void syscall_init(void) {
 // ========== ДИСПАТЧЕР ==========
 
 uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_t arg2,
-                         uint64_t arg3, uint64_t arg4, uint64_t arg5) {
+                         uint64_t arg3, uint64_t arg4, uint64_t arg5,
+                         uint64_t frame_ptr) {
+    // SYS_FORK — особый случай: ему нужен указатель на весь сохранённый
+    // кадр регистров (rip/rflags/callee-saved), а не только 5 обычных
+    // аргументов, поэтому он обрабатывается до общей таблицы диспетчера.
+    if (syscall_num == SYS_FORK) {
+        return process_fork(frame_ptr);
+    }
+
     if (syscall_num >= 256 || !syscall_table[syscall_num]) {
         printf("[SYSCALL] Unknown: %u\n", (uint32_t)syscall_num);
         return (uint64_t)-1;
     }
-    
+
     return syscall_table[syscall_num](arg1, arg2, arg3, arg4, arg5);
 }
