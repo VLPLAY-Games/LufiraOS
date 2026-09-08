@@ -212,10 +212,13 @@ void unmap_page(uint64_t virt) {
     invlpg(virt);
 }
 
-uint64_t get_physical_address(uint64_t virt) {
-    pt_entry_t *pml4 = (pt_entry_t*)get_current_pml4();
+// Как get_physical_address(), но работает с ЛЮБЫМ адресным пространством
+// по его физическому PML4, а не только с текущим (активным по CR3) —
+// через identity mapping, без переключения CR3.
+uint64_t get_physical_address_in_pml4(uint64_t pml4_phys, uint64_t virt) {
+    pt_entry_t *pml4 = (pt_entry_t*)pml4_phys;
     if (!pml4) return 0;
-    
+
     pt_entry_t *pml4e = &pml4[PML4_INDEX(virt)];
     if (!(*pml4e & PAGE_PRESENT)) return 0;
     
@@ -235,6 +238,10 @@ uint64_t get_physical_address(uint64_t virt) {
         if (!(*pte & PAGE_PRESENT)) return 0;
         return (*pte & 0x000FFFFFFFFFF000ULL) + (virt & 0xFFF);
     }
+}
+
+uint64_t get_physical_address(uint64_t virt) {
+    return get_physical_address_in_pml4(get_current_pml4(), virt);
 }
 
 // Синхронизация kernel space записей между PML4 (для процессов)

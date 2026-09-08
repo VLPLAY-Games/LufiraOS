@@ -152,7 +152,14 @@ $(BUILD_DIR)/kernel.bin: $(BUILD_DIR)/kernel.elf
 $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin
 	@echo "=== Creating disk image ==="
 	@rm -f $@
-	dd if=/dev/zero of=$@ bs=1024 count=512 status=none
+	# 512КБ (старый размер) едва хватало (~16КБ свободно на чистой сборке) уже
+	# для текущего kernel.bin+bootloader+тестовых ELF — после роста
+	# console_history (64->256 строк, +144КБ к .bss) запас стал совсем
+	# призрачным, а на "поюзанном" образе (файлы уже существуют, mcopy их
+	# перезаписывает) свободного места оставалось всего ~4КБ и mcopy
+	# реально проваливался с ошибкой (проверено вручную). 16МБ даёт кратный
+	# запас и не создаёт заметных издержек (образ всё равно почти пустой).
+	dd if=/dev/zero of=$@ bs=1024 count=16384 status=none
 	@echo "  Formatting as FAT12..."
 	mkfs.fat -F 12 -S 512 $@
 	@echo "  Creating EFI/BOOT directory..."

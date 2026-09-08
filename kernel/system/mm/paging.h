@@ -32,6 +32,10 @@ void unmap_page(uint64_t virt);
 // Получить физический адрес по виртуальному
 uint64_t get_physical_address(uint64_t virt);
 
+// То же самое, но для ЛЮБОГО адресного пространства по его физическому
+// PML4 — не переключая CR3 (identity mapping).
+uint64_t get_physical_address_in_pml4(uint64_t pml4_phys, uint64_t virt);
+
 // Получить физический адрес текущего PML4
 uint64_t get_current_pml4(void);
 

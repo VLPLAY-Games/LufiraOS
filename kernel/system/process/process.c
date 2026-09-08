@@ -19,11 +19,28 @@ static uint32_t next_pid = 1;
 static process_t *idle_process = NULL;
 uint64_t kernel_cr3 = 0;
 
-// Глобальный счётчик для вложенных запретов прерываний
+// Глобальный счётчик для вложенных запретов прерываний.
+//
+// irq_disable()/irq_enable() вызываются не только из обычного кода ядра,
+// но и синхронно ИЗНУТРИ обработчиков IRQ (шелл выполняет команды прямо в
+// keyboard_irq_handler() — см. комментарий в elf.c про exec), где
+// прерывания уже аппаратно отключены самим CPU при входе в interrupt
+// gate. Раньше irq_enable() при обнулении счётчика безусловно делал
+// "sti" — если самый первый irq_disable() в цепочке вызовов на самом деле
+// застал прерывания УЖЕ выключенными (мы внутри чужого IRQ), это
+// ПРЕЖДЕВРЕМЕННО включало их посреди создания процесса, и вложенный
+// таймерный IRQ (который теперь ещё и опрашивает USB через usb_poll())
+// мог вклиниться прямо в этот момент. Поэтому запоминаем реальное
+// состояние EFLAGS.IF на момент самого первого захвата и включаем
+// прерывания обратно, только если они действительно были включены.
 static volatile uint32_t irq_disable_counter = 0;
+static uint64_t irq_saved_flags = 0;
 
 // Вспомогательные функции для управления прерываниями
 static inline void irq_disable(void) {
+    if (irq_disable_counter == 0) {
+        asm volatile("pushfq; popq %0" : "=r"(irq_saved_flags) :: "memory");
+    }
     asm volatile("cli");
     irq_disable_counter++;
 }
@@ -31,83 +48,78 @@ static inline void irq_disable(void) {
 static inline void irq_enable(void) {
     if (irq_disable_counter > 0) {
         irq_disable_counter--;
-        if (irq_disable_counter == 0) {
+        if (irq_disable_counter == 0 && (irq_saved_flags & (1u << 9))) {
             asm volatile("sti");
         }
     }
 }
 
-// Выделение Ring 0 стека (не требует переключения CR3, так как ядерная память видна везде)
-// process.c - НОВАЯ ВЕРСИЯ
-// process.c - исправленная allocate_ring0_stack
+// Выделение Ring 0 стека.
+//
+// НЕ переключает CR3 — раньше эта функция временно переключалась на
+// proc->page_table, чтобы иметь возможность вызвать обычный map_page()
+// (который всегда работает с ТЕКУЩИМ CR3). Но весь этот вызов идёт вложенно
+// из process_create(), которая, в свою очередь, обычно вызывается прямо из
+// keyboard_irq_handler() — а значит текущий стек вызовов физически лежит
+// на ПОЛЬЗОВАТЕЛЬСКОМ стеке ВЫЗЫВАЮЩЕГО процесса (shell и любой другой
+// процесс в этом ядре выполняется на CPL0, но на СВОЁМ user-стеке, пока не
+// сделает первый syscall). Индекс PML4, покрывающий этот стек, не может
+// присутствовать в свежесозданном proc->page_table: kernel_cr3 был снят
+// до того, как хоть один процесс успел выделить себе пользовательский
+// стек, а sync_kernel_mappings() синхронизирует только kernel-space
+// (256-511). Переключение CR3 мгновенно обрывало сам стек вызовов —
+// instruction fetch следующей же инструкции ронял систему в triple fault.
+// Вместо этого маппим напрямую в proc->page_table по физическому
+// указателю через map_page_in_pml4() (identity mapping), как это уже
+// делает elf_load_to_process() для сегментов ELF.
 static uint64_t allocate_ring0_stack(process_t *proc) {
-    uint64_t stack_base = KERNEL_STACK_AREA_START + 
+    uint64_t stack_base = KERNEL_STACK_AREA_START +
                           (proc->pid * KERNEL_STACK_SIZE);
     size_t num_pages = KERNEL_STACK_SIZE / PAGE_SIZE;
-    
+
+    // Хранит ФИЗИЧЕСКИЕ адреса выделенных страниц (используется
+    // free_ring0_stack() — без переключения CR3 виртуальный адрес другого
+    // процесса нельзя транслировать через текущую активную таблицу).
     uint64_t *pages = (uint64_t*)kmalloc(sizeof(uint64_t) * num_pages);
     if (!pages) return 0;
-    
-    // Сохраняем текущий CR3
-    uint64_t old_cr3;
-    asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
-    
-    // Переключаемся на PML4 процесса ДО маппинга
-    asm volatile("mov %0, %%cr3" : : "r"(proc->page_table) : "memory");
-    
+
     for (size_t i = 0; i < num_pages; i++) {
         uint64_t phys = pmm_alloc_page();
         if (!phys) {
-            // Откат
-            for (size_t j = 0; j < i; j++) {
-                unmap_page(stack_base + j * PAGE_SIZE);
-                pmm_free_page(get_physical_address(stack_base + j * PAGE_SIZE));
-            }
-            asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
+            for (size_t j = 0; j < i; j++) pmm_free_page(pages[j]);
             kfree(pages);
             return 0;
         }
-        
+
         uint64_t virt = stack_base + i * PAGE_SIZE;
-        // Теперь маппим в адресное пространство процесса
-        if (map_page(virt, phys, PAGE_PRESENT | PAGE_WRITE) != 0) {
+        if (map_page_in_pml4(proc->page_table, virt, phys, PAGE_PRESENT | PAGE_WRITE) != 0) {
             pmm_free_page(phys);
-            for (size_t j = 0; j < i; j++) {
-                unmap_page(stack_base + j * PAGE_SIZE);
-                pmm_free_page(get_physical_address(stack_base + j * PAGE_SIZE));
-            }
-            asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
+            for (size_t j = 0; j < i; j++) pmm_free_page(pages[j]);
             kfree(pages);
             return 0;
         }
-        pages[i] = virt;
+        pages[i] = phys;
     }
-    
-    // Возвращаемся к старому CR3
-    asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
-    
+
     proc->ring0_stack_pages = (uint64_t)pages;
     return stack_base + KERNEL_STACK_SIZE;
 }
 
-// Освобождение Ring 0 стека
+// Освобождение Ring 0 стека — тоже без переключения CR3, просто
+// освобождает уже известные физические страницы (сама proc->page_table
+// либо ещё не используется ни одним процессом, либо целиком отбрасывается
+// вызывающим кодом — разбор PML4 целиком в этом файле нигде не делается,
+// см. process_reap()).
 static void free_ring0_stack(process_t *proc) {
     if (!proc->ring0_stack_pages) return;
-    
+
     uint64_t *pages = (uint64_t*)proc->ring0_stack_pages;
-    uint64_t stack_base = KERNEL_STACK_AREA_START + 
-                          (proc->pid * KERNEL_STACK_SIZE);
     size_t num_pages = KERNEL_STACK_SIZE / PAGE_SIZE;
-    
+
     for (size_t i = 0; i < num_pages; i++) {
-        uint64_t virt = stack_base + i * PAGE_SIZE;
-        uint64_t phys = get_physical_address(virt);
-        if (phys) {
-            unmap_page(virt);
-            pmm_free_page(phys);
-        }
+        if (pages[i]) pmm_free_page(pages[i]);
     }
-    
+
     kfree(pages);
     proc->ring0_stack_pages = 0;
     proc->ring0_stack = 0;
@@ -120,7 +132,21 @@ static uint64_t create_address_space(uint64_t kernel_pml4_phys) {
     
     uint64_t *new_pml4 = (uint64_t*)new_pml4_phys;
     uint64_t *kernel_pml4 = (uint64_t*)kernel_pml4_phys;
-    
+
+    // pmm_alloc_page() НЕ гарантирует нулевую страницу — в ней остаётся
+    // мусор от предыдущего владельца этой физической страницы (или от
+    // прошивки, если страница вообще ни разу не использовалась). Цикл
+    // ниже пишет new_pml4[i] только там, где соответствующая запись ЕСТЬ
+    // в kernel_pml4 (например, kernel_cr3 захвачен ДО того, как хоть один
+    // процесс выделил себе стек, так что записей для
+    // KERNEL_STACK_AREA_START/USER_STACK_AREA_START там нет и не может
+    // быть) — без обнуления в остальных индексах остался бы мусор, и если
+    // в нём случайно выставлен бит PRESENT, он воспринимался бы как
+    // указатель на настоящую PDPT.
+    for (int i = 0; i < 512; i++) {
+        new_pml4[i] = 0;
+    }
+
     // Копируем ВСЕ записи, но с модификацией флагов
     for (int i = 0; i < 512; i++) {
         if (kernel_pml4[i] & PAGE_PRESENT) {
@@ -272,75 +298,65 @@ void process_init(void) {
     printf("[PROCESS] Process manager initialized\n");
 }
 
+// Тоже без переключения CR3 (см. подробное объяснение у
+// allocate_ring0_stack()) — маппим прямо в pml4_phys через
+// map_page_in_pml4().
 static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys, uint32_t pid) {
     // Каждому процессу - свой уникальный виртуальный адрес
     uint64_t stack_virt = USER_STACK_AREA_START + (pid * USER_STACK_SIZE);
     size_t num_pages = size / PAGE_SIZE;
-    
+
     if (num_pages == 0) num_pages = 1;
-    
+
     irq_disable();
-    
-    uint64_t old_cr3;
-    asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
-    asm volatile("mov %0, %%cr3" : : "r"(pml4_phys) : "memory");
-    
+
     for (size_t i = 0; i < num_pages; i++) {
         uint64_t phys = pmm_alloc_page();
         if (!phys) {
             // Откат
             for (size_t j = 0; j < i; j++) {
                 uint64_t v = stack_virt + j * PAGE_SIZE;
-                uint64_t p = get_physical_address(v);
-                if (p) {
-                    unmap_page(v);
-                    pmm_free_page(p);
-                }
+                uint64_t p = get_physical_address_in_pml4(pml4_phys, v);
+                if (p) pmm_free_page(p);
             }
-            asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
             irq_enable();
             return 0;
         }
-        
+
         uint64_t virt = stack_virt + i * PAGE_SIZE;
-        if (map_page(virt, phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER) != 0) {
+        if (map_page_in_pml4(pml4_phys, virt, phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER) != 0) {
             pmm_free_page(phys);
             for (size_t j = 0; j < i; j++) {
                 uint64_t v = stack_virt + j * PAGE_SIZE;
-                uint64_t p = get_physical_address(v);
-                if (p) {
-                    unmap_page(v);
-                    pmm_free_page(p);
-                }
+                uint64_t p = get_physical_address_in_pml4(pml4_phys, v);
+                if (p) pmm_free_page(p);
             }
-            asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
             irq_enable();
             return 0;
         }
     }
-    
-    asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
+
     irq_enable();
-    
+
     // Возвращаем ВЕРХНИЙ адрес стека
     return stack_virt + size;
 }
 
 process_t* process_create(const char *name, void (*entry)(void)) {
     irq_disable();
-    
+
     process_t *proc = (process_t*)kmalloc(sizeof(process_t));
     if (!proc) {
         irq_enable();
         return NULL;
     }
-    
+
     proc->pid = next_pid++;
     proc->ppid = current_process ? current_process->pid : 0;
     proc->exit_code = 0;
     proc->wait_target_pid = 0;
     proc->state = PROCESS_READY;
-    
+
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
     proc->name[31] = '\0';
 
@@ -358,12 +374,12 @@ process_t* process_create(const char *name, void (*entry)(void)) {
         return NULL;
     }
     proc->page_table = new_pml4;
-    
+
     // Синхронизируем актуальные ядерные маппинги (куча могла расшириться)
     uint64_t current_kernel_pml4;
     asm volatile("mov %%cr3, %0" : "=r"(current_kernel_pml4));
     sync_kernel_mappings(proc->page_table, current_kernel_pml4);
-    
+
     // Выделяем Ring 0 стек
     proc->ring0_stack = allocate_ring0_stack(proc);
     if (!proc->ring0_stack) {
@@ -372,7 +388,7 @@ process_t* process_create(const char *name, void (*entry)(void)) {
         irq_enable();
         return NULL;
     }
-    
+
     // Выделяем пользовательский стек
     proc->stack_size = 16384;
     proc->stack_base = allocate_user_stack(proc->stack_size, new_pml4, proc->pid);
@@ -383,30 +399,28 @@ process_t* process_create(const char *name, void (*entry)(void)) {
         irq_enable();
         return NULL;
     }
-    
+
     // Инициализируем контекст
     memset(&proc->context, 0, sizeof(process_context_t));
-    
-    // Заполняем стек пользователя
-    uint64_t old_cr3;
-    asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
-    asm volatile("mov %0, %%cr3" : : "r"(new_pml4) : "memory");
-    
+
+    // Заполняем стек пользователя — БЕЗ переключения CR3 (см. подробное
+    // объяснение у allocate_ring0_stack()): пишем напрямую по физическим
+    // адресам через get_physical_address_in_pml4(), не трогая текущий
+    // (вызывающий) стек вызовов.
     uint64_t rsp = proc->stack_base;
+
     rsp -= 8;
-    uint64_t *stack_ptr = (uint64_t*)rsp;
-    *stack_ptr = (uint64_t)process_exit;
-    
+    uint64_t phys = get_physical_address_in_pml4(new_pml4, rsp);
+    *(uint64_t*)phys = (uint64_t)process_exit;
+
     rsp -= 8;
-    stack_ptr = (uint64_t*)rsp;
-    *stack_ptr = (uint64_t)entry;
-    
+    phys = get_physical_address_in_pml4(new_pml4, rsp);
+    *(uint64_t*)phys = (uint64_t)entry;
+
     rsp -= 8;
-    stack_ptr = (uint64_t*)rsp;
-    *stack_ptr = 0x202;
-    
-    asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
-    
+    phys = get_physical_address_in_pml4(new_pml4, rsp);
+    *(uint64_t*)phys = 0x202;
+
     proc->context.rsp = rsp;
     proc->context.rip = (uint64_t)entry;
     proc->context.rflags = 0x202;
@@ -993,9 +1007,14 @@ typedef struct __attribute__((packed)) {
     uint64_t rbx;
     uint64_t rflags;   // r11 на входе в syscall
     uint64_t rip;      // rcx на входе в syscall — адрес возврата в user-коде
+    uint64_t align_pad; // соответствует "pushq $0" в syscall_entry.S
+    uint64_t user_rsp;  // user RSP на момент ЭТОГО конкретного syscall —
+                        // сохранён на СОБСТВЕННОМ ядерном стеке процесса
+                        // (а не в общей на всё ядро переменной), поэтому
+                        // остаётся верным независимо от того, сколько
+                        // других процессов успеют сделать свои syscall'ы,
+                        // пока этот вызов приостановлен в schedule().
 } syscall_frame_t;
-
-extern uint64_t user_rsp_save;
 
 // Настоящий fork(). См. подробное описание в process.h.
 uint64_t process_fork(uint64_t frame_ptr) {
@@ -1062,7 +1081,7 @@ uint64_t process_fork(uint64_t frame_ptr) {
     process_context_t *ctx = &child->context;
     memset(ctx, 0, sizeof(*ctx));
     ctx->rip = frame->rip;
-    ctx->rsp = user_rsp_save;
+    ctx->rsp = frame->user_rsp;
     ctx->rflags = frame->rflags;
     ctx->rbx = frame->rbx;
     ctx->rbp = frame->rbp;

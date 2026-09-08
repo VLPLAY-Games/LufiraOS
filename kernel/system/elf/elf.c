@@ -379,19 +379,18 @@ void* elf_load_to_process(const void *elf_data,
     }
 
     // ========================================================
-    // ПЕРЕКЛЮЧАЕМСЯ В ПРОЦЕСС
-    // ========================================================
-
-    uint64_t old_cr3;
-    asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
-
-    asm volatile("mov %0, %%cr3"
-                 :
-                 : "r"(proc_pml4)
-                 : "memory");
-
-    // ========================================================
-    // ZERO + COPY
+    // ZERO + COPY — постранично, по физическим адресам, БЕЗ
+    // переключения CR3.
+    //
+    // Раньше эта функция переключала CR3 на proc_pml4 и писала через
+    // виртуальные адреса ОДНИМ большим memset()/memcpy() на весь
+    // сегмент — но segments[] лежит локальным массивом на стеке
+    // ВЫЗЫВАЮЩЕГО кода (elf_load_to_process вызывается из process_create,
+    // обычно прямо из keyboard_irq_handler — а он выполняется на
+    // пользовательском стеке ВЫЗЫВАЮЩЕГО процесса, чей PML4-индекс в
+    // свежесозданном proc_pml4 отсутствует), плюс сам elf_data — указатель
+    // на буфер вызывающего. Переключение CR3 мгновенно обрывало этот
+    // стек. См. подробное объяснение у allocate_ring0_stack() в process.c.
     // ========================================================
 
     for (int i = 0; i < seg_count; i++) {
@@ -406,37 +405,43 @@ void* elf_load_to_process(const void *elf_data,
             & ~(PAGE_SIZE - 1);
 
         // ================================================
-        // ZERO
+        // ZERO — постранично
         // ================================================
 
-        memset((void*)seg_start, 0, seg_end - seg_start);
+        for (uint64_t va = seg_start; va < seg_end; va += PAGE_SIZE) {
+            uint64_t phys = get_physical_address_in_pml4(proc_pml4, va);
+            if (phys) memset((void*)phys, 0, PAGE_SIZE);
+        }
 
         // ================================================
-        // COPY
+        // COPY — постранично (начало/конец сегмента могут не совпадать
+        // с границами страниц)
         // ================================================
 
         if (segments[i].filesz > 0) {
+            uint64_t dst_vaddr = segments[i].vaddr;
+            uint64_t remaining = segments[i].filesz;
+            const uint8_t *src = (const uint8_t*)elf_data + segments[i].offset;
 
-            memcpy(
-                (void*)segments[i].vaddr,
-                (const uint8_t*)elf_data +
-                    segments[i].offset,
-                segments[i].filesz
-            );
+            while (remaining > 0) {
+                uint64_t page_va = dst_vaddr & ~(PAGE_SIZE - 1);
+                uint64_t page_off = dst_vaddr - page_va;
+                uint64_t chunk = PAGE_SIZE - page_off;
+                if (chunk > remaining) chunk = remaining;
+
+                uint64_t phys = get_physical_address_in_pml4(proc_pml4, page_va);
+                if (phys) memcpy((void*)(phys + page_off), src, chunk);
+
+                dst_vaddr += chunk;
+                src += chunk;
+                remaining -= chunk;
+            }
         }
     }
 
     // ========================================================
-    // ВОССТАНАВЛИВАЕМ CR3
-    // ========================================================
-
-    asm volatile("mov %0, %%cr3"
-                 :
-                 : "r"(old_cr3)
-                 : "memory");
-
-    // ========================================================
-    // ВОЗВРАЩАЕМ ФИНАЛЬНЫЕ ПРАВА
+    // ВОЗВРАЩАЕМ ФИНАЛЬНЫЕ ПРАВА (set_page_flags_in_space уже работает
+    // по физическому pml4_phys, CR3 не трогает)
     // ========================================================
 
     for (int i = 0; i < seg_count; i++) {
@@ -475,14 +480,28 @@ void* elf_load_to_process(const void *elf_data,
         }
     }
 
-    asm volatile("mov %0, %%cr3"
-                 :
-                 : "r"(old_cr3)
-                 : "memory");
-
     printf("[ELF] Loaded successfully\n");
 
     return (void*)header->entry;
+}
+
+// Сохраняет текущее EFLAGS.IF и отключает прерывания. Команды шелла
+// (run/exec) выполняются синхронно прямо из обработчика IRQ1 клавиатуры
+// (см. комментарий про exec ниже), где прерывания уже аппаратно отключены
+// самим CPU — безусловный "sti" на ранних return'ах ниже раньше
+// ПРЕЖДЕВРЕМЕННО включал их посреди создания процесса, позволяя
+// таймерному IRQ (который теперь ещё и опрашивает USB) вклиниться прямо в
+// этот момент и повредить кучу/список процессов. Восстанавливаем именно
+// то состояние, что было на входе, а не форсируем "включено".
+static inline uint64_t elf_irq_save(void) {
+    uint64_t flags;
+    asm volatile("pushfq; popq %0" : "=r"(flags) :: "memory");
+    asm volatile("cli");
+    return flags;
+}
+
+static inline void elf_irq_restore(uint64_t flags) {
+    asm volatile("push %0; popfq" : : "r"(flags) : "memory", "cc");
 }
 
 // Загрузка ELF и создание процесса
@@ -491,44 +510,18 @@ static int elf_exec_internal(const void *elf_data,
                              const char *name,
                              int background)
 {
-    printf("[ELF] DEBUG: Step 0 - entry\n");
-
-    asm volatile("cli");
-
-    // Сохраняем CR3
-    uint64_t cr3_before;
-    asm volatile("mov %%cr3, %0" : "=r"(cr3_before));
-
-    printf("[ELF] DEBUG: CR3 before = 0x%lx, kernel_cr3 = 0x%lx, match=%d\n",
-           cr3_before, kernel_cr3, (cr3_before == kernel_cr3));
+    uint64_t irq_flags = elf_irq_save();
 
     // Создаём процесс
     process_t *proc = process_create(name, NULL);
     if (!proc) {
         printf("[ELF] Failed to create process\n");
-        asm volatile("sti");
+        elf_irq_restore(irq_flags);
         kfree((void*)elf_data);
         return -1;
     }
 
-    // Проверяем CR3
-    uint64_t cr3_after_create;
-    asm volatile("mov %%cr3, %0" : "=r"(cr3_after_create));
-
-    printf("[ELF] DEBUG: CR3 after create = 0x%lx, match=%d\n",
-           cr3_after_create, (cr3_after_create == kernel_cr3));
-
-    printf("[ELF] DEBUG: Trying proc->pid...\n");
-    uint32_t pid = proc->pid;
-    printf("[ELF] DEBUG: proc->pid = %u (OK!)\n", pid);
-
-    printf("[ELF] DEBUG: Trying proc->page_table...\n");
-    uint64_t pt = proc->page_table;
-    printf("[ELF] DEBUG: proc->page_table = 0x%lx (OK!)\n", pt);
-
     // Загружаем ELF
-    printf("[ELF] DEBUG: Now loading ELF...\n");
-
     void *entry = elf_load_to_process(
         elf_data,
         elf_size,
@@ -536,34 +529,16 @@ static int elf_exec_internal(const void *elf_data,
         name
     );
 
-    // Проверяем CR3 после загрузки
-    uint64_t cr3_after_load;
-    asm volatile("mov %%cr3, %0" : "=r"(cr3_after_load));
-
-    printf("[ELF] DEBUG: CR3 after load = 0x%lx, match=%d\n",
-           cr3_after_load, (cr3_after_load == kernel_cr3));
-
-    if (cr3_after_load != kernel_cr3) {
-        asm volatile("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
-    }
-
     if (!entry) {
         printf("[ELF] Failed to load ELF\n");
         proc->state = PROCESS_TERMINATED;
         kfree((void*)elf_data);
-        asm volatile("sti");
+        elf_irq_restore(irq_flags);
         return -1;
     }
 
     // Устанавливаем точку входа
-    printf("[ELF] DEBUG: Setting up entry point...\n");
-
     proc->context.rip = (uint64_t)entry;
-
-    printf("[ELF] DEBUG: proc->context.rip = 0x%lx (OK!)\n",
-           proc->context.rip);
-
-    printf("[ELF] DEBUG: ALL OK!\n");
 
     // Освобождаем буфер ELF (данные уже скопированы)
     kfree((void*)elf_data);
@@ -571,7 +546,7 @@ static int elf_exec_internal(const void *elf_data,
     if (background) {
         proc->state = PROCESS_READY;
         printf("[ELF] Background process ready: PID %u\n", proc->pid);
-        asm volatile("sti");
+        elf_irq_restore(irq_flags);
         return (int)proc->pid;
     }
 
@@ -613,11 +588,11 @@ int elf_exec_background(const void *elf_data,
 // возвращается к старому коду процесса.
 int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
 {
-    asm volatile("cli");
+    uint64_t irq_flags = elf_irq_save();
 
     process_t *proc = current_process;
     if (!proc) {
-        asm volatile("sti");
+        elf_irq_restore(irq_flags);
         kfree((void*)elf_data);
         return -1;
     }
@@ -625,7 +600,7 @@ int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
     uint64_t new_pml4, new_stack;
     if (process_prepare_exec(proc, &new_pml4, &new_stack) != 0) {
         printf("[ELF] exec: not enough memory for new address space\n");
-        asm volatile("sti");
+        elf_irq_restore(irq_flags);
         kfree((void*)elf_data);
         return -1;
     }
@@ -642,22 +617,23 @@ int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
 
     if (!entry) {
         printf("[ELF] exec: failed to load '%s', old process untouched\n", name);
-        asm volatile("sti");
+        elf_irq_restore(irq_flags);
         return -1;
     }
 
     // Готовим начальный кадр пользовательского стека новой программы —
     // так же, как это делает process_create() для только что созданного
     // процесса: возврат "с конца" main() уводит в process_exit().
-    uint64_t old_cr3;
-    asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
-    asm volatile("mov %0, %%cr3" : : "r"(new_pml4) : "memory");
-
+    //
+    // Пишем по физическому адресу, не переключая CR3 — see подробное
+    // объяснение у allocate_ring0_stack() в process.c: текущий стек
+    // вызовов (exec/do_exec/shell/...) лежит на пользовательском стеке
+    // ЭТОГО ЖЕ процесса, чей PML4-индекс в new_pml4 (свежесозданном
+    // адресном пространстве) ещё отсутствует.
     uint64_t rsp = new_stack;
     rsp -= 8;
-    *(uint64_t*)rsp = (uint64_t)process_exit;
-
-    asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
+    uint64_t rsp_phys = get_physical_address_in_pml4(new_pml4, rsp);
+    *(uint64_t*)rsp_phys = (uint64_t)process_exit;
 
     process_commit_exec(proc, new_pml4, new_stack, name);
 
