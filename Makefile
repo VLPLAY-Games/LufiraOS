@@ -28,6 +28,7 @@ $(shell mkdir -p $(BUILD_DIR) \
     $(BUILD_DIR)/kernel/drivers/mouse \
     $(BUILD_DIR)/kernel/drivers/disk \
 	$(BUILD_DIR)/kernel/drivers/usb \
+	$(BUILD_DIR)/kernel/drivers/input \
     $(BUILD_DIR)/kernel/shell \
 	$(BUILD_DIR)/kernel/shell/commands \
     $(BUILD_DIR)/kernel/system/cpu \
@@ -72,6 +73,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/drivers/disk/disk.c \
 	$(KERNEL_DIR)/drivers/sound/ac97.c \
 	$(KERNEL_DIR)/drivers/usb/uhci.c \
+	$(KERNEL_DIR)/drivers/input/input.c \
     $(KERNEL_DIR)/shell/shell.c \
     $(KERNEL_DIR)/shell/commands/system.c \
     $(KERNEL_DIR)/shell/commands/colors.c \

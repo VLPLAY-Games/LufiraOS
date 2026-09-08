@@ -1,5 +1,6 @@
 #include "mouse.h"
 #include "lib/types.h"
+#include "drivers/input/input.h"
 
 #define PS2_DATA_PORT           0x60
 #define PS2_STATUS_PORT         0x64
@@ -23,9 +24,6 @@
 #define MOUSE_RESET_OK          0xAA
 
 static int mouse_initialized = 0;
-static int mouse_x = 0;
-static int mouse_y = 0;
-static uint8_t mouse_buttons = 0;
 
 static uint8_t packet[3];
 static int packet_index = 0;
@@ -93,9 +91,6 @@ void mouse_init(void) {
     // Все отладочные printf убраны - статус выводится в kernel.c
     mouse_initialized = 0;
     packet_index = 0;
-    mouse_x = 0;
-    mouse_y = 0;
-    mouse_buttons = 0;
 
     ps2_flush_output_buffer();
 
@@ -182,13 +177,10 @@ void mouse_irq_handler(void) {
     if (packet[0] & 0x10) dx |= 0xFFFFFF00;
     if (packet[0] & 0x20) dy |= 0xFFFFFF00;
 
-    mouse_x += dx;
-    mouse_y -= dy;
-
-    if (mouse_x < 0) mouse_x = 0;
-    if (mouse_y < 0) mouse_y = 0;
-
-    mouse_buttons = packet[0] & 0x07;
+    // PS/2 репортует dy с положительным направлением вверх, а
+    // input_mouse_event() (как и экранные координаты) считает вниз
+    // положительным — отсюда инверсия знака.
+    input_mouse_event(dx, -dy, packet[0] & 0x07);
 }
 
 int mouse_is_initialized(void) {

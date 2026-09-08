@@ -1,7 +1,6 @@
 #include "lib/types.h"
 #include "keyboard.h"
-#include "shell/shell.h"
-#include "drivers/console/console.h"
+#include "drivers/input/input.h"
 
 // Порт клавиатуры
 #define KEYBOARD_DATA_PORT 0x60
@@ -190,71 +189,13 @@ int keyboard_scancode_to_key(uint8_t scancode) {
     return result;
 }
 
-void process_keypress(int key) {
-    if (key == 0) return;
-
-    switch (key) {
-        case KEY_LEFT_ARROW:
-            if (console_is_scrolled())
-                console_scroll_to_bottom();
-
-            shell_handle_left_arrow();
-            return;
-
-        case KEY_RIGHT_ARROW:
-            if (console_is_scrolled())
-                console_scroll_to_bottom();
-
-            shell_handle_right_arrow();
-            return;
-
-        case KEY_UP_ARROW:
-            if (keyboard_ctrl_pressed()) {
-                console_scroll_up();
-                return;
-            }
-
-            if (console_is_scrolled())
-                console_scroll_to_bottom();
-
-            shell_handle_up_arrow();
-            return;
-
-        case KEY_DOWN_ARROW:
-            if (keyboard_ctrl_pressed()) {
-                console_scroll_down();
-                return;
-            }
-
-            if (console_is_scrolled())
-                console_scroll_to_bottom();
-
-            shell_handle_down_arrow();
-            return;
-        case '\t':  // Tab!
-            shell_handle_tab();
-            return;
-    }
-
-    if (key == '\n') {
-        shell_handle_enter();
-        return;
-    }
-    if (key == '\b') {
-        shell_handle_backspace();
-        return;
-    }
-
-    shell_handle_char(key);
-}
-
-// ============ НОВЫЙ ОБРАБОТЧИК ПРЕРЫВАНИЯ IRQ1 ============
+// ============ ОБРАБОТЧИК ПРЕРЫВАНИЯ IRQ1 ============
 void keyboard_irq_handler(void) {
     while (inb(KEYBOARD_STATUS_PORT) & 1) {
         uint8_t scancode = keyboard_read_scancode();
 
         int key = keyboard_scancode_to_key(scancode);
-        process_keypress(key);
+        input_keyboard_event(key);
     }
 }
 
