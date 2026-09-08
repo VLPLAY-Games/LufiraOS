@@ -200,17 +200,21 @@ static uint64_t sys_fork(uint64_t unused1, uint64_t unused2, uint64_t unused3,
     return (uint64_t)-1;
 }
 
-// SYS_WAIT (13): pid_ptr, status_ptr, options
-static uint64_t sys_wait(uint64_t pid_ptr, uint64_t status_ptr, uint64_t options,
+// SYS_WAIT (13): pid (0 = любой ребёнок), status_ptr (может быть 0), options
+static uint64_t sys_wait(uint64_t pid, uint64_t status_ptr, uint64_t options,
                          uint64_t unused1, uint64_t unused2) {
-    (void)pid_ptr;
-    (void)status_ptr;
     (void)options;
     (void)unused1;
     (void)unused2;
-    
-    // Заглушка: ожидание завершения дочернего процесса
-    return (uint64_t)-1;
+
+    int status = 0;
+    int result = process_wait((uint32_t)pid, &status);
+
+    if (result >= 0 && status_ptr != 0) {
+        *(int *)status_ptr = status;
+    }
+
+    return (uint64_t)result;
 }
 
 // SYS_GETCWD (14): buffer, size

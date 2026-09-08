@@ -157,6 +157,7 @@ void process_init(void) {
     idle_process->pid = 0;
     idle_process->ppid = 0;
     idle_process->exit_code = 0;
+    idle_process->wait_target_pid = 0;
     idle_process->state = PROCESS_READY;
     idle_process->stack_base = 0;
     idle_process->stack_size = 0;
@@ -244,6 +245,7 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     proc->pid = next_pid++;
     proc->ppid = current_process ? current_process->pid : 0;
     proc->exit_code = 0;
+    proc->wait_target_pid = 0;
     proc->state = PROCESS_READY;
     
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
@@ -332,6 +334,74 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     return proc;
 }
 
+// Ищет процесс, который сейчас заблокирован в process_wait(), ожидая
+// именно child (по pid или WAIT_ANY_PID). Возвращает NULL, если такого нет.
+static process_t *find_waiting_parent(process_t *child) {
+    if (!child->ppid || !process_list)
+        return NULL;
+
+    process_t *p = process_list;
+    process_t *start = p;
+
+    do {
+        if (p->pid == child->ppid &&
+            p->state == PROCESS_BLOCKED &&
+            (p->wait_target_pid == child->pid ||
+             p->wait_target_pid == WAIT_ANY_PID))
+        {
+            return p;
+        }
+        p = p->next;
+    } while (p && p != start);
+
+    return NULL;
+}
+
+// Будит родителя child'а, если тот сейчас ждёт его в process_wait() —
+// используется и нормальным завершением (process_exit), и process_kill().
+// Возвращает разбуженного родителя (уже переведённого в READY) либо NULL.
+static process_t *wake_waiting_parent(process_t *child) {
+    process_t *waiter = find_waiting_parent(child);
+    if (!waiter)
+        return NULL;
+
+    waiter->wait_target_pid = 0;
+    waiter->state = PROCESS_READY;
+    return waiter;
+}
+
+// Убирает target (уже PROCESS_TERMINATED, найденный process_wait()) из
+// кольцевого списка процессов и освобождает его process_t. Как и
+// process_reap(), не освобождает page_table/ring0-стек — в кодовой базе
+// пока нет функции разбора PML4 целиком.
+static void process_remove_from_list(process_t *target) {
+    if (!process_list || !target)
+        return;
+
+    if (target->next == target) {
+        if (process_list == target)
+            process_list = NULL;
+        kfree(target);
+        return;
+    }
+
+    if (process_list == target) {
+        process_t *last = target;
+        while (last->next != target)
+            last = last->next;
+        process_list = target->next;
+        last->next = process_list;
+    } else {
+        process_t *prev = process_list;
+        while (prev->next != target && prev->next != process_list)
+            prev = prev->next;
+        if (prev->next == target)
+            prev->next = target->next;
+    }
+
+    kfree(target);
+}
+
 void process_exit(int exit_code) {
     process_t *exiting_process = current_process;
 
@@ -348,13 +418,78 @@ void process_exit(int exit_code) {
     exiting_process->exit_code = exit_code;
     exiting_process->state = PROCESS_TERMINATED;
 
-    schedule();
+    process_t *waiter = wake_waiting_parent(exiting_process);
+    if (waiter) {
+        switch_to_process(waiter);
+    } else {
+        schedule();
+    }
 
     /*
      * Если сюда вернулись — что-то пошло не так.
      */
     while (1)
         asm volatile("hlt");
+}
+
+// Ждёт завершения ребёнка текущего процесса. См. комментарий в process.h.
+int process_wait(uint32_t pid, int *status_out) {
+    if (!current_process)
+        return -1;
+
+    uint32_t caller_pid = current_process->pid;
+    uint32_t target = (pid == 0) ? WAIT_ANY_PID : pid;
+
+    for (;;) {
+        process_t *zombie = NULL;
+        int has_child = 0;
+
+        if (process_list) {
+            process_t *p = process_list;
+            process_t *start = p;
+
+            do {
+                if (p->ppid == caller_pid &&
+                    (target == WAIT_ANY_PID || p->pid == target))
+                {
+                    has_child = 1;
+                    if (p->state == PROCESS_TERMINATED) {
+                        zombie = p;
+                        break;
+                    }
+                }
+                p = p->next;
+            } while (p && p != start);
+        }
+
+        if (zombie) {
+            uint32_t zpid = zombie->pid;
+            int code = zombie->exit_code;
+
+            process_remove_from_list(zombie);
+
+            if (status_out)
+                *status_out = code;
+
+            return (int)zpid;
+        }
+
+        if (!has_child) {
+            // У вызывающего нет (или больше нет) такого ребёнка.
+            return -1;
+        }
+
+        // Ребёнок жив — блокируемся до его завершения.
+        current_process->wait_target_pid = target;
+        current_process->state = PROCESS_BLOCKED;
+
+        schedule();
+
+        // Возобновились: либо нас разбудил exit подходящего ребёнка,
+        // либо это ложное пробуждение — в обоих случаях просто заново
+        // сканируем список выше.
+        current_process->wait_target_pid = 0;
+    }
 }
 
 // Готовит НОВОЕ адресное пространство и пользовательский стек для exec(),
@@ -656,10 +791,17 @@ int process_kill(uint32_t pid)
             printf("[PROCESS] Killing PID %u ('%s')\n",
                    p->pid, p->name);
 
+            p->exit_code = -1;
             p->state = PROCESS_TERMINATED;
 
+            process_t *waiter = wake_waiting_parent(p);
+
             if (p == current_process) {
-                schedule();
+                if (waiter) {
+                    switch_to_process(waiter);
+                } else {
+                    schedule();
+                }
 
                 while (1)
                     asm volatile("hlt");

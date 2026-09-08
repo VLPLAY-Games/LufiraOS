@@ -42,6 +42,7 @@ void command_exec(const char* filename);
 
 // Process
 void command_kill(const char* args);
+void command_wait(const char* args);
 
 // Звук
 void command_beep(void);

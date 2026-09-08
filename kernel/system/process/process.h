@@ -10,6 +10,11 @@
 #define USER_STACK_AREA_START 0x0000700000000000ULL
 #define USER_STACK_SIZE       (16 * 1024)  // 16KB
 
+// Значение process_t.wait_target_pid, означающее "жду ЛЮБОГО своего
+// ребёнка" (аналог waitpid(-1, ...)). 0 означает "не жду ничего" — реальные
+// PID никогда не достигают этого значения.
+#define WAIT_ANY_PID ((uint32_t)-1)
+
 
 typedef enum {
     PROCESS_READY = 0,
@@ -37,6 +42,7 @@ typedef struct process {
     process_state_t state;
     uint64_t wakeup_tick;
     int exit_code;          // валиден, когда state == PROCESS_TERMINATED
+    uint32_t wait_target_pid; // 0 = не жду; WAIT_ANY_PID = жду любого ребёнка; иначе конкретный pid
     process_context_t context;
     uint64_t stack_base;
     uint64_t stack_size;
@@ -55,6 +61,13 @@ void process_reap(void);
 void process_sleep(uint64_t milliseconds);
 void process_ps(void);
 int process_kill(uint32_t pid);
+
+// Ждёт завершения ребёнка текущего процесса: pid == 0 значит "любой
+// ребёнок" (внутри хранится как WAIT_ANY_PID), иначе конкретный pid.
+// Блокирует вызывающего, если такой ребёнок жив, реап'ит зомби и
+// возвращает его pid + *status_out = exit_code. Возвращает -1, если у
+// вызывающего вообще нет такого ребёнка (в том числе уже отреапленного).
+int process_wait(uint32_t pid, int *status_out);
 
 // Готовит новое адресное пространство и пользовательский стек для exec(),
 // не трогая текущий образ proc (см. elf_exec_replace()).
