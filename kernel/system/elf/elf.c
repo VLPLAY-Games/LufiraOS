@@ -515,6 +515,7 @@ static int elf_exec_internal(const void *elf_data,
     if (!proc) {
         printf("[ELF] Failed to create process\n");
         asm volatile("sti");
+        kfree((void*)elf_data);
         return -1;
     }
 
@@ -557,7 +558,7 @@ static int elf_exec_internal(const void *elf_data,
     if (!entry) {
         printf("[ELF] Failed to load ELF\n");
         proc->state = PROCESS_TERMINATED;
-
+        kfree((void*)elf_data);
         asm volatile("sti");
         return -1;
     }
@@ -572,22 +573,13 @@ static int elf_exec_internal(const void *elf_data,
 
     printf("[ELF] DEBUG: ALL OK!\n");
 
-    /*
-     * FOREGROUND:
-     * сразу передаём CPU процессу.
-     *
-     * BACKGROUND:
-     * оставляем процесс в READY.
-     * Планировщик сам запустит его позже.
-     */
+    // Освобождаем буфер ELF (данные уже скопированы)
+    kfree((void*)elf_data);
+
     if (background) {
         proc->state = PROCESS_READY;
-
         printf("[ELF] Background process ready: PID %u\n", proc->pid);
-
-        // Мы сделали cli выше — обязательно включаем IRQ обратно.
         asm volatile("sti");
-
         return (int)proc->pid;
     }
 

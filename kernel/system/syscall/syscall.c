@@ -134,19 +134,10 @@ static uint64_t sys_munmap(uint64_t addr, uint64_t length,
 // SYS_EXEC (11): filename_ptr, argv_ptr, envp_ptr
 static uint64_t sys_exec(uint64_t filename_ptr, uint64_t argv_ptr, 
                          uint64_t envp_ptr, uint64_t unused1, uint64_t unused2) {
-    (void)argv_ptr;
-    (void)envp_ptr;
-    (void)unused1;
-    (void)unused2;
-    
+    (void)argv_ptr; (void)envp_ptr; (void)unused1; (void)unused2;
     if (filename_ptr == 0) return (uint64_t)-1;
-    
     const char *filename = (const char *)filename_ptr;
-    printf("[SYS_EXEC] %s\n", filename);
-    
-    // Заглушка: загрузка и запуск ELF
-    // Будет вызывать elf_exec() после VFS
-    return (uint64_t)-1;
+    return (uint64_t)do_exec(filename);
 }
 
 // SYS_FORK (12)
@@ -297,4 +288,46 @@ uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_t arg2,
     }
     
     return syscall_table[syscall_num](arg1, arg2, arg3, arg4, arg5);
+}
+
+// Вспомогательная функция для exec
+int do_exec(const char *filename) {
+    if (!filename || !*filename) return -1;
+    
+    int fd = vfs_open(filename, O_RDONLY);
+    if (fd < 0) {
+        printf("[EXEC] Failed to open %s\n", filename);
+        return -1;
+    }
+    
+    file_t *f = current_fd_table->files[fd];
+    if (!f || !f->inode) {
+        vfs_close(fd);
+        return -1;
+    }
+    uint32_t size = f->inode->size;
+    if (size == 0) {
+        vfs_close(fd);
+        return -1;
+    }
+    
+    uint8_t *buf = (uint8_t *)kmalloc(size);
+    if (!buf) {
+        vfs_close(fd);
+        return -1;
+    }
+    
+    int bytes_read = vfs_read(fd, buf, size);
+    vfs_close(fd);
+    if (bytes_read != (int)size) {
+        kfree(buf);
+        return -1;
+    }
+    
+    int result = elf_exec(buf, size, filename);
+    if (result != 0) {
+        kfree(buf);
+        return -1;
+    }
+    return 0;
 }

@@ -38,6 +38,7 @@ void command_edit(const char* args);
 // ELF loader
 void command_run(const char* filename);
 void command_runbg(const char* filename);
+void command_exec(const char* filename);
 
 // Process
 void command_kill(const char* args);

@@ -304,21 +304,18 @@ void command_run(const char *filename) {
         return;
     }
     
-    // Открываем файл
     uint32_t fsize;
     if (fat_open(&fatfs, filename, &fsize) != 0) {
         printf("\nFile not found: %s\n", filename);
         return;
     }
     
-    // Выделяем буфер для файла
     uint8_t *file_buf = (uint8_t *)kmalloc(fsize);
     if (!file_buf) {
         printf("\nNot enough memory to load %s (%u bytes)\n", filename, fsize);
         return;
     }
     
-    // Читаем файл
     int br = fat_read_file(&fatfs, filename, file_buf, fsize);
     if (br <= 0) {
         printf("\nError reading file: %s\n", filename);
@@ -328,12 +325,12 @@ void command_run(const char *filename) {
     
     printf("\nLoading ELF: %s (%u bytes)...\n", filename, fsize);
     
-    // Запускаем ELF
-    if (elf_exec(file_buf, fsize, filename) == 0) {
-        printf("Process started!\n");
+    // elf_exec освободит буфер при успехе, при ошибке нужно освободить здесь
+    int result = elf_exec(file_buf, fsize, filename);
+    if (result != 0) {
+        printf("Failed to start process\n");
+        kfree(file_buf);
     }
-    
-    // Не освобождаем буфер - он используется процессом
 }
 
 // write - запись в файл
@@ -579,4 +576,17 @@ void command_edit(const char *args) {
     }
     
     kfree(buf);
+}
+
+// exec - замена текущего процесса
+void command_exec(const char *filename) {
+    if (!filename || *filename == '\0') {
+        printf("\nUsage: exec <filename>\n");
+        return;
+    }
+    int result = do_exec(filename);
+    if (result != 0) {
+        printf("\nExec failed\n");
+    }
+    // При успехе управление не возвращается
 }

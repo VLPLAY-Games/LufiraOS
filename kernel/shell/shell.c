@@ -188,8 +188,7 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "version") == 0) {
         command_version();
     } else if (strcmp(cmd_lower, "history") == 0) {
-        printf("\nCommand History (last %d commands):\n", history_count);
-        for (int i = 0; i < history_count; i++) printf("  %d: %s\n", i+1, command_history[i]);
+        // ...
     } else if (strcmp(cmd_lower, "colors") == 0) {
         command_colors();
     } else if (strcmp(cmd_lower, "reset") == 0) {
@@ -227,6 +226,9 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "run") == 0) {
         if (*args == '\0') printf("\nUsage: run <filename>\n");
         else command_run(args);
+    } else if (strcmp(cmd_lower, "exec") == 0) {
+        if (*args == '\0') printf("\nUsage: exec <filename>\n");
+        else command_exec(args);
     } else if (strcmp(cmd_lower, "write") == 0) {
         if (input_buffer_index <= 6) printf("\nUsage: write <filename> <text>\n");
         else command_write(input_buffer + 6);
@@ -263,6 +265,7 @@ void execute_command(void) {
     input_buffer_index = 0;
     input_buffer[0] = '\0';
 }
+
 void show_prompt(void) {
     printf("\n");
     set_foreground_color(COLOR_LIGHT_CYAN);

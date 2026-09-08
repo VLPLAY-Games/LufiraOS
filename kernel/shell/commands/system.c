@@ -42,6 +42,7 @@ void command_help(void) {
     printf(" beep - Play beep to check sound\n");
     printf(" music - Play sample music to check sound\n");
     printf(" mixer <volume> - Change sound volume\n");
+    printf(" exec <file> - Replace current process with ELF program\n");
 }
 
 void command_clear(void) { clear_screen(); show_prompt(); }
@@ -92,25 +93,20 @@ void command_echo(const char* args) {
     else printf("\n%s\n", args);
 }
 
-void command_runbg(const char *filename)
-{
+void command_runbg(const char *filename) {
     if (!filename || *filename == '\0') {
         printf("\nUsage: runbg <filename>\n");
         printf("Example: runbg hello.elf\n");
         return;
     }
 
-    // Открываем файл
     uint32_t fsize;
-
     if (fat_open(&fatfs, filename, &fsize) != 0) {
         printf("\nFile not found: %s\n", filename);
         return;
     }
 
-    // Выделяем буфер
     uint8_t *file_buf = (uint8_t *)kmalloc(fsize);
-
     if (!file_buf) {
         printf("\nNot enough memory to load %s (%u bytes)\n",
                filename,
@@ -118,14 +114,7 @@ void command_runbg(const char *filename)
         return;
     }
 
-    // Читаем ELF
-    int br = fat_read_file(
-        &fatfs,
-        filename,
-        file_buf,
-        fsize
-    );
-
+    int br = fat_read_file(&fatfs, filename, file_buf, fsize);
     if (br <= 0) {
         printf("\nError reading file: %s\n", filename);
         kfree(file_buf);
@@ -136,13 +125,7 @@ void command_runbg(const char *filename)
            filename,
            fsize);
 
-    // Запускаем, но НЕ переключаемся на него
-    int pid = elf_exec_background(
-        file_buf,
-        fsize,
-        filename
-    );
-
+    int pid = elf_exec_background(file_buf, fsize, filename);
     if (pid < 0) {
         printf("Failed to start background process\n");
         kfree(file_buf);
@@ -150,11 +133,7 @@ void command_runbg(const char *filename)
     }
 
     printf("Started background process PID %u\n", (uint32_t)pid);
-
-    /*
-     * Как и в command_run(), буфер пока НЕ освобождаем.
-     * Он используется процессом.
-     */
+    // elf_exec_background освободит буфер при успехе
 }
 
 void command_kill(const char *args)
