@@ -694,6 +694,8 @@ int fat_mkdir(fat_fs_t *fs,
         next_entry->name[0] = 0x00;
     }
 
+    fat_sync(fs);
+
     return 0;
 }
 
@@ -865,6 +867,8 @@ int fat_rm(fat_fs_t *fs,
 
     fat_mark_sector_dirty(fs, parent_lba);
 
+    fat_sync(fs);
+
     return 0;
 }
 
@@ -897,6 +901,8 @@ int fat_create_file(fat_fs_t *fs, uint32_t parent_cluster, const char *name) {
 
     if (next_entry && next_entry->name[0] != 0x00)
         next_entry->name[0] = 0x00;
+
+    fat_sync(fs);
 
     return 0;
 }
@@ -1027,6 +1033,8 @@ int fat_write_file(fat_fs_t *fs, const char *filename, const void *buffer, uint3
         (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
     fat_mark_sector_dirty(fs, dir_lba);
 
+    fat_sync(fs);
+
     return 0;
 }
 
@@ -1106,5 +1114,43 @@ int fat_append_file(fat_fs_t *fs, const char *filename, const void *buffer, uint
         (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
     fat_mark_sector_dirty(fs, dir_lba);
 
+    fat_sync(fs);
+
     return 0;
+}
+
+/* ======== СИНХРОНИЗАЦИЯ ОДНОГО ГРЯЗНОГО СЕКТОРА ======== */
+void fat_sync(fat_fs_t *fs) {
+    if (!fs || !fs->dirty_map) return;
+    
+    uint8_t disk_sector[512];
+    uint32_t total = fs->total_sectors;
+    uint32_t written = 0;
+    
+    for (uint32_t lba = 0; lba < total; lba++) {
+        if (!(fs->dirty_map[lba >> 3] & (1 << (lba & 7))))
+            continue;
+            
+        uint8_t *mem_sector = fs->image + lba * 512;
+        if (disk_read_sectors(lba, 1, disk_sector) == 0) {
+            int changed = 0;
+            for (int i = 0; i < 512; i++) {
+                if (mem_sector[i] != disk_sector[i]) {
+                    changed = 1;
+                    break;
+                }
+            }
+            if (changed && disk_write_sectors(lba, 1, mem_sector) == 0)
+                written++;
+        } else {
+            if (disk_write_sectors(lba, 1, mem_sector) == 0)
+                written++;
+        }
+    }
+    
+    memset(fs->dirty_map, 0, fs->dirty_map_size);
+    
+    if (written > 0) {
+        printf("[FAT] Synced %u sectors\n", written);
+    }
 }

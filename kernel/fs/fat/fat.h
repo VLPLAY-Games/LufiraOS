@@ -118,3 +118,5 @@ int fat_resolve_parent(fat_fs_t *fs,
                        const char *path,
                        uint32_t *out_parent_cluster,
                        char *out_name);
+
+void fat_sync(fat_fs_t *fs);
