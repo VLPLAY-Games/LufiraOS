@@ -89,3 +89,13 @@ void usb_hid_keyboard_report(const uint8_t report[8]) {
 
     for (int i = 0; i < 6; i++) last_keys[i] = keys[i];
 }
+
+void usb_hid_mouse_report(const uint8_t *report, int len) {
+    if (len < 3) return; // короче минимального boot-отчёта (кнопки+dx+dy) — мусор
+
+    uint8_t buttons = report[0] & 0x07;
+    int dx = (int8_t)report[1];
+    int dy = (int8_t)report[2];
+
+    input_mouse_event(dx, dy, buttons);
+}

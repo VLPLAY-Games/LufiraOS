@@ -174,6 +174,19 @@ static int uhci_kbd_low_speed = 0;
 static int uhci_kbd_toggle = 0;
 
 /* ======================================================================== */
+/* Периодическая (interrupt) передача мыши                                  */
+/* ======================================================================== */
+
+static uhci_qh_t *uhci_mouse_qh = NULL;
+static uhci_td_t *uhci_mouse_td = NULL;
+static uint8_t   *uhci_mouse_buf = NULL;
+static uint8_t uhci_mouse_addr = 0;
+static uint8_t uhci_mouse_ep = 0;
+static uint8_t uhci_mouse_max_packet = 8;
+static int uhci_mouse_low_speed = 0;
+static int uhci_mouse_toggle = 0;
+
+/* ======================================================================== */
 /* Состояние драйвера                                                       */
 /* ======================================================================== */
 
@@ -273,14 +286,21 @@ static void uhci_reset(void) {
 /* ======================================================================== */
 
 // Переписывает ВСЕ 1024 слота Frame List так, чтобы каждый указывал на
-// начало цепочки QH. Пока клавиатурный interrupt-QH не настроен (uhci_kbd_qh
-// == NULL), первой (и единственной) в цепочке остаётся control QH — ровно
-// как было в фазах A/B/C. Как только uhci_start_keyboard_interrupt()
-// подключит interrupt-QH перед control QH (через его head_link), эта же
-// функция вызывается повторно, и расписание становится
-// interrupt(kbd) -> control.
+// начало цепочки QH: mouse -> keyboard -> control (любое из первых двух
+// звеньев отсутствует, если соответствующее HID-устройство не найдено —
+// тогда цепочка просто короче). Пока ни клавиатура, ни мышь не настроены,
+// расписание указывает прямо на control QH — ровно как было в фазах A/B/C.
+// Вызывается заново каждый раз, когда uhci_start_keyboard_interrupt()/
+// uhci_start_mouse_interrupt() добавляет своё звено в начало цепочки.
 static void uhci_relink_schedule(void) {
-    uhci_qh_t *first = uhci_kbd_qh ? uhci_kbd_qh : &uhci_qh_pool[0];
+    uhci_qh_t *first;
+    if (uhci_mouse_qh) {
+        first = uhci_mouse_qh;
+    } else if (uhci_kbd_qh) {
+        first = uhci_kbd_qh;
+    } else {
+        first = &uhci_qh_pool[0];
+    }
     uint32_t link = (((uint32_t)(uintptr_t)first) & ~0xFu) | UHCI_LINK_QH;
     for (int i = 0; i < 1024; i++) {
         uhci_frame_list[i] = link;
@@ -860,6 +880,45 @@ static int uhci_start_keyboard_interrupt(const uhci_hid_device_t *dev) {
 }
 
 /* ======================================================================== */
+/* Периодическая (interrupt) передача мыши                                  */
+/* ======================================================================== */
+
+// Полностью симметрична uhci_start_keyboard_interrupt() — единственное
+// отличие в том, куда подключается head_link нового QH: если клавиатурный
+// interrupt уже настроен, мышь встаёт ПЕРЕД ним (mouse -> keyboard ->
+// control); если клавиатуры нет — сразу перед control QH.
+static int uhci_start_mouse_interrupt(const uhci_hid_device_t *dev) {
+    if (!uhci_periodic_pool && !uhci_setup_periodic_pool())
+        return -1;
+
+    uhci_mouse_qh  = &uhci_qh_pool[2];
+    uhci_mouse_td  = (uhci_td_t *)(uhci_periodic_pool + UHCI_PERIODIC_MOUSE_TD_OFFSET);
+    uhci_mouse_buf = uhci_periodic_pool + UHCI_PERIODIC_MOUSE_BUF_OFFSET;
+
+    uhci_mouse_addr = dev->address;
+    uhci_mouse_ep = dev->ep_addr;
+    uhci_mouse_max_packet = (dev->max_packet == 0 || dev->max_packet > 8) ? 8 : (uint8_t)dev->max_packet;
+    uhci_mouse_low_speed = dev->low_speed;
+    uhci_mouse_toggle = 0; // SET_CONFIGURATION сбросила data toggle этого endpoint'а в DATA0
+
+    uhci_qh_t *next_qh = uhci_kbd_qh ? uhci_kbd_qh : &uhci_qh_pool[0];
+    uhci_mouse_qh->head_link = (((uint32_t)(uintptr_t)next_qh) & ~0xFu) | UHCI_LINK_QH;
+    uhci_mouse_qh->element_link = UHCI_LINK_TERMINATE;
+
+    uhci_mouse_td->link = UHCI_LINK_TERMINATE;
+    uhci_mouse_td->token = uhci_td_make_token(UHCI_PID_IN, uhci_mouse_addr, uhci_mouse_ep,
+                                              uhci_mouse_toggle, uhci_mouse_max_packet);
+    uhci_mouse_td->buffer = (uint32_t)(uintptr_t)uhci_mouse_buf;
+    uhci_mouse_td->status = uhci_td_make_status(uhci_mouse_low_speed);
+
+    uhci_mouse_qh->element_link = ((uint32_t)(uintptr_t)uhci_mouse_td) & ~0xFu;
+
+    uhci_relink_schedule();
+
+    return 0;
+}
+
+/* ======================================================================== */
 /* Публичный API                                                            */
 /* ======================================================================== */
 
@@ -890,9 +949,9 @@ void uhci_init(void) {
         uhci_enumerate_device(1);
     }
 
-    // Пока поддерживаем одну активную клавиатуру одновременно — первая
-    // найденная выигрывает (моделирование двух параллельных interrupt-QH
-    // клавиатур не входит в объём этой фазы).
+    // Пока поддерживаем одну активную клавиатуру и одну активную мышь
+    // одновременно — первая найденная каждого вида выигрывает (порт 0 и
+    // порт 1 — это всё, что вообще есть у этого root hub'а).
     for (int i = 0; i < 2; i++) {
         if (uhci_hid_devices[i].valid &&
             uhci_hid_devices[i].protocol == USB_HID_PROTOCOL_KEYBOARD)
@@ -902,6 +961,20 @@ void uhci_init(void) {
                 printf("[UHCI] Port %d: keyboard interrupt transfer armed\n", i);
             } else {
                 printf("[UHCI] Port %d: failed to arm keyboard interrupt transfer\n", i);
+            }
+            break;
+        }
+    }
+
+    for (int i = 0; i < 2; i++) {
+        if (uhci_hid_devices[i].valid &&
+            uhci_hid_devices[i].protocol == USB_HID_PROTOCOL_MOUSE)
+        {
+            if (uhci_start_mouse_interrupt(&uhci_hid_devices[i]) == 0) {
+                uhci_ready = 1;
+                printf("[UHCI] Port %d: mouse interrupt transfer armed\n", i);
+            } else {
+                printf("[UHCI] Port %d: failed to arm mouse interrupt transfer\n", i);
             }
             break;
         }
@@ -918,48 +991,67 @@ const uhci_hid_device_t *uhci_get_hid_device(int port_index) {
     return &uhci_hid_devices[port_index];
 }
 
+// Общая часть опроса одной периодической (interrupt) передачи: если её TD
+// завершился (Active сброшен — либо успех, либо жёсткая ошибка), декодирует
+// отчёт (если не было ошибки) и перевооружает TD на следующий IN.
+//
+// Важная деталь протокола UHCI: после завершения TD контроллер продвигает
+// QH.element_link на TD.link (у нас — TERMINATE, единственный TD в очереди),
+// поэтому недостаточно перевооружить только сам TD — QH нужно заново
+// подключить к нему, иначе следующий кадр решит, что у очереди нет
+// элементов, и TD больше никогда не будет опрошен.
+typedef void (*uhci_hid_report_fn)(const uint8_t *buf, int len);
+
+static void uhci_poll_periodic(uhci_qh_t *qh, uhci_td_t *td, uint8_t *buf,
+                               uint8_t addr, uint8_t ep, uint8_t max_packet,
+                               int low_speed, int *toggle,
+                               uhci_hid_report_fn report_fn)
+{
+    if (!td || (td->status & UHCI_TD_STATUS_ACTIVE))
+        return;
+
+    uint32_t st = td->status;
+
+    if (!(st & UHCI_TD_STATUS_ERROR_MASK)) {
+        // actlen хранится как "длина - 1", кроме 0x7FF, означающего 0 байт.
+        uint32_t raw_actlen = st & 0x7FFu;
+        int actlen = (raw_actlen == 0x7FFu) ? 0 : (int)(raw_actlen + 1);
+        report_fn(buf, actlen);
+        *toggle ^= 1;
+    }
+    // На ошибке toggle не трогаем — устройство его тоже не продвинуло.
+
+    qh->element_link = UHCI_LINK_TERMINATE;
+
+    td->token = uhci_td_make_token(UHCI_PID_IN, addr, ep, *toggle, max_packet);
+    td->status = uhci_td_make_status(low_speed);
+
+    // Убеждаемся, что новый TD полностью записан до того, как снова
+    // публикуем его через QH.
+    __asm__ volatile ("" ::: "memory");
+
+    qh->element_link = ((uint32_t)(uintptr_t)td) & ~0xFu;
+}
+
+static void uhci_keyboard_report_adapter(const uint8_t *buf, int len) {
+    (void)len; // boot-отчёт клавиатуры всегда ровно 8 байт
+    usb_hid_keyboard_report(buf);
+}
+
 void usb_poll(void) {
     if (!uhci_ready)
         return;
 
-    if (!uhci_kbd_td)
-        return;
+    // Клавиатура и мышь опрашиваются НЕЗАВИСИМО: то, что клавиатурный TD
+    // ещё Active (обычный случай простоя — NAK не сбрасывает Active) или
+    // клавиатуры вовсе нет, не должно мешать опросу мыши, и наоборот.
+    uhci_poll_periodic(uhci_kbd_qh, uhci_kbd_td, uhci_kbd_buf,
+                       uhci_kbd_addr, uhci_kbd_ep, uhci_kbd_max_packet,
+                       uhci_kbd_low_speed, &uhci_kbd_toggle,
+                       uhci_keyboard_report_adapter);
 
-    if (uhci_kbd_td->status & UHCI_TD_STATUS_ACTIVE)
-        return;
-
-    uint32_t st = uhci_kbd_td->status;
-
-    if (!(st & UHCI_TD_STATUS_ERROR_MASK)) {
-        usb_hid_keyboard_report(uhci_kbd_buf);
-        uhci_kbd_toggle ^= 1;
-    }
-
-    /*
-     * После completion UHCI продвигает QH.element_link.
-     * Для единственного TD он обычно становится TERMINATE.
-     *
-     * Поэтому для повторной interrupt-передачи нужно не только
-     * перевооружить сам TD, но и снова прикрепить его к QH.
-     */
-    uhci_kbd_qh->element_link = UHCI_LINK_TERMINATE;
-
-    uhci_kbd_td->token = uhci_td_make_token(
-        UHCI_PID_IN,
-        uhci_kbd_addr,
-        uhci_kbd_ep,
-        uhci_kbd_toggle,
-        uhci_kbd_max_packet
-    );
-
-    uhci_kbd_td->status = uhci_td_make_status(uhci_kbd_low_speed);
-
-    /*
-     * Убедимся, что новый TD полностью записан до того,
-     * как снова публикуем его через QH.
-     */
-    __asm__ volatile ("" ::: "memory");
-
-    uhci_kbd_qh->element_link =
-        ((uint32_t)(uintptr_t)uhci_kbd_td) & ~0xFu;
+    uhci_poll_periodic(uhci_mouse_qh, uhci_mouse_td, uhci_mouse_buf,
+                       uhci_mouse_addr, uhci_mouse_ep, uhci_mouse_max_packet,
+                       uhci_mouse_low_speed, &uhci_mouse_toggle,
+                       usb_hid_mouse_report);
 }
