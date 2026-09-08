@@ -249,9 +249,21 @@ void execute_command(void) {
 
 void show_prompt(void) {
     printf("\n");
+
+    // "[lufiraos@kernel]" всегда рисуем cyan, но остальную часть строки —
+    // ТЕКУЩИМ цветом текста, а не жёстко белым: раньше это затирало цвет,
+    // который пользователь настроил командой fg (bg при этом не трогалась,
+    // поэтому казалось, что fg "не работает", а bg работает).
+    ConsoleColor saved_fg_index = current_colors.fg_index;
+    uint32_t saved_fg_color = current_color;
+
     set_foreground_color(COLOR_LIGHT_CYAN);
     printf("[lufiraos@kernel]");
-    set_foreground_color(COLOR_WHITE);
+
+    current_colors.fg_index = saved_fg_index;
+    current_colors.fg_color = saved_fg_color;
+    current_color = saved_fg_color;
+
     printf(" %s $ ", cwd_path);
     command_start_x = current_x;
     command_start_y = current_y;
