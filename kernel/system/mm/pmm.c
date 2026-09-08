@@ -216,7 +216,32 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
         (uint32_t)free_pages);
 }
 
+// pmm_alloc_page()/pmm_free_page() читают-и-модифицируют общий битмап
+// (next_free_page, bitmap_test/set/clear, used_pages) без какой-либо
+// защиты от повторного входа. В этом кооперативном ядре реальной
+// многопоточности нет, но ЕСТЬ вложенные прерывания — если что-то внутри
+// уже идущего pmm_alloc_page() прерывается таймерным IRQ, а обработчик
+// ЭТОГО прерывания (например, дубль клавиши от USB HID, см. input.c)
+// сам вызывает pmm_alloc_page() ПОВТОРНО ДО того, как первый вызов успел
+// выставить бит занятости — оба вызова видят одну и ту же страницу
+// "свободной" и возвращают ОДИН И ТОТ ЖЕ физический адрес двум разным
+// владельцам (наблюдалось на практике: код процесса и таблица страниц
+// ядра оказывались на одной странице). Простой cli/sti вокруг критической
+// секции полностью это исключает.
+static inline uint64_t pmm_lock(void) {
+    uint64_t flags;
+    asm volatile("pushfq; popq %0" : "=r"(flags) :: "memory");
+    asm volatile("cli");
+    return flags;
+}
+
+static inline void pmm_unlock(uint64_t flags) {
+    asm volatile("push %0; popfq" : : "r"(flags) : "memory", "cc");
+}
+
 uint64_t pmm_alloc_page(void) {
+    uint64_t flags = pmm_lock();
+
     for (uint64_t i = next_free_page; i < total_pages; i++) {
 
         if (!bitmap_test(i)) {
@@ -226,18 +251,23 @@ uint64_t pmm_alloc_page(void) {
 
             next_free_page = i + 1;
 
+            pmm_unlock(flags);
             return i * PAGE_SIZE;
         }
     }
 
+    pmm_unlock(flags);
     return 0;
 }
 
 void pmm_free_page(uint64_t phys) {
     uint64_t page = phys / PAGE_SIZE;
     if (page >= total_pages) return;
+
+    uint64_t flags = pmm_lock();
     bitmap_clear(page);
     used_pages--;
+    pmm_unlock(flags);
 }
 
 uint64_t pmm_get_total_pages(void) {

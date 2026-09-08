@@ -2,15 +2,40 @@
 #include "drivers/keyboard/keyboard.h"
 #include "drivers/console/console.h"
 #include "shell/shell.h"
+#include "system/timer/pit.h"
 
 static int mouse_x = 0;
 static int mouse_y = 0;
 static uint8_t mouse_buttons = 0;
 
+// QEMU обычно доставляет один и тот же физический keystroke сразу на ОБА
+// зарегистрированных устройства ввода — PS/2 (немедленно, по IRQ1) и USB
+// HID-клавиатуру (опрашивается раз в тик из timer_irq_handler(), то есть
+// с задержкой до ~10мс). Без фильтрации один Enter превращался в ДВА
+// вызова shell_handle_enter() подряд — а поскольку второй мог стартовать
+// прямо ИЗНУТРИ таймерного прерывания, вложенного в код, который сам ещё
+// не успел безопасно завершиться (pmm_alloc_page() и другие функции этого
+// ядра не рассчитаны на реентерабельный вызов), второй "run" реально
+// портил память ядра (два разных вызова pmm_alloc_page() успевали
+// получить одну и ту же "свободную" физическую страницу). Игнорируем
+// повтор ТОГО ЖЕ key, если он пришёл слишком быстро — реальный
+// человеческий повторный набор той же клавиши всегда медленнее.
+#define KEY_DEBOUNCE_TICKS 3
+
+static int last_key = 0;
+static uint64_t last_key_tick = 0;
+
 // Перенесено из keyboard.c без изменений — единственное отличие в том, что
 // теперь этот путь общий для PS/2 и (позже) USB HID клавиатуры.
 void input_keyboard_event(int key) {
     if (key == 0) return;
+
+    uint64_t now = pit_get_ticks();
+    if (key == last_key && (now - last_key_tick) < KEY_DEBOUNCE_TICKS) {
+        return;
+    }
+    last_key = key;
+    last_key_tick = now;
 
     switch (key) {
         case KEY_LEFT_ARROW:
