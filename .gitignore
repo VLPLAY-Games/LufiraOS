@@ -1,3 +1,4 @@
+.claude/
 build/
 hello.c
 test/hello_simple.o
