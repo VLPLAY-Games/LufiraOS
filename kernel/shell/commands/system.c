@@ -98,7 +98,7 @@ void command_shutdown(void) {
     printf("Shutdown command sent. System may require manual power off.\n");
 }
 void command_version(void) {
-    printf("\nLufiraOS Kernel v0.1.0\nBuilt: %s %s\nArchitecture: x86_64\n", __DATE__, __TIME__);
+    printf("\nLufiraOS Kernel v0.3.0\nBuilt: %s %s\nArchitecture: x86_64\n", __DATE__, __TIME__);
 }
 void command_status(void) {
     printf("\nSYSTEM STATUS:\n");

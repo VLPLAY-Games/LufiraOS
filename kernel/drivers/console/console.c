@@ -362,6 +362,65 @@ void put_char_graphic(int c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t
     }
 }
 
+// Крупный текст (для загрузочного лого) — масштабирует тот же шрифт 8x8 в
+// scale раз, рисует напрямую по пиксельным координатам (px, py), не по
+// символьной сетке. Фон прозрачный (не рисуется вообще) — предполагается
+// вызов на уже очищенном экране.
+void draw_text_scaled(const char *text, uint32_t px, uint32_t py, uint32_t scale, uint32_t fg_color) {
+    uint32_t cursor_x = px;
+    for (const char *s = text; *s; s++) {
+        int c = (unsigned char)*s;
+        if (c < 32 || c > 127) c = '?';
+        unsigned char *glyph = full_font_data[c - 32];
+
+        for (uint32_t cy = 0; cy < CHAR_HEIGHT; cy++) {
+            for (uint32_t cx = 0; cx < CHAR_WIDTH; cx++) {
+                if ((glyph[cy] >> (7 - cx)) & 1) {
+                    for (uint32_t sy = 0; sy < scale; sy++) {
+                        for (uint32_t sx = 0; sx < scale; sx++) {
+                            put_pixel(cursor_x + cx * scale + sx, py + cy * scale + sy, fg_color);
+                        }
+                    }
+                }
+            }
+        }
+        cursor_x += (CHAR_WIDTH + 1) * scale;
+    }
+}
+
+uint32_t text_scaled_width(const char *text, uint32_t scale) {
+    uint32_t len = 0;
+    while (text[len]) len++;
+    return len * (CHAR_WIDTH + 1) * scale;
+}
+
+// Как draw_text_scaled(), но с наклоном (shear) — верхние строки глифа
+// сдвинуты правее нижних, имитируя курсив/наклон. Честный поворот растрового
+// 8x8-шрифта на произвольный угол дал бы нечитаемую "лесенку", поэтому
+// используется простой сдвиг по X в зависимости от строки глифа.
+void draw_text_tilted(const char *text, uint32_t px, uint32_t py, uint32_t scale, uint32_t fg_color) {
+    uint32_t cursor_x = px;
+    for (const char *s = text; *s; s++) {
+        int c = (unsigned char)*s;
+        if (c < 32 || c > 127) c = '?';
+        unsigned char *glyph = full_font_data[c - 32];
+
+        for (uint32_t cy = 0; cy < CHAR_HEIGHT; cy++) {
+            uint32_t shear_px = ((CHAR_HEIGHT - 1 - cy) * scale) / 2;
+            for (uint32_t cx = 0; cx < CHAR_WIDTH; cx++) {
+                if ((glyph[cy] >> (7 - cx)) & 1) {
+                    for (uint32_t sy = 0; sy < scale; sy++) {
+                        for (uint32_t sx = 0; sx < scale; sx++) {
+                            put_pixel(cursor_x + shear_px + cx * scale + sx, py + cy * scale + sy, fg_color);
+                        }
+                    }
+                }
+            }
+        }
+        cursor_x += (CHAR_WIDTH + 1) * scale;
+    }
+}
+
 void put_char(char c) {
     // Если пользователь смотрит старый вывод,
     // любой обычный вывод возвращает нас вниз.

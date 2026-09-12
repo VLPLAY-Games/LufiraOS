@@ -2,15 +2,23 @@
 
 #include "drivers/console/console.h"
 #include "lib/colors.h"
+#include "system/devmode/devmode.h"
 
 // ========== МАКРОСЫ СТАТУСОВ ==========
+//
+// "Всё хорошо" статусы (OK/PENDING/STATUS_LINE) видны только в режиме
+// разработчика (см. devmode.h) — в обычном режиме загрузка должна быть
+// тихой. FAIL/WARN остаются видимыми всегда: это реальные проблемы,
+// а не рутинный прогресс.
 
 #define LOG_OK(fmt, ...) do { \
+    if (devmode_is_enabled()) { \
     set_foreground_color(LOG_COLOR_OK); \
     printf("[  OK  ] "); \
     set_foreground_color(LOG_COLOR_INFO); \
     printf(fmt, ##__VA_ARGS__); \
     printf("\n"); \
+    } \
 } while(0)
 
 #define LOG_FAIL(fmt, ...) do { \
@@ -39,19 +47,23 @@
 } while(0)
 
 #define LOG_PENDING(fmt, ...) do { \
+    if (devmode_is_enabled()) { \
     set_foreground_color(LOG_COLOR_PENDING); \
     printf("[  ..  ] "); \
     set_foreground_color(LOG_COLOR_INFO); \
     printf(fmt, ##__VA_ARGS__); \
+    } \
 } while(0)
 
 #define LOG_DONE_OK(fmt, ...) do { \
+    if (devmode_is_enabled()) { \
     printf("\r"); \
     set_foreground_color(LOG_COLOR_OK); \
     printf("[  OK  ] "); \
     set_foreground_color(LOG_COLOR_INFO); \
     printf(fmt, ##__VA_ARGS__); \
     printf("                              \n"); \
+    } \
 } while(0)
 
 #define LOG_DONE_FAIL(fmt, ...) do { \
@@ -89,6 +101,7 @@
 
 // Вывод значения статуса (зелёный/красный)
 #define LOG_STATUS_LINE(label, status, fmt, ...) do { \
+    if (devmode_is_enabled()) { \
     set_foreground_color(LOG_COLOR_LABEL); \
     printf("  %s: ", label); \
     if (status) { \
@@ -98,4 +111,5 @@
     } \
     printf(fmt, ##__VA_ARGS__); \
     printf("\n"); \
+    } \
 } while(0)

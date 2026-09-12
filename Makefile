@@ -223,7 +223,10 @@ run: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs
 		-device usb-mouse \
 		-serial stdio
 
-debug: $(BUILD_DIR)/disk.img
+debug: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs
+	echo "1" > $(BUILD_DIR)/devmode.flag
+	$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(BUILD_DIR)/devmode.flag /system/devmode.flag
+	rm -f $(BUILD_DIR)/devmode.flag
 	qemu-system-x86_64 \
 		-bios /usr/share/ovmf/OVMF.fd \
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \

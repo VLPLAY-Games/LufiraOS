@@ -59,8 +59,37 @@ static void pic_remap(void) {
 
 lufirafs_t lufirafs;
 
+// Большой лого-экран на время инициализации (только когда режим
+// разработчика выключен — иначе экран занят обычным подробным логом).
+static void show_boot_logo(void) {
+    clear_entire_screen();
+
+    uint32_t scale = 6;
+    const char *title = "LufiraOS";
+    uint32_t text_w = text_scaled_width(title, scale);
+    uint32_t text_h = (8 + 1) * scale;
+    uint32_t x = (screen_width_pixels > text_w) ? (screen_width_pixels - text_w) / 2 : 0;
+    uint32_t y = (screen_height_pixels > text_h) ? (screen_height_pixels - text_h) / 2 - 20 : 0;
+    draw_text_scaled(title, x, y, scale, RGB_LIGHT_CYAN);
+
+    const char *caption = "Booting...";
+    uint32_t cap_w = text_scaled_width(caption, 1);
+    uint32_t cap_x = (screen_width_pixels > cap_w) ? (screen_width_pixels - cap_w) / 2 : 0;
+    draw_text_scaled(caption, cap_x, y + text_h + 20, 1, RGB_LIGHT_GRAY);
+}
+
+// Маленькая наклонная "визитка" сверху терминала — как большое лого при
+// загрузке, только компактнее (см. draw_text_tilted() в console.c).
+static void draw_shell_watermark(void) {
+    uint32_t scale = 2;
+    uint32_t w = text_scaled_width("LufiraOS", scale) + (8 * scale) / 2;
+    uint32_t x = (screen_width_pixels > w) ? (screen_width_pixels - w) / 2 : 0;
+    draw_text_tilted("LufiraOS", x, 4, scale, RGB_DARK_GRAY);
+}
+
 static void shell_task(void) {
-    printf("\n");
+    draw_shell_watermark();
+    printf("\n\n\n");
     set_foreground_color(LOG_COLOR_HEADER);
     printf("================================================\n");
     printf(" Type 'help' for available commands\n");
@@ -81,9 +110,20 @@ static void shell_task(void) {
 __attribute__((section(".text.prologue")))
 void _start(BootInfo* bi) {
     asm volatile ("cli");
-    
+
     initialize_console(bi);
-    
+
+    // Читаем флаг режима разработчика по сырому образу диска ДО lufirafs_init()
+    // (см. devmode_probe_early()) — иначе решить, показывать ли лого вместо
+    // текстового лога, можно было бы только после монтирования ФС.
+    if (bi->FATImageBase && bi->FATImageSize > LUFIRAFS_ESP_SIZE) {
+        devmode_probe_early((void*)(bi->FATImageBase + LUFIRAFS_ESP_SIZE),
+                             (uint32_t)(bi->FATImageSize - LUFIRAFS_ESP_SIZE));
+    }
+    if (!devmode_is_enabled()) {
+        show_boot_logo();
+    }
+
     LOG_PENDING("Initializing GDT...");
     gdt_init();
     LOG_DONE_OK("GDT initialized");
@@ -171,7 +211,7 @@ void _start(BootInfo* bi) {
     pci_init();
 
     if (ac97_init()) {
-        printf("[ OK ] AC'97 ready\n");
+        DLOG("[ OK ] AC'97 ready\n");
     } else {
         printf("[WARN] AC'97 unavailable\n");
     }
@@ -186,30 +226,34 @@ void _start(BootInfo* bi) {
     // сброса UHCI-контроллера), поэтому вызывается только после sti/irq_enable.
     uhci_init();
 
-    printf("\n");
-    set_foreground_color(LOG_COLOR_HEADER);
-    printf("================================================\n");
-    printf("     LufiraOS Kernel v0.1.0                     \n");
-    printf("================================================\n");
-    set_foreground_color(LOG_COLOR_INFO);
-    
-    printf("\n");
-    set_foreground_color(LOG_COLOR_HEADER);
-    printf("SYSTEM STATUS:\n");
-    
-    LOG_STATUS_LINE("Console", 1, "READY");
-    LOG_STATUS_LINE("Keyboard", keyboard_is_initialized(), keyboard_is_initialized() ? "READY" : "NOT FOUND");
-    LOG_STATUS_LINE("Mouse", mouse_is_initialized(), mouse_is_initialized() ? "READY" : "NOT FOUND");
-    LOG_STATUS_LINE("Syscalls", 1, "ACTIVE (18 syscalls)");
-    LOG_STATUS_LINE("VFS", 1, "READY");
-    
-    set_foreground_color(STATUS_READY);
-    printf("  Memory manager: INITIALIZED\n");
-    printf("  Scheduler: COOPERATIVE\n");
-    printf("  Process manager: INITIALIZED\n");
-    printf("  LufiraFS: %s\n", lufirafs_mounted ? "MOUNTED" : "NOT MOUNTED");
-    printf("  Developer mode: %s\n", devmode_is_enabled() ? "ON" : "OFF");
-    set_foreground_color(LOG_COLOR_INFO);
+    if (devmode_is_enabled()) {
+        printf("\n");
+        set_foreground_color(LOG_COLOR_HEADER);
+        printf("================================================\n");
+        printf("     LufiraOS Kernel v0.3.0                     \n");
+        printf("================================================\n");
+        set_foreground_color(LOG_COLOR_INFO);
+
+        printf("\n");
+        set_foreground_color(LOG_COLOR_HEADER);
+        printf("SYSTEM STATUS:\n");
+
+        LOG_STATUS_LINE("Console", 1, "READY");
+        LOG_STATUS_LINE("Keyboard", keyboard_is_initialized(), keyboard_is_initialized() ? "READY" : "NOT FOUND");
+        LOG_STATUS_LINE("Mouse", mouse_is_initialized(), mouse_is_initialized() ? "READY" : "NOT FOUND");
+        LOG_STATUS_LINE("Syscalls", 1, "ACTIVE (18 syscalls)");
+        LOG_STATUS_LINE("VFS", 1, "READY");
+
+        set_foreground_color(STATUS_READY);
+        printf("  Memory manager: INITIALIZED\n");
+        printf("  Scheduler: COOPERATIVE\n");
+        printf("  Process manager: INITIALIZED\n");
+        printf("  LufiraFS: %s\n", lufirafs_mounted ? "MOUNTED" : "NOT MOUNTED");
+        printf("  Developer mode: %s\n", devmode_is_enabled() ? "ON" : "OFF");
+        set_foreground_color(LOG_COLOR_INFO);
+    } else {
+        clear_entire_screen();
+    }
 
     process_set_shell_entry(shell_task);
     process_t *shell_proc = process_create("shell", shell_task);
