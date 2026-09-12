@@ -150,8 +150,8 @@ static uint64_t create_address_space(uint64_t kernel_pml4_phys) {
     uint64_t new_pml4_phys = pmm_alloc_page();
     if (!new_pml4_phys) return 0;
     
-    uint64_t *new_pml4 = (uint64_t*)new_pml4_phys;
-    uint64_t *kernel_pml4 = (uint64_t*)kernel_pml4_phys;
+    uint64_t *new_pml4 = (uint64_t*)phys_to_virt(new_pml4_phys);
+    uint64_t *kernel_pml4 = (uint64_t*)phys_to_virt(kernel_pml4_phys);
 
     // pmm_alloc_page() НЕ гарантирует нулевую страницу — в ней остаётся
     // мусор от предыдущего владельца этой физической страницы (или от
@@ -216,8 +216,8 @@ static uint64_t clone_address_space_deep(uint64_t src_pml4_phys) {
     asm volatile("mov %%cr3, %0" : "=r"(current_kernel_pml4));
     sync_kernel_mappings(new_pml4_phys, current_kernel_pml4);
 
-    uint64_t *src_pml4 = (uint64_t*)src_pml4_phys;
-    uint64_t *dst_pml4 = (uint64_t*)new_pml4_phys;
+    uint64_t *src_pml4 = (uint64_t*)phys_to_virt(src_pml4_phys);
+    uint64_t *dst_pml4 = (uint64_t*)phys_to_virt(new_pml4_phys);
 
     for (int pml4_idx = 0; pml4_idx < 256; pml4_idx++) {
         if (!(src_pml4[pml4_idx] & PAGE_PRESENT))
@@ -225,10 +225,10 @@ static uint64_t clone_address_space_deep(uint64_t src_pml4_phys) {
 
         uint64_t new_pdpt_phys = pmm_alloc_page();
         if (!new_pdpt_phys) return 0;
-        uint64_t *new_pdpt = (uint64_t*)new_pdpt_phys;
+        uint64_t *new_pdpt = (uint64_t*)phys_to_virt(new_pdpt_phys);
         for (int i = 0; i < 512; i++) new_pdpt[i] = 0;
 
-        uint64_t *src_pdpt = (uint64_t*)(src_pml4[pml4_idx] & ~0xFFFULL);
+        uint64_t *src_pdpt = (uint64_t*)phys_to_virt(src_pml4[pml4_idx] & 0x000FFFFFFFFFF000ULL);
 
         for (int pdpt_idx = 0; pdpt_idx < 512; pdpt_idx++) {
             if (!(src_pdpt[pdpt_idx] & PAGE_PRESENT))
@@ -236,10 +236,10 @@ static uint64_t clone_address_space_deep(uint64_t src_pml4_phys) {
 
             uint64_t new_pd_phys = pmm_alloc_page();
             if (!new_pd_phys) return 0;
-            uint64_t *new_pd = (uint64_t*)new_pd_phys;
+            uint64_t *new_pd = (uint64_t*)phys_to_virt(new_pd_phys);
             for (int i = 0; i < 512; i++) new_pd[i] = 0;
 
-            uint64_t *src_pd = (uint64_t*)(src_pdpt[pdpt_idx] & ~0xFFFULL);
+            uint64_t *src_pd = (uint64_t*)phys_to_virt(src_pdpt[pdpt_idx] & 0x000FFFFFFFFFF000ULL);
 
             for (int pd_idx = 0; pd_idx < 512; pd_idx++) {
                 if (!(src_pd[pd_idx] & PAGE_PRESENT))
@@ -254,37 +254,42 @@ static uint64_t clone_address_space_deep(uint64_t src_pml4_phys) {
 
                 uint64_t new_pt_phys = pmm_alloc_page();
                 if (!new_pt_phys) return 0;
-                uint64_t *new_pt = (uint64_t*)new_pt_phys;
+                uint64_t *new_pt = (uint64_t*)phys_to_virt(new_pt_phys);
                 for (int i = 0; i < 512; i++) new_pt[i] = 0;
 
-                uint64_t *src_pt = (uint64_t*)(src_pd[pd_idx] & ~0xFFFULL);
+                uint64_t *src_pt = (uint64_t*)phys_to_virt(src_pd[pd_idx] & 0x000FFFFFFFFFF000ULL);
 
                 for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
                     if (!(src_pt[pt_idx] & PAGE_PRESENT))
                         continue;
 
-                    uint64_t src_phys = src_pt[pt_idx] & ~0xFFFULL;
+                    uint64_t src_phys = src_pt[pt_idx] & 0x000FFFFFFFFFF000ULL;
                     uint64_t flags = src_pt[pt_idx] & (0xFFFULL | PAGE_NX);
 
                     uint64_t new_phys = pmm_alloc_page();
                     if (!new_phys) return 0;
 
-                    // Все физические адреса в этом ядре доступны через
-                    // identity mapping, поэтому можно копировать напрямую.
-                    memcpy((void*)new_phys, (void*)src_phys, PAGE_SIZE);
+                    // Через kernel physmap (phys_to_virt) — НЕ через
+                    // "низкую" identity-карту (virt==phys): src_phys здесь
+                    // может оказаться физической страницей, которая у
+                    // САМОГО форкающегося процесса (fork() выполняется под
+                    // ЕГО собственным CR3) занята под что-то другое в его
+                    // же ELF-хайджекнутом диапазоне 0x400000+ — см.
+                    // подробное объяснение у phys_to_virt() в paging.h.
+                    memcpy(phys_to_virt(new_phys), phys_to_virt(src_phys), PAGE_SIZE);
 
-                    new_pt[pt_idx] = (new_phys & ~0xFFFULL) | flags;
+                    new_pt[pt_idx] = (new_phys & 0x000FFFFFFFFFF000ULL) | flags;
                 }
 
-                new_pd[pd_idx] = (new_pt_phys & ~0xFFFULL) |
+                new_pd[pd_idx] = (new_pt_phys & 0x000FFFFFFFFFF000ULL) |
                                  (src_pd[pd_idx] & 0xFFFULL);
             }
 
-            new_pdpt[pdpt_idx] = (new_pd_phys & ~0xFFFULL) |
+            new_pdpt[pdpt_idx] = (new_pd_phys & 0x000FFFFFFFFFF000ULL) |
                                  (src_pdpt[pdpt_idx] & 0xFFFULL);
         }
 
-        dst_pml4[pml4_idx] = (new_pdpt_phys & ~0xFFFULL) |
+        dst_pml4[pml4_idx] = (new_pdpt_phys & 0x000FFFFFFFFFF000ULL) |
                              (src_pml4[pml4_idx] & 0xFFFULL);
     }
 
@@ -443,15 +448,15 @@ process_t* process_create(const char *name, void (*entry)(void)) {
 
     rsp -= 8;
     uint64_t phys = get_physical_address_in_pml4(new_pml4, rsp);
-    *(uint64_t*)phys = (uint64_t)process_exit;
+    *(uint64_t*)phys_to_virt(phys) = (uint64_t)process_exit;
 
     rsp -= 8;
     phys = get_physical_address_in_pml4(new_pml4, rsp);
-    *(uint64_t*)phys = (uint64_t)entry;
+    *(uint64_t*)phys_to_virt(phys) = (uint64_t)entry;
 
     rsp -= 8;
     phys = get_physical_address_in_pml4(new_pml4, rsp);
-    *(uint64_t*)phys = 0x202;
+    *(uint64_t*)phys_to_virt(phys) = 0x202;
 
     proc->context.rsp = rsp;
     proc->context.rip = (uint64_t)entry;

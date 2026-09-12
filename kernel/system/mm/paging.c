@@ -31,24 +31,56 @@ uint64_t get_current_pml4(void) {
     return cr3;
 }
 
-// ВАЖНО: get_or_create_table работает с ФИЗИЧЕСКИМИ адресами таблиц
-// Так как у нас identity mapping, это безопасно
+// parent — уже ВИРТУАЛЬНЫЙ (через phys_to_virt()) указатель на родительскую
+// таблицу; возвращает такой же виртуальный указатель на дочернюю. Сами
+// ЗАПИСИ (значения parent[index]) остаются физическими адресами, как и
+// положено записям таблиц страниц — конвертация в указатель нужна только
+// для того, чтобы что-то прочитать/записать ПО этому адресу.
 static pt_entry_t* get_or_create_table(pt_entry_t *parent, uint64_t index, int create) {
     if (!(parent[index] & PAGE_PRESENT)) {
         if (!create) return NULL;
-        
+
         uint64_t phys = pmm_alloc_page();
         if (!phys) return NULL;
-        
+
         parent[index] = paddr_to_entry(phys, PAGE_PRESENT | PAGE_WRITE);
-        
-        // Обнуляем таблицу (через физический адрес, так как есть identity mapping)
-        pt_entry_t *table = (pt_entry_t*)phys;
+
+        pt_entry_t *table = (pt_entry_t*)phys_to_virt(phys);
         for (int i = 0; i < 512; i++) table[i] = 0;
-        
+
         return table;
     } else {
-        return (pt_entry_t*)(parent[index] & 0x000FFFFFFFFFF000ULL);
+        return (pt_entry_t*)phys_to_virt(parent[index] & 0x000FFFFFFFFFF000ULL);
+    }
+}
+
+// Строит по одному PD на каждый занятый гигабайт, с huge-страницами,
+// identity-отображающими физическую память 0..mem_gb*1GB, и подключает их к
+// заданному PDPT. Вызывается дважды из paging_init(): один раз для НИЗКОЙ
+// (virt==phys) карты в PML4[0] (kernel_pdpt) — которую позже может
+// "захватить" загрузка ELF (см. clone_low_identity_map() ниже) — и один раз
+// для отдельного, НИКОГДА не подверженного такому захвату kernel-space
+// physmap'а (PML4[PHYSMAP_PML4_INDEX], см. phys_to_virt() в paging.h).
+// Выполняется на самом раннем этапе загрузки, когда CR3 ещё не переключён
+// на kernel_pml4 и никакой ELF в принципе не мог ничего захватить — поэтому
+// raw pmm_alloc_page()-указатели здесь безопасны без phys_to_virt().
+static void build_identity_pdpt(pt_entry_t *pdpt, uint64_t mem_gb) {
+    for (uint64_t gb = 0; gb < mem_gb; gb++) {
+        uint64_t pd_phys = pmm_alloc_page();
+        if (!pd_phys) {
+            LOG_DONE_FAIL("Paging: cannot allocate PD");
+            while (1) __asm__("hlt");
+        }
+
+        pt_entry_t *pd = (pt_entry_t*)pd_phys;
+        for (int i = 0; i < 512; i++) pd[i] = 0;
+
+        pdpt[gb] = paddr_to_entry(pd_phys, PAGE_PRESENT | PAGE_WRITE);
+
+        for (int i = 0; i < 512; i++) {
+            uint64_t phys = (gb << 30) + (i << 21);
+            pd[i] = paddr_to_entry(phys, PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE);
+        }
     }
 }
 
@@ -57,15 +89,21 @@ void paging_init(BootInfo* bi) {
 
     static pt_entry_t pml4_table[512] __attribute__((aligned(4096)));
     static pt_entry_t pdpt_table[512] __attribute__((aligned(4096)));
+    static pt_entry_t physmap_pdpt[512] __attribute__((aligned(4096)));
 
     kernel_pml4 = pml4_table;
     kernel_pdpt = pdpt_table;
 
     for (int i = 0; i < 512; i++) kernel_pml4[i] = 0;
     for (int i = 0; i < 512; i++) kernel_pdpt[i] = 0;
+    for (int i = 0; i < 512; i++) physmap_pdpt[i] = 0;
 
     // Identity mapping для нижней половины (первые 512 GB)
     kernel_pml4[0] = paddr_to_entry((uint64_t)kernel_pdpt, PAGE_PRESENT | PAGE_WRITE);
+
+    // Отдельная, никогда не расщепляемая ELF-загрузкой карта всей RAM в
+    // kernel space — см. phys_to_virt() в paging.h.
+    kernel_pml4[PHYSMAP_PML4_INDEX] = paddr_to_entry((uint64_t)physmap_pdpt, PAGE_PRESENT | PAGE_WRITE);
 
     uint8_t *map = (uint8_t*)bi->MemoryMap;
     uint64_t desc_size = bi->MemoryMapDescriptorSize;
@@ -81,33 +119,18 @@ void paging_init(BootInfo* bi) {
     uint64_t mem_gb = (max_phys + (1ULL << 30) - 1) >> 30;
     if (mem_gb > 512) mem_gb = 512;
 
-    for (uint64_t gb = 0; gb < mem_gb; gb++) {
-        uint64_t pd_phys = pmm_alloc_page();
-        if (!pd_phys) {
-            LOG_DONE_FAIL("Paging: cannot allocate PD");
-            while(1) __asm__("hlt");
-        }
-
-        pt_entry_t *pd = (pt_entry_t*)pd_phys;
-        for (int i = 0; i < 512; i++) pd[i] = 0;
-
-        kernel_pdpt[gb] = paddr_to_entry(pd_phys, PAGE_PRESENT | PAGE_WRITE);
-
-        for (int i = 0; i < 512; i++) {
-            uint64_t phys = (gb << 30) + (i << 21);
-            pd[i] = paddr_to_entry(phys, PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE);
-        }
-    }
+    build_identity_pdpt(kernel_pdpt, mem_gb);
+    build_identity_pdpt(physmap_pdpt, mem_gb);
 
     asm volatile ("mov %0, %%cr3" : : "r" ((uint64_t)kernel_pml4) : "memory");
 
-    LOG_DONE_OK("Paging: identity mapped up to 0x%lx", max_phys);
+    LOG_DONE_OK("Paging: identity mapped up to 0x%lx (+ kernel physmap)", max_phys);
 }
 
 int map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
-    pt_entry_t *pml4 = (pt_entry_t*)get_current_pml4();
+    pt_entry_t *pml4 = (pt_entry_t*)phys_to_virt(get_current_pml4());
     if (!pml4) return -1;
-    
+
     pt_entry_t *pdpt_table = get_or_create_table(pml4, PML4_INDEX(virt), 1);
     if (!pdpt_table) return -1;
 
@@ -115,7 +138,7 @@ int map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
     if (!pd_table) return -1;
 
     uint64_t pd_idx = PD_INDEX(virt);
-    
+
     // If we hit a huge page, split it into 4KB pages
     if ((pd_table[pd_idx] & PAGE_PRESENT) && (pd_table[pd_idx] & PAGE_HUGE)) {
         uint64_t huge_entry = pd_table[pd_idx];
@@ -125,7 +148,7 @@ int map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
         uint64_t pt_phys = pmm_alloc_page();
         if (!pt_phys) return -1;
 
-        pt_entry_t *pt = (pt_entry_t*)pt_phys;
+        pt_entry_t *pt = (pt_entry_t*)phys_to_virt(pt_phys);
         for (int i = 0; i < 512; i++) {
             pt[i] = paddr_to_entry(phys_base + i * PAGE_SIZE, pde_flags);
         }
@@ -145,9 +168,9 @@ int map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
 
 // Функция для маппинга с указанным PML4 (для процессов)
 int map_page_in_pml4(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
-    pt_entry_t *pml4 = (pt_entry_t*)pml4_phys;
+    pt_entry_t *pml4 = (pt_entry_t*)phys_to_virt(pml4_phys);
     if (!pml4) return -1;
-    
+
     pt_entry_t *pdpt_table = get_or_create_table(pml4, PML4_INDEX(virt), 1);
     if (!pdpt_table) return -1;
 
@@ -164,7 +187,7 @@ int map_page_in_pml4(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t 
         uint64_t pt_phys = pmm_alloc_page();
         if (!pt_phys) return -1;
 
-        pt_entry_t *pt = (pt_entry_t*)pt_phys;
+        pt_entry_t *pt = (pt_entry_t*)phys_to_virt(pt_phys);
         for (int i = 0; i < 512; i++) {
             pt[i] = paddr_to_entry(phys_base + i * PAGE_SIZE, pde_flags);
         }
@@ -181,26 +204,26 @@ int map_page_in_pml4(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t 
 }
 
 void unmap_page(uint64_t virt) {
-    pt_entry_t *pml4 = (pt_entry_t*)get_current_pml4();
+    pt_entry_t *pml4 = (pt_entry_t*)phys_to_virt(get_current_pml4());
     if (!pml4) return;
-    
+
     pt_entry_t *pml4e = &pml4[PML4_INDEX(virt)];
     if (!(*pml4e & PAGE_PRESENT)) return;
-    
-    pt_entry_t *pdpt_table = (pt_entry_t*)(*pml4e & 0x000FFFFFFFFFF000ULL);
+
+    pt_entry_t *pdpt_table = (pt_entry_t*)phys_to_virt(*pml4e & 0x000FFFFFFFFFF000ULL);
     pt_entry_t *pdpte = &pdpt_table[PDPT_INDEX(virt)];
     if (!(*pdpte & PAGE_PRESENT)) return;
-    
-    pt_entry_t *pd_table = (pt_entry_t*)(*pdpte & 0x000FFFFFFFFFF000ULL);
+
+    pt_entry_t *pd_table = (pt_entry_t*)phys_to_virt(*pdpte & 0x000FFFFFFFFFF000ULL);
     pt_entry_t *pde = &pd_table[PD_INDEX(virt)];
     if (!(*pde & PAGE_PRESENT)) return;
-    
+
     // A huge page cannot be partially unmapped; bail out safely
     if (*pde & PAGE_HUGE) {
         return;
     }
-    
-    pt_entry_t *pt_table = (pt_entry_t*)(*pde & 0x000FFFFFFFFFF000ULL);
+
+    pt_entry_t *pt_table = (pt_entry_t*)phys_to_virt(*pde & 0x000FFFFFFFFFF000ULL);
     pt_entry_t *pte = &pt_table[PT_INDEX(virt)];
     
     uint64_t phys = *pte & 0x000FFFFFFFFFF000ULL;
@@ -216,24 +239,24 @@ void unmap_page(uint64_t virt) {
 // по его физическому PML4, а не только с текущим (активным по CR3) —
 // через identity mapping, без переключения CR3.
 uint64_t get_physical_address_in_pml4(uint64_t pml4_phys, uint64_t virt) {
-    pt_entry_t *pml4 = (pt_entry_t*)pml4_phys;
+    pt_entry_t *pml4 = (pt_entry_t*)phys_to_virt(pml4_phys);
     if (!pml4) return 0;
 
     pt_entry_t *pml4e = &pml4[PML4_INDEX(virt)];
     if (!(*pml4e & PAGE_PRESENT)) return 0;
-    
-    pt_entry_t *pdpt_table = (pt_entry_t*)(*pml4e & 0x000FFFFFFFFFF000ULL);
+
+    pt_entry_t *pdpt_table = (pt_entry_t*)phys_to_virt(*pml4e & 0x000FFFFFFFFFF000ULL);
     pt_entry_t *pdpte = &pdpt_table[PDPT_INDEX(virt)];
     if (!(*pdpte & PAGE_PRESENT)) return 0;
-    
-    pt_entry_t *pd_table = (pt_entry_t*)(*pdpte & 0x000FFFFFFFFFF000ULL);
+
+    pt_entry_t *pd_table = (pt_entry_t*)phys_to_virt(*pdpte & 0x000FFFFFFFFFF000ULL);
     pt_entry_t *pde = &pd_table[PD_INDEX(virt)];
     if (!(*pde & PAGE_PRESENT)) return 0;
-    
+
     if (*pde & PAGE_HUGE) {
         return (*pde & 0x000FFFFFFFFFF000ULL) + (virt & 0x1FFFFF);
     } else {
-        pt_entry_t *pt_table = (pt_entry_t*)(*pde & 0x000FFFFFFFFFF000ULL);
+        pt_entry_t *pt_table = (pt_entry_t*)phys_to_virt(*pde & 0x000FFFFFFFFFF000ULL);
         pt_entry_t *pte = &pt_table[PT_INDEX(virt)];
         if (!(*pte & PAGE_PRESENT)) return 0;
         return (*pte & 0x000FFFFFFFFFF000ULL) + (virt & 0xFFF);
@@ -268,23 +291,23 @@ uint64_t get_physical_address(uint64_t virt) {
 // расщепление huge-страницы одним процессом создаёт НОВЫЙ PT только в ЕГО
 // СОБСТВЕННОМ PD и не задевает ни kernel_pdpt, ни таблицы других процессов.
 void clone_low_identity_map(uint64_t dest_pml4_phys) {
-    pt_entry_t *dest_pml4 = (pt_entry_t*)dest_pml4_phys;
+    pt_entry_t *dest_pml4 = (pt_entry_t*)phys_to_virt(dest_pml4_phys);
 
     uint64_t new_pdpt_phys = pmm_alloc_page();
     if (!new_pdpt_phys) return;
 
-    pt_entry_t *new_pdpt = (pt_entry_t*)new_pdpt_phys;
+    pt_entry_t *new_pdpt = (pt_entry_t*)phys_to_virt(new_pdpt_phys);
     for (int i = 0; i < 512; i++) new_pdpt[i] = 0;
 
     for (int gb = 0; gb < 512; gb++) {
         if (!(kernel_pdpt[gb] & PAGE_PRESENT)) continue;
 
-        pt_entry_t *src_pd = (pt_entry_t*)(kernel_pdpt[gb] & 0x000FFFFFFFFFF000ULL);
+        pt_entry_t *src_pd = (pt_entry_t*)phys_to_virt(kernel_pdpt[gb] & 0x000FFFFFFFFFF000ULL);
 
         uint64_t new_pd_phys = pmm_alloc_page();
         if (!new_pd_phys) continue;
 
-        pt_entry_t *new_pd = (pt_entry_t*)new_pd_phys;
+        pt_entry_t *new_pd = (pt_entry_t*)phys_to_virt(new_pd_phys);
         for (int i = 0; i < 512; i++) new_pd[i] = src_pd[i];
 
         new_pdpt[gb] = paddr_to_entry(new_pd_phys, kernel_pdpt[gb] & 0xFFF);
@@ -295,21 +318,21 @@ void clone_low_identity_map(uint64_t dest_pml4_phys) {
 
 // Синхронизация kernel space записей между PML4 (для процессов)
 void sync_kernel_mappings(uint64_t dest_pml4_phys, uint64_t src_pml4_phys) {
-    pt_entry_t *dest_pml4 = (pt_entry_t*)dest_pml4_phys;
-    pt_entry_t *src_pml4 = (pt_entry_t*)src_pml4_phys;
-    
+    pt_entry_t *dest_pml4 = (pt_entry_t*)phys_to_virt(dest_pml4_phys);
+    pt_entry_t *src_pml4 = (pt_entry_t*)phys_to_virt(src_pml4_phys);
+
     for (int i = 256; i < 512; i++) {  // Только kernel space (верхняя половина)
         if (src_pml4[i] & PAGE_PRESENT) {
             uint64_t table_phys = src_pml4[i] & 0x000FFFFFFFFFF000ULL;
             // Копируем всю таблицу PDPT для этого индекса
-            pt_entry_t *src_table = (pt_entry_t*)table_phys;
-            
+            pt_entry_t *src_table = (pt_entry_t*)phys_to_virt(table_phys);
+
             if (!(dest_pml4[i] & PAGE_PRESENT)) {
                 // Выделяем новую PDPT для destination
                 uint64_t new_table_phys = pmm_alloc_page();
                 if (new_table_phys) {
                     dest_pml4[i] = (new_table_phys & ~0xFFF) | (src_pml4[i] & 0xFFF);
-                    pt_entry_t *dest_table = (pt_entry_t*)new_table_phys;
+                    pt_entry_t *dest_table = (pt_entry_t*)phys_to_virt(new_table_phys);
                     // Копируем все записи
                     for (int j = 0; j < 512; j++) {
                         dest_table[j] = src_table[j];
@@ -317,7 +340,7 @@ void sync_kernel_mappings(uint64_t dest_pml4_phys, uint64_t src_pml4_phys) {
                 }
             } else {
                 // Обновляем существующую таблицу
-                pt_entry_t *dest_table = (pt_entry_t*)(dest_pml4[i] & 0x000FFFFFFFFFF000ULL);
+                pt_entry_t *dest_table = (pt_entry_t*)phys_to_virt(dest_pml4[i] & 0x000FFFFFFFFFF000ULL);
                 for (int j = 0; j < 512; j++) {
                     dest_table[j] = src_table[j];
                 }

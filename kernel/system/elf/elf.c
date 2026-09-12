@@ -63,7 +63,7 @@ static int map_page_in_space(uint64_t pml4_phys,
                              uint64_t phys,
                              uint64_t flags)
 {
-    uint64_t *pml4 = (uint64_t *)pml4_phys;
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
 
     uint64_t pml4_idx = (virt >> 39) & 0x1FF;
     uint64_t pdpt_idx = (virt >> 30) & 0x1FF;
@@ -87,13 +87,13 @@ static int map_page_in_space(uint64_t pml4_phys,
         if (!new_pdpt_phys)
             return -1;
 
-        uint64_t *new_pdpt = (uint64_t *)new_pdpt_phys;
+        uint64_t *new_pdpt = (uint64_t *)phys_to_virt(new_pdpt_phys);
 
         for (int i = 0; i < 512; i++)
             new_pdpt[i] = 0;
 
         pml4[pml4_idx] =
-            (new_pdpt_phys & ~0xFFFULL) |
+            (new_pdpt_phys & 0x000FFFFFFFFFF000ULL) |
             table_flags;
     } else {
         /*
@@ -103,7 +103,7 @@ static int map_page_in_space(uint64_t pml4_phys,
     }
 
     uint64_t *pdpt =
-        (uint64_t *)(pml4[pml4_idx] & ~0xFFFULL);
+        (uint64_t *)phys_to_virt(pml4[pml4_idx] & 0x000FFFFFFFFFF000ULL);
 
     /*
      * PDPT -> PD
@@ -114,20 +114,20 @@ static int map_page_in_space(uint64_t pml4_phys,
         if (!new_pd_phys)
             return -1;
 
-        uint64_t *new_pd = (uint64_t *)new_pd_phys;
+        uint64_t *new_pd = (uint64_t *)phys_to_virt(new_pd_phys);
 
         for (int i = 0; i < 512; i++)
             new_pd[i] = 0;
 
         pdpt[pdpt_idx] =
-            (new_pd_phys & ~0xFFFULL) |
+            (new_pd_phys & 0x000FFFFFFFFFF000ULL) |
             table_flags;
     } else {
         pdpt[pdpt_idx] |= PAGE_USER;
     }
 
     uint64_t *pd =
-        (uint64_t *)(pdpt[pdpt_idx] & ~0xFFFULL);
+        (uint64_t *)phys_to_virt(pdpt[pdpt_idx] & 0x000FFFFFFFFFF000ULL);
 
     /*
      * Если существовала huge page, разбиваем её.
@@ -148,7 +148,7 @@ static int map_page_in_space(uint64_t pml4_phys,
         if (!new_pt_phys)
             return -1;
 
-        uint64_t *new_pt = (uint64_t *)new_pt_phys;
+        uint64_t *new_pt = (uint64_t *)phys_to_virt(new_pt_phys);
 
         for (int j = 0; j < 512; j++) {
             new_pt[j] =
@@ -162,7 +162,7 @@ static int map_page_in_space(uint64_t pml4_phys,
          * Сам PDE тоже должен быть USER.
          */
         pd[pd_idx] =
-            (new_pt_phys & ~0xFFFULL) |
+            (new_pt_phys & 0x000FFFFFFFFFF000ULL) |
             PAGE_PRESENT |
             PAGE_WRITE |
             PAGE_USER;
@@ -177,13 +177,13 @@ static int map_page_in_space(uint64_t pml4_phys,
         if (!new_pt_phys)
             return -1;
 
-        uint64_t *new_pt = (uint64_t *)new_pt_phys;
+        uint64_t *new_pt = (uint64_t *)phys_to_virt(new_pt_phys);
 
         for (int i = 0; i < 512; i++)
             new_pt[i] = 0;
 
         pd[pd_idx] =
-            (new_pt_phys & ~0xFFFULL) |
+            (new_pt_phys & 0x000FFFFFFFFFF000ULL) |
             table_flags;
     } else {
         /*
@@ -193,7 +193,7 @@ static int map_page_in_space(uint64_t pml4_phys,
     }
 
     uint64_t *pt =
-        (uint64_t *)(pd[pd_idx] & ~0xFFFULL);
+        (uint64_t *)phys_to_virt(pd[pd_idx] & 0x000FFFFFFFFFF000ULL);
 
     /*
      * NX находится в bit 63, поэтому его нельзя терять
@@ -204,7 +204,7 @@ static int map_page_in_space(uint64_t pml4_phys,
         (flags & PAGE_NX);
 
     pt[pt_idx] =
-        (phys & ~0xFFFULL) |
+        (phys & 0x000FFFFFFFFFF000ULL) |
         pte_flags |
         PAGE_PRESENT;
 
@@ -219,7 +219,7 @@ static int set_page_flags_in_space(uint64_t pml4_phys,
                                    uint64_t virt,
                                    uint64_t flags)
 {
-    uint64_t *pml4 = (uint64_t*)pml4_phys;
+    uint64_t *pml4 = (uint64_t*)phys_to_virt(pml4_phys);
 
     uint64_t pml4_idx = (virt >> 39) & 0x1FF;
     uint64_t pdpt_idx = (virt >> 30) & 0x1FF;
@@ -230,13 +230,13 @@ static int set_page_flags_in_space(uint64_t pml4_phys,
         return -1;
 
     uint64_t *pdpt =
-        (uint64_t*)(pml4[pml4_idx] & ~0xFFFULL);
+        (uint64_t*)phys_to_virt(pml4[pml4_idx] & 0x000FFFFFFFFFF000ULL);
 
     if (!(pdpt[pdpt_idx] & PAGE_PRESENT))
         return -1;
 
     uint64_t *pd =
-        (uint64_t*)(pdpt[pdpt_idx] & ~0xFFFULL);
+        (uint64_t*)phys_to_virt(pdpt[pdpt_idx] & 0x000FFFFFFFFFF000ULL);
 
     if (!(pd[pd_idx] & PAGE_PRESENT))
         return -1;
@@ -245,16 +245,19 @@ static int set_page_flags_in_space(uint64_t pml4_phys,
         return -1;
 
     uint64_t *pt =
-        (uint64_t*)(pd[pd_idx] & ~0xFFFULL);
+        (uint64_t*)phys_to_virt(pd[pd_idx] & 0x000FFFFFFFFFF000ULL);
 
     if (!(pt[pt_idx] & PAGE_PRESENT))
         return -1;
 
-    uint64_t phys = pt[pt_idx] & ~0xFFFULL;
+    uint64_t phys = pt[pt_idx] & 0x000FFFFFFFFFF000ULL;
 
+    // NX — бит 63, теряется через (flags & 0xFFF) — берём его отдельно,
+    // как и в map_page_in_space() выше.
     pt[pt_idx] =
         phys |
         (flags & 0xFFFULL) |
+        (flags & PAGE_NX) |
         PAGE_PRESENT;
 
     return 0;
@@ -410,7 +413,7 @@ void* elf_load_to_process(const void *elf_data,
 
         for (uint64_t va = seg_start; va < seg_end; va += PAGE_SIZE) {
             uint64_t phys = get_physical_address_in_pml4(proc_pml4, va);
-            if (phys) memset((void*)phys, 0, PAGE_SIZE);
+            if (phys) memset(phys_to_virt(phys), 0, PAGE_SIZE);
         }
 
         // ================================================
@@ -430,7 +433,7 @@ void* elf_load_to_process(const void *elf_data,
                 if (chunk > remaining) chunk = remaining;
 
                 uint64_t phys = get_physical_address_in_pml4(proc_pml4, page_va);
-                if (phys) memcpy((void*)(phys + page_off), src, chunk);
+                if (phys) memcpy((uint8_t*)phys_to_virt(phys) + page_off, src, chunk);
 
                 dst_vaddr += chunk;
                 src += chunk;
@@ -658,7 +661,7 @@ int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
     uint64_t rsp = new_stack;
     rsp -= 8;
     uint64_t rsp_phys = get_physical_address_in_pml4(new_pml4, rsp);
-    *(uint64_t*)rsp_phys = (uint64_t)process_exit;
+    *(uint64_t*)phys_to_virt(rsp_phys) = (uint64_t)process_exit;
 
     process_commit_exec(proc, new_pml4, new_stack, name);
 
