@@ -61,11 +61,26 @@ typedef struct process {
     uint64_t ring0_stack_pages;
     uint64_t page_table;
     fd_table_t fd_table;    // собственная таблица дескрипторов процесса
+    // Помечает процесс, который в данный момент "исполняет роль" шелла —
+    // изначально сам шелл, и остаётся истинным даже после exec() (тот
+    // меняет образ процесса НА МЕСТЕ, PID/process_t не меняются). См.
+    // process_set_shell_entry()/is_shell-проверку в process_exit() и
+    // terminate_process_by_signal(): когда такой процесс завершается,
+    // оригинального шелла для возврата уже не существует (exec не форкает),
+    // так что вместо него пересоздаётся новый — иначе система осталась бы
+    // вообще без интерактивного приглашения.
+    int is_shell;
     struct process *next;
 } process_t;
 
 void process_init(void);
 process_t* process_create(const char *name, void (*entry)(void));
+
+// Регистрирует entry-функцию, которую нужно запустить как НОВЫЙ процесс
+// "shell", когда текущий is_shell-процесс завершится (см. is_shell в
+// process_t выше). Вызывается один раз из kernel.c сразу после самого
+// первого process_create("shell", ...).
+void process_set_shell_entry(void (*entry)(void));
 void process_exit(int exit_code);
 void schedule(void);
 void switch_to_process(process_t *next);

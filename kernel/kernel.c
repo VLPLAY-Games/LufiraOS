@@ -196,7 +196,9 @@ void _start(BootInfo* bi) {
     printf("  FAT filesystem: MOUNTED\n");
     set_foreground_color(LOG_COLOR_INFO);
 
-    process_create("shell", shell_task);
+    process_set_shell_entry(shell_task);
+    process_t *shell_proc = process_create("shell", shell_task);
+    if (shell_proc) shell_proc->is_shell = 1;
     
     while (1) {
         asm volatile("sti");

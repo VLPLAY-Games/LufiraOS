@@ -15,6 +15,25 @@
 process_t *process_list = NULL;
 process_t *current_process = NULL;
 volatile uint32_t foreground_pid = 0;
+static void (*shell_entry_fn)(void) = NULL;
+
+void process_set_shell_entry(void (*entry)(void)) {
+    shell_entry_fn = entry;
+}
+
+// Пересоздаёт процесс "shell", если завершающийся процесс был is_shell —
+// см. подробный комментарий у поля is_shell в process.h. Вызывается из
+// process_exit() и terminate_process_by_signal() ДО возможного
+// switch_to_process()/schedule() ниже, чтобы новый шелл сразу же оказался
+// валидным READY-кандидатом для этого же самого переключения.
+static void respawn_shell_if_needed(process_t *dying) {
+    if (!dying->is_shell || !shell_entry_fn)
+        return;
+
+    process_t *respawned = process_create("shell", shell_entry_fn);
+    if (respawned)
+        respawned->is_shell = 1;
+}
 uint64_t current_kernel_rsp = 0; // Глобальная переменная для asm
 static uint32_t next_pid = 1;
 static process_t *idle_process = NULL;
@@ -289,6 +308,7 @@ void process_init(void) {
     idle_process->next = NULL;
     idle_process->ring0_stack = 0;
     idle_process->ring0_stack_pages = 0;
+    idle_process->is_shell = 0;
     
     const char *name = "idle";
     for (int i = 0; i < 31 && name[i]; i++) idle_process->name[i] = name[i];
@@ -367,6 +387,7 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     proc->exit_code = 0;
     proc->wait_target_pid = 0;
     proc->state = PROCESS_READY;
+    proc->is_shell = 0;
 
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
     proc->name[31] = '\0';
@@ -554,6 +575,8 @@ void process_exit(int exit_code) {
 
     if (exiting_process->pid == foreground_pid)
         foreground_pid = 0;
+
+    respawn_shell_if_needed(exiting_process);
 
     process_t *waiter = wake_waiting_parent(exiting_process);
     if (waiter) {
@@ -818,6 +841,40 @@ void schedule(void) {
         next == idle_process ||
         tries >= MAX_TRIES)
     {
+        // Больше некого выбрать. ВАЖНО различать два случая:
+        //
+        // 1) current_process сам ещё PROCESS_RUNNING — он просто "на
+        //    всякий случай" уступил (как shell/idle в своём hlt-цикле), и
+        //    раз лучше найти некого, можно спокойно продолжить
+        //    исполняться ИМ ЖЕ, никого не переключая. Раньше здесь
+        //    БЕЗУСЛОВНО отдавали управление idle_process — а idle READY
+        //    почти всегда (его state становится READY сразу после первого
+        //    переключения на shell и остаётся таким навсегда), так что
+        //    current_process и idle пинг-понговали друг с другом на
+        //    КАЖДОМ таймерном тике — и клавиатурный IRQ (где синхронно
+        //    выполняются run/kill/exec/Ctrl+C) примерно в половине случаев
+        //    видел current_process == idle вместо реального shell —
+        //    отсюда случайный ppid у process_create() и
+        //    process_wait()-based reap, не находивший совпадения.
+        //
+        // 2) current_process САМ ТОЛЬКО ЧТО перевёл себя в состояние, из
+        //    которого продолжать НЕЛЬЗЯ (SLEEPING — process_sleep(),
+        //    BLOCKED — process_wait(), TERMINATED — process_exit()/
+        //    сигнал). Здесь "просто остаться текущим" — баг: caller
+        //    (например, process_sleep()) как ни в чём не бывало
+        //    продолжит выполняться сразу после return, будто вообще не
+        //    засыпал/не ждал/не умер. Ровно это и наблюдалось: sys_sleep()
+        //    переставал реально ждать (шквал "Hello!" без пауз), а
+        //    самоубийство процесса через Ctrl+C, когда взять на себя
+        //    исполнение больше некому, зависало в "while(1) hlt;" с уже
+        //    выключенными (внутри обработчика IRQ) прерываниями навсегда.
+        //    Здесь обязаны кому-то передать управление — idle остаётся
+        //    единственным кандидатом, когда больше вообще некого выбрать.
+        if (current_process->state == PROCESS_RUNNING) {
+            irq_enable();
+            return;
+        }
+
         if (idle_process && idle_process != current_process) {
             next = idle_process;
         } else {
@@ -949,6 +1006,12 @@ static int terminate_process_by_signal(process_t *p, int sig) {
     // PID навсегда.
     if (p->pid == foreground_pid)
         foreground_pid = 0;
+
+    // Тем же поводом (может не вернуться сюда обычным путём, если p ==
+    // current_process): если убитый процесс был is_shell (exec когда-то
+    // "надел" его образ поверх шелла), система осталась бы вообще без
+    // интерактивного приглашения — пересоздаём шелл ДО переключения.
+    respawn_shell_if_needed(p);
 
     process_t *waiter = wake_waiting_parent(p);
 
