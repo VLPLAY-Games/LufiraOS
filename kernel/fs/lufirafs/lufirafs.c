@@ -509,6 +509,26 @@ int lufirafs_truncate(lufirafs_t *fs, uint32_t ino, uint32_t new_size) {
     return 0;
 }
 
+uint32_t lufirafs_du_blocks(lufirafs_t *fs, uint32_t ino) {
+    lufirafs_inode_t inode;
+    if (lufirafs_read_inode(fs, ino, &inode) != 0) return 0;
+
+    uint32_t blocks = (inode.size + LUFIRAFS_BLOCK_SIZE - 1) / LUFIRAFS_BLOCK_SIZE;
+    if (inode.indirect) blocks += 1;
+
+    if (inode.mode != LUFIRAFS_MODE_DIR) return blocks;
+
+    uint32_t total = blocks;
+    lufirafs_dir_t dir;
+    lufirafs_opendir(fs, ino, &dir);
+    lufirafs_dirent_t ent;
+    while (lufirafs_readdir(&dir, &ent) == 0) {
+        if (strcmp(ent.name, ".") == 0 || strcmp(ent.name, "..") == 0) continue;
+        total += lufirafs_du_blocks(fs, ent.inode);
+    }
+    return total;
+}
+
 // ===== Инициализация и синхронизация с диском =====
 
 int lufirafs_init(lufirafs_t *fs, void *image, uint32_t image_size, uint32_t lba_offset) {

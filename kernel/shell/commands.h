@@ -34,6 +34,8 @@ void command_cp(const char* args);
 void command_mv(const char* args);
 void command_rename(const char* args);
 void command_edit(const char* args);
+void command_df(void);
+void command_du(const char* path);
 
 // ELF loader
 void command_run(const char* filename);

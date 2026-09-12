@@ -500,6 +500,56 @@ void command_rename(const char *args) {
     command_mv(args);  // rename = mv
 }
 
+// df - свободное/занятое место на диске
+void command_df(void) {
+    uint32_t block_size = lufirafs.sb.block_size;
+    uint32_t total = lufirafs.sb.total_blocks;
+    uint32_t free_blocks = lufirafs.sb.free_blocks;
+    uint32_t used = total - free_blocks;
+
+    uint64_t total_kb = ((uint64_t)total * block_size) / 1024;
+    uint64_t used_kb = ((uint64_t)used * block_size) / 1024;
+    uint64_t free_kb = ((uint64_t)free_blocks * block_size) / 1024;
+
+    printf("\nFilesystem: LufiraFS (block size %u bytes)\n", block_size);
+    printf("Total: %lu KB\n", total_kb);
+    printf("Used:  %lu KB\n", used_kb);
+    printf("Free:  %lu KB\n", free_kb);
+    printf("Inodes: %u total, %u free\n", lufirafs.sb.inode_count, lufirafs.sb.free_inodes);
+}
+
+// du - место на диске, занятое файлом/директорией (рекурсивно)
+void command_du(const char *path) {
+    const char *target = (path && *path) ? path : ".";
+
+    uint32_t ino;
+    if (lufirafs_lookup(&lufirafs, cwd_inode, target, &ino) != 0) {
+        printf("\ndu: '%s' not found\n", target);
+        return;
+    }
+
+    lufirafs_inode_t inode;
+    lufirafs_read_inode(&lufirafs, ino, &inode);
+    uint32_t block_size = lufirafs.sb.block_size;
+
+    printf("\n");
+    if (inode.mode == LUFIRAFS_MODE_DIR) {
+        lufirafs_dir_t dir;
+        lufirafs_opendir(&lufirafs, ino, &dir);
+        lufirafs_dirent_t ent;
+        while (lufirafs_readdir(&dir, &ent) == 0) {
+            if (strcmp(ent.name, ".") == 0 || strcmp(ent.name, "..") == 0) continue;
+            uint32_t blocks = lufirafs_du_blocks(&lufirafs, ent.inode);
+            uint64_t kb = ((uint64_t)blocks * block_size + 1023) / 1024;
+            printf("%lu K\t%s\n", kb, ent.name);
+        }
+    }
+
+    uint32_t total_blocks = lufirafs_du_blocks(&lufirafs, ino);
+    uint64_t total_kb = ((uint64_t)total_blocks * block_size + 1023) / 1024;
+    printf("%lu K\ttotal (%s)\n", total_kb, target);
+}
+
 // edit - простой редактор (дописывает строку в файл)
 void command_edit(const char *args) {
     if (!args || *args == '\0') {

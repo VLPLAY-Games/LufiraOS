@@ -61,6 +61,13 @@ int lufirafs_truncate(lufirafs_t *fs, uint32_t ino, uint32_t new_size);
 int lufirafs_opendir(lufirafs_t *fs, uint32_t ino, lufirafs_dir_t *dir);
 int lufirafs_readdir(lufirafs_dir_t *dir, lufirafs_dirent_t *out); // 0 = есть запись, -1 = конец
 
+// Реально занятые БЛОКИ диска под inode — для файла это его собственные
+// блоки данных (+1 за косвенный, если есть), для директории — рекурсивно
+// ещё и всё её содержимое. То же самое, что показывает `du` в настоящих
+// Unix (место НА ДИСКЕ, round-up до block_size), а не логический размер
+// файла (inode.size).
+uint32_t lufirafs_du_blocks(lufirafs_t *fs, uint32_t ino);
+
 // Дописывает все "грязные" блоки на реальный диск через drivers/disk.
 // Аналог fat_sync()/fat_flush() — вызывается и после мутирующих операций,
 // и явно на reboot/shutdown (см. shell/commands/system.c).

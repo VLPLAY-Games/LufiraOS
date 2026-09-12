@@ -40,6 +40,8 @@ void command_help(void) {
     printf(" touch <filename> - Create empty file\n");
     printf(" write <file> <text> - Write text to file\n");
     printf(" edit <file> <text> - Append text to file\n");
+    printf(" df - Show filesystem free/used space\n");
+    printf(" du [path] - Show disk usage of a file/directory\n");
     printf(" run <file> - Execute ELF program\n");
     printf(" runbg <file> - Execute ELF program in background\n");
     printf(" kill [-SIGNAL] <pid> - Send a signal (-TERM/-KILL/-STOP/-CONT, default -TERM)\n");
