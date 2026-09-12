@@ -3,13 +3,14 @@
 #include "../commands.h"
 #include "drivers/console/console.h"
 #include "../shell.h"
-#include "fs/fat/fat.h"
+#include "fs/lufirafs/lufirafs.h"
 #include "system/acpi/acpi.h"
 #include "system/process/process.h"
 #include "system/mm/heap.h"
 #include "system/elf/elf.h"
 
-extern fat_fs_t fatfs;
+extern lufirafs_t lufirafs;
+extern uint32_t cwd_inode;
 
 // help, clear, reboot, shutdown, version, status, trap
 void command_help(void) {
@@ -52,7 +53,7 @@ void command_help(void) {
 void command_clear(void) { clear_screen(); show_prompt(); }
 void command_reboot(void) {
     printf("\nSyncing filesystem... ");
-    fat_flush(&fatfs);
+    lufirafs_flush(&lufirafs);
     printf("done.\nRebooting system...\n");
     __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64));
     __asm__ volatile ("outw %0, %1" : : "a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
@@ -60,7 +61,7 @@ void command_reboot(void) {
 }
 void command_shutdown(void) {
     printf("\nSyncing filesystem... ");
-    fat_flush(&fatfs);
+    lufirafs_flush(&lufirafs);
     printf("done.\nShutting down system...\n");
     
     // Используем ACPI shutdown
@@ -104,11 +105,15 @@ void command_runbg(const char *filename) {
         return;
     }
 
-    uint32_t fsize;
-    if (fat_open(&fatfs, filename, &fsize) != 0) {
+    uint32_t ino;
+    if (lufirafs_lookup(&lufirafs, cwd_inode, filename, &ino) != 0) {
         printf("\nFile not found: %s\n", filename);
         return;
     }
+
+    lufirafs_inode_t inode;
+    lufirafs_read_inode(&lufirafs, ino, &inode);
+    uint32_t fsize = inode.size;
 
     uint8_t *file_buf = (uint8_t *)kmalloc(fsize);
     if (!file_buf) {
@@ -118,7 +123,7 @@ void command_runbg(const char *filename) {
         return;
     }
 
-    int br = fat_read_file(&fatfs, filename, file_buf, fsize);
+    int br = lufirafs_read(&lufirafs, ino, 0, file_buf, fsize);
     if (br <= 0) {
         printf("\nError reading file: %s\n", filename);
         kfree(file_buf);

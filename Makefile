@@ -13,6 +13,13 @@ BUILD_DIR := build
 BOOTLOADER_DIR := boot
 KERNEL_DIR := kernel
 
+# Держите в синхроне с LUFIRAFS_ESP_SIZE в
+# kernel/fs/lufirafs/lufirafs_format.h — расхождение означает, что mkfs
+# отформатирует не тот регион диска, который потом читает ядро.
+DISK_TOTAL_SIZE := 16777216
+LUFIRAFS_ESP_SIZE := 4194304
+LUFIRAFS_REGION_SIZE := $(shell echo $$(($(DISK_TOTAL_SIZE) - $(LUFIRAFS_ESP_SIZE))))
+
 REQUIRED_TOOLS := gcc ld objcopy nm truncate dd mkfs.fat mmd mcopy qemu-system-x86_64
 $(foreach tool,$(REQUIRED_TOOLS),\
     $(if $(shell which $(tool) 2>/dev/null),,\
@@ -39,7 +46,7 @@ $(shell mkdir -p $(BUILD_DIR) \
 	$(BUILD_DIR)/kernel/system/syscall \
 	$(BUILD_DIR)/kernel/system/elf \
 	$(BUILD_DIR)/kernel/fs/vfs \
-    $(BUILD_DIR)/kernel/fs/fat)
+    $(BUILD_DIR)/kernel/fs/lufirafs)
 
 BOOTLOADER_CFLAGS := -I$(EFI_INC) -I$(EFI_INC_ARCH) \
                      -I$(BOOTLOADER_DIR) \
@@ -93,8 +100,8 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/system/syscall/syscall.c \
 	$(KERNEL_DIR)/system/elf/elf.c \
 	$(KERNEL_DIR)/fs/vfs/vfs.c \
-	$(KERNEL_DIR)/fs/fat/fat_vfs.c \
-    $(KERNEL_DIR)/fs/fat/fat.c
+	$(KERNEL_DIR)/fs/lufirafs/lufirafs.c \
+	$(KERNEL_DIR)/fs/lufirafs/lufirafs_vfs.c
 
 KERNEL_ASM_SOURCES := \
     $(KERNEL_DIR)/system/cpu/interrupts.S \
@@ -149,30 +156,41 @@ $(BUILD_DIR)/kernel.bin: $(BUILD_DIR)/kernel.elf
 	echo "  Kernel end: 0x$$KERNEL_END"; \
 	truncate -s $$KERNEL_SIZE $@
 
-$(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin
+$(BUILD_DIR)/mkfs_lufirafs: tools/mkfs_lufirafs.c $(KERNEL_DIR)/fs/lufirafs/lufirafs_format.h
+	@echo "  CC(host) $<"
+	$(CC) -O2 -Wall -o $@ $<
+
+# Диск — два региона без таблицы разделов (bootloader грузит в RAM ВЕСЬ
+# диск одним куском начиная с LBA 0, см. LUFIRAFS_ESP_SIZE в
+# lufirafs_format.h): первые LUFIRAFS_ESP_SIZE байт — маленький ESP,
+# отформатированный как FAT12 обычными mtools (UEFI-прошивка умеет читать
+# файлы ТОЛЬКО с FAT — это требование спецификации, не наш выбор), в нём
+# лежит ИСКЛЮЧИТЕЛЬНО сам бутлоадер и kernel.bin. Всё остальное место —
+# LufiraFS, наша собственная файловая система для всех пользовательских
+# данных, размечает и наполняет её $(BUILD_DIR)/mkfs_lufirafs.
+#
+# Общий размер образа (16МБ) сохранён от прежней FAT-only схемы — в своё
+# время меньший образ (512КБ) реально исчерпывал место при сборке
+# (mcopy проваливался с ошибкой), 16МБ даёт кратный запас.
+$(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin $(BUILD_DIR)/mkfs_lufirafs
 	@echo "=== Creating disk image ==="
-	@rm -f $@
-	# 512КБ (старый размер) едва хватало (~16КБ свободно на чистой сборке) уже
-	# для текущего kernel.bin+bootloader+тестовых ELF — после роста
-	# console_history (64->256 строк, +144КБ к .bss) запас стал совсем
-	# призрачным, а на "поюзанном" образе (файлы уже существуют, mcopy их
-	# перезаписывает) свободного места оставалось всего ~4КБ и mcopy
-	# реально проваливался с ошибкой (проверено вручную). 16МБ даёт кратный
-	# запас и не создаёт заметных издержек (образ всё равно почти пустой).
-	dd if=/dev/zero of=$@ bs=1024 count=16384 status=none
-	@echo "  Formatting as FAT12..."
-	mkfs.fat -F 12 -S 512 $@
-	@echo "  Creating EFI/BOOT directory..."
-	mmd -i $@ ::/EFI
-	mmd -i $@ ::/EFI/BOOT
-	@echo "  Copying bootloader..."
-	mcopy -i $@ $(BUILD_DIR)/BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
-	@echo "  Copying kernel..."
-	mcopy -i $@ $(BUILD_DIR)/kernel.bin ::/kernel.bin
-	@echo "  Creating test directory and file..."
-	mmd -i $@ ::/test
+	@rm -f $@ $(BUILD_DIR)/esp.img
+	dd if=/dev/zero of=$@ bs=1024 count=$$(($(DISK_TOTAL_SIZE) / 1024)) status=none
+	@echo "  Building ESP (FAT12, bootloader + kernel.bin only)..."
+	dd if=/dev/zero of=$(BUILD_DIR)/esp.img bs=1024 count=$$(($(LUFIRAFS_ESP_SIZE) / 1024)) status=none
+	mkfs.fat -F 12 -S 512 $(BUILD_DIR)/esp.img
+	mmd -i $(BUILD_DIR)/esp.img ::/EFI
+	mmd -i $(BUILD_DIR)/esp.img ::/EFI/BOOT
+	mcopy -i $(BUILD_DIR)/esp.img $(BUILD_DIR)/BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
+	mcopy -i $(BUILD_DIR)/esp.img $(BUILD_DIR)/kernel.bin ::/kernel.bin
+	dd if=$(BUILD_DIR)/esp.img of=$@ conv=notrunc status=none
+	rm -f $(BUILD_DIR)/esp.img
+	@echo "  Formatting LufiraFS region..."
+	$(BUILD_DIR)/mkfs_lufirafs format $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE)
+	@echo "  Populating initial files..."
+	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /test
 	echo "Hello from LufiraOS!" > $(BUILD_DIR)/readme.txt
-	mcopy -i $@ $(BUILD_DIR)/readme.txt ::/readme.txt
+	$(BUILD_DIR)/mkfs_lufirafs put $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(BUILD_DIR)/readme.txt /readme.txt
 	rm -f $(BUILD_DIR)/readme.txt
 	sync
 	@echo "=== Disk image created: $@ ==="
@@ -180,14 +198,11 @@ $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin
 check-disk: $(BUILD_DIR)/disk.img
 	@echo "=== Checking disk image ==="
 	@file $@
-	@echo "EFI/BOOT directory:" && mdir -i $@ ::/EFI/BOOT/
-	@echo "Root directory:" && mdir -i $@ ::/
-	@echo "Test directory:" && mdir -i $@ ::/test
 
-run: $(BUILD_DIR)/disk.img
-	mcopy -i build/disk.img test/hello.elf ::/hello.elf
-	mcopy -i build/disk.img test/fork_test.elf ::/fork.elf
-	mcopy -i build/disk.img test/pipe_test.elf ::/pipe.elf
+run: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs
+	$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) test/hello.elf /hello.elf
+	$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) test/fork_test.elf /fork.elf
+	$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) test/pipe_test.elf /pipe.elf
 	@echo "=== Starting QEMU ==="
 	qemu-system-x86_64 \
 		-bios /usr/share/ovmf/OVMF.fd \

@@ -25,6 +25,6 @@ void load_command_from_history(int history_idx);
 void shell_handle_tab(void);
 void shell_handle_ctrl_c(void);
 
-// Текущий путь и кластер
+// Текущий путь и inode текущего каталога (LufiraFS)
 extern char cwd_path[256];
-extern uint32_t cwd_first_cluster;
+extern uint32_t cwd_inode;

@@ -14,7 +14,7 @@
 #include "system/cpu/gdt.h"
 #include "system/cpu/idt.h"
 #include "system/cpu/tss.h"
-#include "fs/fat/fat.h"
+#include "fs/lufirafs/lufirafs.h"
 #include "system/cpu/irq.h"
 #include "system/acpi/acpi.h"
 #include "system/process/process.h"
@@ -55,7 +55,7 @@ static void pic_remap(void) {
     outb(PIC2_DATA, 0xFF);
 }
 
-fat_fs_t fatfs;
+lufirafs_t lufirafs;
 
 static void shell_task(void) {
     printf("\n");
@@ -106,15 +106,24 @@ void _start(BootInfo* bi) {
     // Heap теперь статический - инициализируем сразу
     heap_init();  // <-- ВСЯ память выделяется здесь
 
-    if (bi->FATImageBase && bi->FATImageSize) {
-        LOG_PENDING("Mounting FAT filesystem...");
-        if (fat_init(&fatfs, (void*)bi->FATImageBase, bi->FATImageSize) == 0) {
-            LOG_DONE_OK("FAT filesystem mounted");
+    // Бутлоадер грузит в RAM ВЕСЬ диск одним куском с LBA 0 (см. подробный
+    // комментарий у LUFIRAFS_ESP_SIZE) — первые LUFIRAFS_ESP_SIZE байт это
+    // маленький FAT-раздел (ESP) для самой прошивки, а сама LufiraFS
+    // начинается сразу за ним. lba_offset нужен lufirafs_sync(), чтобы
+    // дописывать "грязные" блоки по правильным абсолютным LBA реального
+    // диска через drivers/disk (см. lufirafs.c).
+    if (bi->FATImageBase && bi->FATImageSize > LUFIRAFS_ESP_SIZE) {
+        LOG_PENDING("Mounting LufiraFS...");
+        void *fs_image = (void*)(bi->FATImageBase + LUFIRAFS_ESP_SIZE);
+        uint32_t fs_size = (uint32_t)(bi->FATImageSize - LUFIRAFS_ESP_SIZE);
+        uint32_t lba_offset = LUFIRAFS_ESP_SIZE / 512;
+        if (lufirafs_init(&lufirafs, fs_image, fs_size, lba_offset) == 0) {
+            LOG_DONE_OK("LufiraFS mounted");
         } else {
-            LOG_DONE_FAIL("FAT mount failed");
+            LOG_DONE_FAIL("LufiraFS mount failed");
         }
     } else {
-        LOG_FAIL("No FAT image provided");
+        LOG_FAIL("No disk image provided");
     }
 
     if (bi->RsdpAddress) {

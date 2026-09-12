@@ -5,14 +5,14 @@
 #include "lib/stddef.h"
 #include "lib/string.h"
 
-extern int vfs_open_fat(const char *path, int flags);
+extern int vfs_open_lufirafs(const char *path, int flags);
 
-extern int vfs_fat_create(const char *path);
-extern int vfs_fat_mkdir(const char *path);
-extern int vfs_fat_unlink(const char *path);
+extern int vfs_lufirafs_create(const char *path);
+extern int vfs_lufirafs_mkdir(const char *path);
+extern int vfs_lufirafs_unlink(const char *path);
 
-extern inode_t* vfs_fat_lookup(const char *path);
-extern inode_t* vfs_fat_get_root(void);
+extern inode_t* vfs_lufirafs_lookup(const char *path);
+extern inode_t* vfs_lufirafs_get_root(void);
 
 /* ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ========== */
 
@@ -356,10 +356,10 @@ int vfs_open(const char *path, int flags)
         return -1;
 
     /*
-     * FAT сначала.
+     * LufiraFS сначала.
      */
     int fd =
-        vfs_open_fat(path, flags);
+        vfs_open_lufirafs(path, flags);
 
     if (fd >= 0)
         return fd;
@@ -371,13 +371,13 @@ int vfs_open(const char *path, int flags)
      */
     if (flags & O_CREAT) {
 
-        if (vfs_fat_create(path) != 0)
+        if (vfs_lufirafs_create(path) != 0)
             return -1;
 
         /*
          * После создания открываем обычным способом.
          */
-        return vfs_open_fat(path, flags);
+        return vfs_open_lufirafs(path, flags);
     }
 
     /*
@@ -506,7 +506,7 @@ void vfs_init(void) {
      */
     vfs_init_fd_table(current_fd_table);
 
-    printf("[VFS] Initialized (FAT + console, per-process fd tables)\n");
+    printf("[VFS] Initialized (LufiraFS + console, per-process fd tables)\n");
 }
 
 /* ========== ЗАГОТОВКИ ========== */
@@ -520,7 +520,7 @@ int vfs_create(const char *path)
     if (!path || !*path)
         return -1;
 
-    return vfs_fat_create(path);
+    return vfs_lufirafs_create(path);
 }
 
 
@@ -529,7 +529,7 @@ int vfs_mkdir(const char *path)
     if (!path || !*path)
         return -1;
 
-    return vfs_fat_mkdir(path);
+    return vfs_lufirafs_mkdir(path);
 }
 
 
@@ -538,7 +538,7 @@ int vfs_unlink(const char *path)
     if (!path || !*path)
         return -1;
 
-    return vfs_fat_unlink(path);
+    return vfs_lufirafs_unlink(path);
 }
 
 
@@ -547,7 +547,7 @@ int vfs_rmdir(const char *path)
     if (!path || !*path)
         return -1;
 
-    return vfs_fat_unlink(path);
+    return vfs_lufirafs_unlink(path);
 }
 
 
@@ -596,11 +596,11 @@ inode_t* vfs_lookup(const char *path)
     if (!path || !*path)
         return NULL;
 
-    return vfs_fat_lookup(path);
+    return vfs_lufirafs_lookup(path);
 }
 
 
 inode_t* vfs_get_root(void)
 {
-    return vfs_fat_get_root();
+    return vfs_lufirafs_get_root();
 }

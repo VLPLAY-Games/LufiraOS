@@ -2,16 +2,14 @@
 #include "commands.h"
 #include "drivers/console/console.h"
 #include "drivers/keyboard/keyboard.h"
-#include "fs/fat/fat.h"
+#include "fs/lufirafs/lufirafs.h"
 #include "system/process/process.h"
-
-extern fat_fs_t fatfs;
 
 #define HISTORY_SIZE 20
 
 // Текущий рабочий каталог
 char cwd_path[256] = "/";
-uint32_t cwd_first_cluster = 0;   // 0 = корень
+uint32_t cwd_inode = LUFIRAFS_ROOT_INODE;
 
 static uint32_t cursor_position_in_line = 0;
 static uint32_t command_start_x = 0;
