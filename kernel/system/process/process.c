@@ -784,8 +784,22 @@ void schedule(void) {
     int tries = 0;
     const int MAX_TRIES = 100;
 
+    // idle_process — это узел общего кольцевого списка (нужен там, чтобы
+    // schedule() всегда имел кого выбрать), но после ПЕРВОГО же
+    // переключения на любой другой процесс его state становится обычным
+    // PROCESS_READY — и без исключения ниже он выбирался бы этим циклом
+    // наравне с shell/любым hello.elf в порядке обычной круговой очереди.
+    // Тогда keyboard/timer IRQ, который прерывает "текущий" процесс в
+    // произвольный момент, иногда попадал прямо на idle — и вся команда
+    // шелла (run/kill/exec), выполняющаяся синхронно внутри этого IRQ,
+    // работала так, будто current_process == idle (PID 0): process_create()
+    // проставлял ppid=0 вместо реального родителя (ломая kill+wait/reap), а
+    // exec ЗАМЕНЯЛ САМ IDLE — у которого нет ring0_stack (0) — так что
+    // первый же syscall новой программы уводил ядерный стек (current_kernel_rsp)
+    // на 0 и ронял систему. idle должен выбираться ТОЛЬКО запасной веткой
+    // ниже, когда реально больше некого выбрать — никогда этим циклом.
     while (next &&
-           next->state != PROCESS_READY &&
+           (next->state != PROCESS_READY || next == idle_process) &&
            tries < MAX_TRIES)
     {
         next = next->next;
@@ -797,6 +811,7 @@ void schedule(void) {
 
     if (!next ||
         next->state != PROCESS_READY ||
+        next == idle_process ||
         tries >= MAX_TRIES)
     {
         if (idle_process && idle_process != current_process) {

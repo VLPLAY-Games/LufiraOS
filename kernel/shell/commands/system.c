@@ -188,6 +188,19 @@ void command_kill(const char *args)
 
     if (result == 0) {
         printf("Signal %d sent to PID %d\n", sig, pid);
+
+        // SIGKILL/SIGTERM переводят процесс в PROCESS_TERMINATED, но сам по
+        // себе он остаётся "зомби" в списке (и в выводе ps) до тех пор,
+        // пока родитель не заберёт его через process_wait() — это
+        // нормальная UNIX-семантика, но в этом шелле нет отдельного
+        // авто-reap'а для процессов, о которых никто явно не спросит через
+        // "wait". Раз уж мы (шелл, реальный родитель run/runbg) сами только
+        // что синхронно попросили процесс завершиться — тут же и забираем
+        // его, чтобы "kill" ощущался как окончательное действие, а не как
+        // полдела, требующее ещё и "wait <pid>" вручную.
+        if (sig == SIGKILL || sig == SIGTERM) {
+            process_wait((uint32_t)pid, NULL);
+        }
     } else {
         printf("Process %d not found\n", pid);
     }
