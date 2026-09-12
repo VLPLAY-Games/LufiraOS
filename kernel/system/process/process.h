@@ -20,6 +20,7 @@
 // user-space) — доставка синхронная, прямо в момент отправки (см.
 // process_signal() в process.c). Номера взяты как у настоящих POSIX-сигналов
 // просто для привычности.
+#define SIGINT  2
 #define SIGKILL 9
 #define SIGTERM 15
 #define SIGCONT 18
@@ -124,3 +125,10 @@ extern void context_switch(process_context_t *old_context,
 
 extern process_t *current_process;
 extern process_t *process_list;
+
+// PID процесса, который сейчас "на переднем плане" (запущен через run/exec
+// из шелла) — цель для Ctrl+C. 0 = нет такого (обычные background-процессы
+// runbg сюда никогда не попадают). Выставляется в elf.c при запуске,
+// сбрасывается в process.c при завершении процесса (нормальном или по
+// сигналу) — см. подробности у terminate_process_by_signal()/process_exit().
+extern volatile uint32_t foreground_pid;

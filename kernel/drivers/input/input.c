@@ -78,6 +78,13 @@ void input_keyboard_event(int key) {
         case '\t':  // Tab!
             shell_handle_tab();
             return;
+
+        case KEY_CTRL_C:
+            if (console_is_scrolled())
+                console_scroll_to_bottom();
+
+            shell_handle_ctrl_c();
+            return;
     }
 
     if (key == '\n') {

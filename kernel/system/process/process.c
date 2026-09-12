@@ -14,6 +14,7 @@
 
 process_t *process_list = NULL;
 process_t *current_process = NULL;
+volatile uint32_t foreground_pid = 0;
 uint64_t current_kernel_rsp = 0; // Глобальная переменная для asm
 static uint32_t next_pid = 1;
 static process_t *idle_process = NULL;
@@ -551,6 +552,9 @@ void process_exit(int exit_code) {
     exiting_process->exit_code = exit_code;
     exiting_process->state = PROCESS_TERMINATED;
 
+    if (exiting_process->pid == foreground_pid)
+        foreground_pid = 0;
+
     process_t *waiter = wake_waiting_parent(exiting_process);
     if (waiter) {
         switch_to_process(waiter);
@@ -938,6 +942,14 @@ static int terminate_process_by_signal(process_t *p, int sig) {
     p->exit_code = 128 + sig;
     p->state = PROCESS_TERMINATED;
 
+    // Это нужно сделать ДО возможного switch_to_process()/schedule() ниже
+    // (когда p — сам current_process, этот вызов может никогда не
+    // вернуться сюда обычным путём) — иначе Ctrl+C, убивший процесс, пока
+    // тот был "текущим", оставил бы foreground_pid висеть на уже мёртвом
+    // PID навсегда.
+    if (p->pid == foreground_pid)
+        foreground_pid = 0;
+
     process_t *waiter = wake_waiting_parent(p);
 
     if (p == current_process) {
@@ -968,6 +980,7 @@ int process_signal(uint32_t pid, int sig)
                 return -1;
 
             switch (sig) {
+                case SIGINT:
                 case SIGKILL:
                 case SIGTERM:
                     return terminate_process_by_signal(p, sig);

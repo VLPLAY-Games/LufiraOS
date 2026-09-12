@@ -9,8 +9,14 @@
 #define HID_KEY_DOWN_ARROW  0x51
 #define HID_KEY_UP_ARROW    0x52
 
+#define HID_MOD_LEFT_CTRL   (1 << 0)
 #define HID_MOD_LEFT_SHIFT  (1 << 1)
+#define HID_MOD_RIGHT_CTRL  (1 << 4)
 #define HID_MOD_RIGHT_SHIFT (1 << 5)
+
+// Usage ID клавиши 'C' в таблице "Keyboard/Keypad" HID — нужен отдельно от
+// hid_keycode_ascii[], чтобы распознать Ctrl+C явно (см. ниже).
+#define HID_KEY_C 0x06
 
 // Usage ID 0x04..0x38 — буквы, цифры, базовые знаки препинания и
 // управляющие клавиши: тот же набор символов, что и в PS/2-таблицах
@@ -58,7 +64,13 @@ static int hid_usage_was_pressed(uint8_t usage) {
     return 0;
 }
 
-static int hid_decode_usage(uint8_t usage, int shift) {
+// Ctrl проверяется ОТДЕЛЬНО от обычного ASCII-декода (а не как в
+// keyboard.c, где это делает вызывающий код через keyboard_ctrl_pressed()) —
+// здесь модификатор и usage-код приходят в ОДНОМ и том же отчёте, так что
+// удобнее и надёжнее решить это сразу на месте.
+static int hid_decode_usage(uint8_t usage, int shift, int ctrl) {
+    if (ctrl && usage == HID_KEY_C) return KEY_CTRL_C;
+
     switch (usage) {
         case HID_KEY_LEFT_ARROW:  return KEY_LEFT_ARROW;
         case HID_KEY_RIGHT_ARROW: return KEY_RIGHT_ARROW;
@@ -75,13 +87,24 @@ void usb_hid_keyboard_report(const uint8_t report[8]) {
     uint8_t modifier = report[0];
     const uint8_t *keys = &report[2];
     int shift = (modifier & (HID_MOD_LEFT_SHIFT | HID_MOD_RIGHT_SHIFT)) != 0;
+    int ctrl = (modifier & (HID_MOD_LEFT_CTRL | HID_MOD_RIGHT_CTRL)) != 0;
+
+    // Раньше этот драйвер вообще не читал биты Ctrl из модификатора — из-за
+    // этого Ctrl+C (и Ctrl+стрелки, которые в input.c проверяются через
+    // keyboard_ctrl_pressed() — состояние, которое раньше знал только
+    // PS/2-путь в keyboard.c) не распознавались, если тот же keystroke
+    // физически пришёл через USB HID: Ctrl+C превращался в обычную 'c', а
+    // Ctrl+Up/Down — в обычную прокрутку истории. Синхронизируем общее
+    // состояние Ctrl каждый отчёт (не только по фронту нажатия — HID
+    // boot-отчёт содержит ТЕКУЩЕЕ состояние модификаторов, а не события).
+    keyboard_set_ctrl_state(ctrl);
 
     for (int i = 0; i < 6; i++) {
         uint8_t usage = keys[i];
         if (usage <= 1) continue; // 0 = нет клавиши, 1 = rollover error
         if (hid_usage_was_pressed(usage)) continue; // уже было нажато, не новое событие
 
-        int key = hid_decode_usage(usage, shift);
+        int key = hid_decode_usage(usage, shift, ctrl);
         if (key != 0) {
             input_keyboard_event(key);
         }

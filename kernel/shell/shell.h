@@ -23,6 +23,7 @@ void add_to_history(const char* command);
 const char* get_history_command(int index);
 void load_command_from_history(int history_idx);
 void shell_handle_tab(void);
+void shell_handle_ctrl_c(void);
 
 // Текущий путь и кластер
 extern char cwd_path[256];

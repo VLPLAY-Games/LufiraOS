@@ -339,3 +339,35 @@ void shell_handle_tab(void) {
         }
     }
 }
+
+// Ctrl+C — принудительно прерывает то, что сейчас "на переднем плане"
+// (run/exec), как в настоящем шелле. runbg сюда не попадает вовсе —
+// foreground_pid для фоновых процессов никогда не выставляется (см.
+// process.h/elf.c), поэтому Ctrl+C их не трогает.
+void shell_handle_ctrl_c(void) {
+    uint32_t pid = foreground_pid;
+
+    if (pid != 0) {
+        process_signal(pid, SIGINT);
+
+        // Если сигнал застал процесс НЕ текущим (обычный случай — он спал
+        // в sys_sleep()), process_signal() вернул управление сюда как
+        // всегда, и зомби можно сразу забрать. Если же процесс оказался
+        // ровно текущим (current_process), process_signal() увёл нас через
+        // schedule() и до этой строки в ЭТОМ вызове мы уже не дойдём —
+        // foreground_pid к этому моменту уже обнулён самим
+        // terminate_process_by_signal() (см. process.c), так что застрять
+        // с "висящим" foreground_pid на мёртвом PID мы не можем; шелл сам
+        // восстановится, когда планировщик в следующий раз его выберет.
+        process_wait(pid, NULL);
+    }
+
+    printf("^C\n");
+
+    current_line[0] = '\0';
+    current_line_length = 0;
+    cursor_position_in_line = 0;
+    history_index = -1;
+
+    show_prompt();
+}

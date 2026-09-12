@@ -572,6 +572,11 @@ static int elf_exec_internal(const void *elf_data,
     outb(0xA0, 0x20);
     outb(0x20, 0x20);
 
+    // Цель для Ctrl+C (см. shell_handle_ctrl_c() в shell.c). runbg сюда не
+    // попадает вовсе (см. ранний return в background-ветке выше) — фоновые
+    // процессы Ctrl+C не прерывает, как и в настоящих шеллах.
+    foreground_pid = proc->pid;
+
     switch_to_process(proc);
 
     return 0;
@@ -680,6 +685,10 @@ int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
     // планировщик виснет намертво.
     outb(0xA0, 0x20);
     outb(0x20, 0x20);
+
+    // Цель для Ctrl+C (см. shell_handle_ctrl_c() в shell.c) — exec меняет
+    // образ proc "на месте", PID остаётся тем же.
+    foreground_pid = proc->pid;
 
     // Прыгаем в новый образ процесса и не возвращаемся: старый контекст
     // (стек вызовов exec/do_exec/shell/...) сохранять некуда и незачем —

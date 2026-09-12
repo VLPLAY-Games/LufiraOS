@@ -162,6 +162,9 @@ int keyboard_scancode_to_key(uint8_t scancode) {
             case 0x3A: caps_lock = !caps_lock; return 0;
             case 0x1D: ctrl_pressed = 1; return 0;
             case 0x38: alt_pressed = 1; return 0;
+            case 0x2E: // 'C' — с зажатым Ctrl это Ctrl+C, а не буква
+                if (ctrl_pressed) return KEY_CTRL_C;
+                break;
         }
     } else {
         switch (scancode) {
@@ -205,4 +208,8 @@ int keyboard_is_initialized(void) {
 
 int keyboard_ctrl_pressed(void) {
     return ctrl_pressed;
+}
+
+void keyboard_set_ctrl_state(int pressed) {
+    ctrl_pressed = pressed ? 1 : 0;
 }
