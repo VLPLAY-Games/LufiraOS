@@ -1,12 +1,12 @@
 # LufiraOS
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue)
+![Version](https://img.shields.io/badge/version-0.3.0-blue)
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
 ![Status](https://img.shields.io/badge/status-alpha-orange)
 
 **LufiraOS** is a 64-bit hobby operating system for the x86_64 architecture, written from scratch in C and assembly by a single developer with some assistance from AI tools. It is designed to be educational, modular, and extensible, with a focus on understanding the core concepts of operating system development.
 
-# 🚨 VERSION 0.1.0 (ALPHA) 🚨
+# 🚨 VERSION 0.3.0 (ALPHA) 🚨
 
 > ## ⚠️ IMPORTANT NOTICE
 > ### This is a **PRE-ALPHA** hobby operating system.
@@ -14,12 +14,13 @@
 > ### It is **NOT** intended for production use or daily driving.
 > ### The system is a work in progress, and many features are either partially implemented or not yet functional.
 > ### Use at your own risk, and expect crashes, instability, and missing functionality.
+> ### See [Known Issues and Limitations](#known-issues-and-limitations) for the most significant current problems.
 
 # ⚠️ Documentation Notice
 
-> This documentation is provided for LufiraOS v0.1.0 and may contain inaccuracies, outdated information, or minor inconsistencies with the current source code. LufiraOS is an actively developed project, and its architecture and implementation may change over time.
+> This documentation is provided for LufiraOS v0.3.0 and may contain inaccuracies, outdated information, or minor inconsistencies with the current source code. LufiraOS is an actively developed project, and its architecture and implementation may change over time.
 >If a discrepancy exists between this documentation and the source code, the source code should be considered the authoritative reference.
-> Documentation will be continuously reviewed and updated as the project evolves.
+> Documentation will be continuously reviewed and updated as the project evolves. See [CHANGELOG.md](CHANGELOG.md) for a detailed history of changes.
 
 ## System Requirements
 
@@ -82,16 +83,17 @@
 
 ## Overview
 
-LufiraOS is a from-scratch operating system that boots via UEFI, features a graphical console, supports the FAT filesystem, and provides a multitasking environment with system calls and a user shell. It serves as a learning platform for OS development and a foundation for further experimentation.
+LufiraOS is a from-scratch operating system that boots via UEFI, features a graphical console, uses its own **LufiraFS** filesystem, and provides a multitasking environment with system calls, USB/PS-2 input, and a user shell. It serves as a learning platform for OS development and a foundation for further experimentation.
 
 ### Key Concepts
 
 - **Monolithic Kernel** – all core services (memory management, process scheduling, drivers) run in kernel space.
 - **UEFI Boot** – boots on modern hardware using the UEFI firmware.
-- **Graphical Console** – uses the framebuffer for text output with a custom 8×8 font and 256-color palette.
-- **Cooperative Multitasking** – simple round-robin scheduler with process states (READY, RUNNING, BLOCKED, SLEEPING, TERMINATED).
+- **Graphical Console** – uses the framebuffer for text output with a custom 8×8 font, 256-color palette, and a scaled/tilted big-text renderer used for the boot logo.
+- **Cooperative Multitasking** – simple round-robin scheduler with process states (READY, RUNNING, BLOCKED, SLEEPING, STOPPED, TERMINATED), `fork()`/`exec()`/`wait()`, and POSIX-style signals.
 - **ELF Executable Support** – loads and runs 64-bit ELF programs.
 - **System Calls** – provides a controlled interface for user-mode programs.
+- **Developer Mode** – a persistent on-disk flag that switches between a quiet boot (with a logo) and a fully verbose diagnostic log; see [`04_logging.md`](documentation/04_logging.md).
 
 ---
 
@@ -122,25 +124,30 @@ LufiraOS is a from-scratch operating system that boots via UEFI, features a grap
   - ELF loader (ET_EXEC and ET_DYN).
   - Process creation, scheduling, and termination.
   - Cooperative multitasking with timer ticks (100 Hz).
+  - `fork()`, in-place `exec()`, `wait()`, and POSIX-style signals (`SIGTERM`, `SIGKILL`, `SIGSTOP`, `SIGCONT`) via `kill`.
+  - Anonymous pipes for inter-process communication.
   - `syscall` instruction for fast system calls.
 
-- **System Calls (17 implemented)**
-  - File operations: `open`, `close`, `read`, `write`, `seek`.
-  - Process control: `exit`, `getpid`, `sleep`, `kill`, `yield`.
+- **System Calls (19 implemented)**
+  - File operations: `open`, `close`, `read`, `write`, `seek`, `pipe`.
+  - Process control: `exit`, `getpid`, `sleep`, `kill`, `yield`, `fork`, `exec`, `wait`.
   - System info: `gettick`.
-  - Stubs for `mmap`, `exec`, `fork`, `wait`, and more.
+  - Stubs for `mmap`, `munmap`, `getcwd`, `chdir`.
 
-- **Filesystem**
-  - FAT12/16/32 driver with read/write support.
+- **Filesystem — LufiraFS**
+  - Custom filesystem (superblock, block bitmap, fixed inode table, real `.`/`..` directory entries) that replaces FAT as the primary storage backend.
+  - A small FAT12 partition (the UEFI ESP) still holds only the bootloader and kernel binary, since UEFI firmware can only read FAT — everything else lives on LufiraFS.
   - Virtual Filesystem (VFS) abstraction layer.
-  - Dirty sector tracking and flushing.
-  - Directory operations (`mkdir`, `rm`, `opendir`, `readdir`).
+  - Dirty block tracking and flushing back to disk.
+  - Full path resolution (multi-level directories, per-command cwd) and directory operations (`mkdir`, `rm`, `opendir`, `readdir`).
+  - Host-side `mkfs_lufirafs` tool for formatting/populating the disk image at build time.
 
 - **Drivers**
-  - **Console** – graphical text output, 256-color palette, scrollback.
+  - **Console** – graphical text output, 256-color palette, scrollback, scaled/tilted big-text rendering (boot logo, shell watermark).
   - **Disk (ATA PIO)** – sector read/write for primary IDE channel.
   - **Keyboard (PS/2)** – scancode translation, modifiers, IRQ1.
   - **Mouse (PS/2)** – packet decoding, IRQ12.
+  - **USB (UHCI)** – host-controller driver with a USB HID boot-protocol keyboard/mouse driver, unified with PS/2 through a common input dispatcher.
   - **PCI** – bus enumeration, BAR management.
   - **AC’97 Audio** – mixer control, DMA playback, tone generation.
 
@@ -149,11 +156,15 @@ LufiraOS is a from-scratch operating system that boots via UEFI, features a grap
   - FADT detection and ACPI mode enabling.
   - System shutdown (S5 state).
 
+- **Developer Mode & Logging**
+  - Persistent on-disk flag (`/system/devmode.flag`) toggled with the `devmode` command, gating verbose boot/driver diagnostics.
+  - Lightweight `klog` logger writes short status lines to `/logs/system.log` regardless of developer mode.
+
 - **Shell**
   - Command-line interface with line editing.
   - Command history (20 entries).
   - Tab completion (command names).
-  - Built-in commands: system control, file management, process control, audio.
+  - Built-in commands: system control, file management (including `df`/`du`/colourised `ls`), process control, signals, audio, developer mode.
   - Current working directory (cwd) support.
 
 ---
@@ -174,16 +185,19 @@ LufiraOS is a from-scratch operating system that boots via UEFI, features a grap
 +--------------------------------------------------+
 \| KERNEL MODE |
 \| +------------------------------------------+ |
-\| | System Calls (17) | |
+\| | System Calls (19) | |
 \| +------------------------------------------+ |
-\| | VFS / FAT Driver | |
+\| | VFS / LufiraFS Driver | |
 \| +------------------------------------------+ |
 \| | Process Scheduler / ELF Loader | |
+\| | (fork / exec / wait / signals / pipes) | |
 \| +------------------------------------------+ |
 \| | Memory Management (PMM / Paging / Heap) | |
 \| +------------------------------------------+ |
-\| | Drivers (Console, Disk, Keyboard, | |
-\| | Mouse, PCI, AC'97, ACPI) | |
+\| | Drivers (Console, Disk, Keyboard, Mouse, | |
+\| | USB/UHCI, PCI, AC'97, ACPI) | |
+\| +------------------------------------------+ |
+\| | Devmode / klog | |
 \| +------------------------------------------+ |
 \| | CPU / Interrupts (GDT, IDT, IRQ, TSS) | |
 \| +------------------------------------------+ |
@@ -225,10 +239,11 @@ make clean && make run
 
 
 ``` bash
-# Run in QEMU
+# Run in QEMU (quiet boot, boot logo, developer mode off)
 make run
 
-# Run with debug logging
+# Run with developer mode enabled automatically (verbose boot/driver log,
+# see documentation/04_logging.md) plus QEMU's own debug logging
 make debug
 
 # Run with QEMU monitor (telnet on port 4444)
@@ -304,14 +319,18 @@ lufiraos/
 │   │   ├── disk/              # ATA PIO driver
 │   │   ├── keyboard/          # PS/2 keyboard driver
 │   │   ├── mouse/             # PS/2 mouse driver
+│   │   ├── usb/               # UHCI host controller + USB HID driver
+│   │   ├── input/             # Shared PS/2 + USB HID input dispatcher
 │   │   ├── pci/               # PCI bus driver
 │   │   └── sound/             # AC'97 audio driver
 │   ├── fs/                    # Filesystem
-│   │   ├── fat/               # FAT driver
-│   │   │   ├── fat.c          # FAT implementation
-│   │   │   ├── fat_vfs.c      # VFS wrapper
-│   │   │   └── fat.h          # FAT header
-│   │   └── vfs/               # Virtual Filesystem
+│   │   ├── lufirafs/          # LufiraFS driver (primary filesystem)
+│   │   │   ├── lufirafs.c            # Core implementation
+│   │   │   ├── lufirafs_vfs.c        # VFS wrapper
+│   │   │   ├── lufirafs.h            # Driver API
+│   │   │   └── lufirafs_format.h     # On-disk format (shared with mkfs_lufirafs)
+│   │   ├── fat/                # Legacy FAT driver (kept for reference, unused)
+│   │   └── vfs/                # Virtual Filesystem
 │   │       ├── vfs.c          # VFS core
 │   │       └── vfs.h          # VFS header
 │   ├── lib/                   # System libraries
@@ -324,27 +343,34 @@ lufiraos/
 │   │   ├── shell.c            # Shell core
 │   │   ├── shell.h            # Shell header
 │   │   └── commands/          # Built-in commands
-│   │       ├── system.c       # System commands
+│   │       ├── system.c       # System commands (incl. devmode)
 │   │       ├── colors.c       # Color commands
 │   │       ├── filesystem.c   # Filesystem commands
 │   │       └── sound.c        # Audio commands
 │   └── system/                # Kernel subsystems
 │       ├── acpi/              # ACPI
 │       ├── cpu/               # CPU management (GDT, IDT, IRQ, TSS)
+│       ├── devmode/           # Developer-mode flag (persistent, gates DLOG)
+│       ├── klog/              # Persistent event logging (/logs/system.log)
 │       ├── elf/               # ELF loader
 │       ├── mm/                # Memory management (PMM, Paging, Heap)
-│       ├── process/           # Process management
+│       ├── process/           # Process management (incl. fork/exec/signals)
 │       ├── syscall/           # System calls
 │       └── timer/             # PIT timer
+│
+├── tools/                     # Host-side build tools
+│   └── mkfs_lufirafs.c        # LufiraFS formatting/populating tool
 │
 ├── build/                     # Build artefacts (created by make)
 │   ├── BOOTX64.EFI            # UEFI bootloader
 │   ├── kernel.bin             # Kernel binary
 │   ├── kernel.elf             # Kernel with debug symbols
-│   └── disk.img               # Complete disk image
+│   ├── mkfs_lufirafs          # Host tool binary
+│   └── disk.img               # Complete disk image (ESP + LufiraFS region)
 │
 ├── Makefile                   # Build system
 ├── README.md                  # This file
+├── CHANGELOG.md               # Version history
 └── documentation/             # Documentation
     ├── 01_bootloader.md
     ├── 02_kernel_init.md
@@ -353,15 +379,27 @@ lufiraos/
 
 ---
 
+## Known Issues and Limitations
+
+- **Keyboard auto-repeat does not work.** Holding down a key registers as a single keypress instead of repeating.
+- **`fork()`/`exec()` are unreliable.** A forked child process can crash (triple fault) before it ever reaches its first instruction; the root cause has not yet been isolated. Treat both as experimental.
+- **No preemptive multitasking.** Scheduling is strictly cooperative; a process that never yields (via a syscall, sleep, or the timer's implicit halt/schedule cycle) can stall the rest of the system.
+- **No memory protection beyond paging permissions.** `mmap`/`munmap`/`getcwd`/`chdir` are still stubs.
+- `cd`, `cp`, and `mv` are not fully stable — will be fixed in the next release (v0.3.1).
+- **Real hardware is untested.** The system is developed and tested exclusively in QEMU; UEFI/ACPI/USB quirks on real firmware are unknown.
+- See [CHANGELOG.md](CHANGELOG.md) for issues fixed in past versions.
+
+---
+
 ## Contributing
 
 Contributions are welcome! Here are some areas for improvement:
 
-- **Filesystem**: Long file name (LFN) support for FAT, additional filesystem drivers (ext2, ISO9660).
-- **Drivers**: USB, AHCI/SATA, network, graphics acceleration.
-- **Processes**: Preemptive multitasking, proper fork/exec/wait, IPC.
-- **System Calls**: Implement stubs (mmap, exec, fork, wait, etc.).
-- **Shell**: Pipes, redirection, environment variables, scripting.
+- **Filesystem**: Long file name (LFN) support, additional filesystem drivers (ext2, ISO9660), LufiraFS indirect-block-chain growth beyond a single indirect block.
+- **Drivers**: AHCI/SATA, network, graphics acceleration, USB mass storage.
+- **Processes**: Preemptive multitasking, a working `fork()`/`exec()`, copy-on-write address spaces.
+- **System Calls**: Implement remaining stubs (`mmap`, `munmap`, `getcwd`, `chdir`).
+- **Shell**: Redirection, environment variables, scripting.
 - **Security**: Memory protection, user/kernel separation, paging permissions.
 - **Documentation**: More examples, tutorials, API references.
 

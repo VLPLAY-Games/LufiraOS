@@ -43,7 +43,7 @@ LufiraOS is a hobby operating system designed for x86-64 platforms. The bootload
 - Presenting a boot menu to the user (with auto-boot countdown).
 - Loading the kernel image (`kernel.bin`) from the boot partition.
 - Gathering system information (memory map, graphics mode, ACPI/SMBIOS tables).
-- Loading a FAT image (optional) for later use by the kernel.
+- Loading the entire raw boot disk into memory as one image (optional) for later use by the kernel — as of v0.3.0 this image holds a small FAT12 ESP followed by the kernel's own LufiraFS region; the bootloader itself is unaware of this split, see `08_filesystem.md`.
 - Exiting UEFI boot services and jumping to the kernel entry point.
 
 The bootloader is designed to be modular, with clear separation between user interface, hardware detection, and kernel loading logic.

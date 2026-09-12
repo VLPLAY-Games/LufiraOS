@@ -12,10 +12,12 @@ This document describes the device drivers included in the LufiraOS kernel. The 
 4. [Disk Driver (ATA PIO)](#disk-driver-ata-pio)
 5. [Keyboard Driver (PS/2)](#keyboard-driver-ps2)
 6. [Mouse Driver (PS/2)](#mouse-driver-ps2)
-7. [PCI Bus Driver](#pci-bus-driver)
-8. [AC’97 Audio Driver](#ac97-audio-driver)
-9. [Driver Initialisation Sequence](#driver-initialisation-sequence)
-10. [Future Extensions](#future-extensions)
+7. [USB (UHCI + HID)](#usb-uhci--hid)
+8. [Input Dispatcher](#input-dispatcher)
+9. [PCI Bus Driver](#pci-bus-driver)
+10. [AC’97 Audio Driver](#ac97-audio-driver)
+11. [Driver Initialisation Sequence](#driver-initialisation-sequence)
+12. [Future Extensions](#future-extensions)
 
 ---
 
@@ -27,10 +29,11 @@ The driver subsystem provides hardware abstraction for essential peripherals:
 - **Disk** – ATA PIO read/write for raw sector access (primary IDE channel).
 - **Keyboard** – PS/2 keyboard with scancode translation, modifier handling, and IRQ1 interrupt support.
 - **Mouse** – PS/2 mouse initialisation and packet decoding.
+- **USB** – a UHCI host‑controller driver plus a USB HID boot‑protocol keyboard/mouse driver, unified with PS/2 through a shared input dispatcher.
 - **PCI** – bus enumeration, configuration space access, and BAR (Base Address Register) management.
 - **AC’97** – audio controller (Intel ICH‑compatible) with DMA‑based playback and tone generation.
 
-Drivers are designed to be initialised early in the kernel boot process, after the physical memory manager (PMM) and interrupt descriptor table (IDT) are set up. All drivers are polled or interrupt‑driven; the console is used for debugging and user interaction.
+Drivers are designed to be initialised early in the kernel boot process, after the physical memory manager (PMM) and interrupt descriptor table (IDT) are set up. All drivers are polled or interrupt‑driven; the console is used for debugging and user interaction. Most drivers' verbose status output is gated by **developer mode** (see [`04_logging.md`](04_logging.md)) — by default only errors and a handful of high-level "ready/not ready" lines are shown; enable it with the `devmode` shell command or `make debug` to see per‑device/per‑register detail.
 
 ---
 
@@ -133,6 +136,8 @@ The keyboard driver handles a standard PS/2 keyboard connected to port `0x60`/`0
 
 The driver also maintains a global `input_buffer` used by the shell for command input.
 
+**Known Issue:** holding a key down does not repeat it — only the initial keypress is registered. This applies to both the PS/2 and USB HID paths; see [README.md § Known Issues](../README.md#known-issues-and-limitations).
+
 ---
 
 ## Mouse Driver (PS/2)
@@ -155,6 +160,37 @@ The mouse driver initialises a PS/2 mouse (auxiliary device) and processes stand
 | `mouse_is_initialized()` | Returns 1 if mouse is ready. |
 
 **Note:** The driver does not currently expose the mouse state to userspace; it is a stub for future GUI integration.
+
+---
+
+## USB (UHCI + HID)
+
+LufiraOS speaks USB through a **UHCI** (Universal Host Controller Interface) driver plus a **USB HID boot-protocol** decoder — enough to support the simple keyboards and mice QEMU emulates (`-device usb-kbd -device usb-mouse`), without a general-purpose USB stack.
+
+### UHCI Host Controller (`drivers/usb/uhci.c`)
+
+- Found via PCI (class `0x0C`, subclass `0x03`, prog-if `0x00`); disables legacy BIOS PS/2 emulation (`USBLEGSUP`) so the controller isn't fought over.
+- Global and host-controller reset, followed by building a 1024-entry Frame List that permanently links a control queue head (QH) into every slot (rather than only slot 0), so control transfers don't have to wait up to ~1 second for the frame counter to wrap back around.
+- Root-hub port detection and reset (2 ports), followed by standard USB enumeration (GET_DESCRIPTOR, SET_ADDRESS, GET_DESCRIPTOR again, SET_CONFIGURATION) for any connected device.
+- Looks for a boot-protocol HID interface (keyboard or mouse) in the device's configuration descriptor; if found, arms a permanent interrupt transfer (a self-re-arming Transfer Descriptor on its own queue head, ahead of the control QH in the Frame List) that delivers new HID reports without polling the device from software.
+- `usb_poll()`, called once per timer tick from `timer_irq_handler()`, checks whether the armed interrupt transfer(s) completed and, if so, decodes the report and re-arms them for the next one.
+
+### USB HID Decoder (`drivers/usb/usb_hid.c`)
+
+- Decodes 8-byte boot-protocol keyboard reports (modifier byte + up to 6 simultaneous usage codes) and 3–4 byte boot-protocol mouse reports (buttons + relative X/Y).
+- Translates HID usage codes to the same ASCII/`KEY_*` values the PS/2 driver produces, and tracks Ctrl state explicitly so `Ctrl+C` and `Ctrl`+arrow history scrolling work identically regardless of which input path delivered the keystroke.
+- Feeds decoded events into the same `input_keyboard_event()`/`input_mouse_event()` entry points as PS/2 — see [Input Dispatcher](#input-dispatcher) below.
+
+**Limitations:** UHCI only (no OHCI/EHCI/xHCI); boot-protocol HID only (no report descriptor parsing, so multimedia keys, N-key rollover beyond 6 keys, and non-boot devices are unsupported); no USB mass storage.
+
+---
+
+## Input Dispatcher
+
+Because QEMU (and potentially real hardware) can deliver the *same* physical keystroke through both the PS/2 controller (immediately, via IRQ1) and a USB HID keyboard (polled once per timer tick, so up to ~10 ms later), `drivers/input/input.c` provides a single funnel — `input_keyboard_event()`/`input_mouse_event()` — that both drivers call into, rather than each driver talking to the shell directly.
+
+- **Debouncing:** a duplicate of the same key arriving again within a few timer ticks is dropped, so one physical keystroke can't be processed twice (which previously caused `run`/`runbg` to execute the same command twice from a single Enter press — with the second execution starting from inside the timer IRQ and corrupting the heap).
+- **Key routing:** arrow keys, Tab, Ctrl+C, Enter, and Backspace are routed to their dedicated shell handlers; anything else becomes a regular character passed to `shell_handle_char()`.
 
 ---
 
@@ -231,14 +267,15 @@ The AC’97 driver supports Intel ICH‑compatible audio controllers (PCI class 
 
 Drivers are initialised in a specific order after the kernel sets up the physical memory manager and interrupt handling:
 
-1. **PCI** – `pci_init()` enumerates all devices.
-2. **Console** – `initialize_console()` uses the `BootInfo` from the bootloader.
-3. **Keyboard** – `keyboard_init()` (IRQ1 enabled later).
-4. **Mouse** – `mouse_init()` (IRQ12 enabled later).
+1. **Console** – `initialize_console()` uses the `BootInfo` from the bootloader (the very first step of all, before even the GDT).
+2. **Keyboard** – `keyboard_init()` (IRQ1 enabled later).
+3. **Mouse** – `mouse_init()` (IRQ12 enabled later).
+4. **PCI** – `pci_init()` enumerates all devices.
 5. **AC’97** – `ac97_init()` depends on PCI and PMM.
-6. **Disk** – optional; can be used by filesystem code later.
+6. **UHCI/USB** – `uhci_init()`, after interrupts are enabled (needs the PIT ticking for real millisecond delays during controller reset).
+7. **Disk** – optional; can be used by filesystem code later.
 
-Interrupt handlers are registered in the IDT before enabling IRQs.
+Interrupt handlers are registered in the IDT before enabling IRQs. See [`02_kernel_init.md`](02_kernel_init.md) for the complete, authoritative boot order.
 
 ---
 

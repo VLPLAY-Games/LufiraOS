@@ -30,7 +30,7 @@ The `BootInfo` structure is the single most important piece of data passed from 
 - **Memory**: Total RAM and the UEFI memory map for physical memory management.
 - **Kernel**: The location and size of the kernel image for memory reservation.
 - **System Tables**: ACPI RSDP and SMBIOS addresses for hardware discovery.
-- **Filesystem**: A FAT image loaded into memory for the kernel's filesystem.
+- **Filesystem**: The entire raw disk, loaded into memory as one image (the field names still say "FAT" — they predate LufiraFS — but the image itself contains a small FAT12 ESP followed by the LufiraFS region the kernel actually mounts; see `08_filesystem.md`).
 
 The structure is defined in `bootinfo.h` and is filled by the bootloader during the UEFI boot process. It is passed to the kernel's entry point as a single pointer.
 
@@ -212,7 +212,7 @@ The `BootInfo` structure is used by several kernel subsystems during initialis
 | Console                         | `FrameBufferBase`, `FrameBufferSize`, `HorizontalResolution`, `VerticalResolution`, `PixelsPerScanLine`, `PixelFormat` | Set up graphical console                                |
 | PMM                             | `MemoryMap`, `MemoryMapSize`, `MemoryMapDescriptorSize`, `KernelBase`, `KernelSize`                                    | Physical memory management                              |
 | Paging                          | `MemoryMap`                                                                                                            | Determine maximum physical address for identity mapping |
-| FAT                             | `FATImageBase`, `FATImageSize`                                                                                         | Mount filesystem                                        |
+| LufiraFS                        | `FATImageBase`, `FATImageSize`                                                                                         | Mount LufiraFS over `FATImageBase + LUFIRAFS_ESP_SIZE` (see `08_filesystem.md`) |
 | ACPI                            | `RsdpAddress`                                                                                                          | Initialise ACPI for shutdown                            |
 
 **Initialisation Order in Kernel:**
@@ -221,9 +221,9 @@ The `BootInfo` structure is used by several kernel subsystems during initialis
 2. PMM uses memory map and kernel fields.
 3. Paging uses memory map to determine max physical address.
 4. Heap uses paging and PMM.
-5. FAT uses FAT image fields.
+5. LufiraFS uses the raw disk image fields (offset by the FAT12 ESP size).
 6. ACPI uses RSDP address.
-7. VFS uses FAT.
+7. VFS uses LufiraFS.
 8. Drivers use PCI and PMM.
 
 ---
@@ -279,7 +279,7 @@ The kernel validates some fields of the `BootInfo` structure:
 | `MemoryMap`                       | Non-NULL               | Kernel halts if memory map is missing.     |
 | `MemoryMapSize`                   | > 0                    | Kernel halts if size is zero.              |
 | `KernelSize`                      | > 0                    | Kernel continues (should always be valid). |
-| `FATImageBase`                    | Checked by FAT driver  | Warning printed if image is missing.       |
+| `FATImageBase`                    | Checked by LufiraFS mount code | Warning printed if image is missing.       |
 | `RsdpAddress`                     | Checked by ACPI driver | Warning printed if RSDP is missing.        |
 
 **What Happens on Error:**
@@ -297,6 +297,6 @@ For more details, refer to the source code in `bootinfo.h` and the bootloader 
 
 ---
 
-**Document Version:** 1.0
+**Document Version:** 1.1
 **Last Updated:** September 2026
 **Project:** LufiraOS

@@ -18,7 +18,7 @@ This document provides comprehensive documentation for the kernel entry point, i
    - [6. Physical Memory Manager (PMM)](#6-physical-memory-manager-pmm)
    - [7. Paging](#7-paging)
    - [8. Heap Initialisation](#8-heap-initialisation)
-   - [9. FAT Filesystem](#9-fat-filesystem)
+   - [9. LufiraFS Filesystem](#9-lufirafs-filesystem)
    - [10. ACPI](#10-acpi)
    - [11. Process Manager](#11-process-manager)
    - [12. PIT Timer](#12-pit-timer)
@@ -29,7 +29,8 @@ This document provides comprehensive documentation for the kernel entry point, i
    - [17. PCI Bus](#17-pci-bus)
    - [18. AC'97 Audio](#18-ac97-audio)
    - [19. Enable Interrupts and IRQs](#19-enable-interrupts-and-irqs)
-   - [20. Create Shell Process](#20-create-shell-process)
+   - [20. UHCI/USB Controller](#20-uhciusb-controller)
+   - [21. Create Shell Process](#21-create-shell-process)
 5. [Main Loop (Idle Loop)](#main-loop-idle-loop)
 6. [Test System Call Process](#test-system-call-process)
 7. [Boot Info Structure](#boot-info-structure)
@@ -47,7 +48,8 @@ The kernel initialisation process is the heart of LufiraOS. It sets up all subsy
 - **Monolithic Design** – all subsystems are initialised in a single boot process.
 - **Early Console** – the graphical console is available from the very beginning.
 - **Interrupt Management** – interrupts are disabled during initialisation and enabled only when the system is ready.
-- **Comprehensive Logging** – all steps use coloured log macros (LOG_PENDING, LOG_DONE_OK, etc.).
+- **Comprehensive Logging** – all steps use coloured log macros (LOG_PENDING, LOG_DONE_OK, etc.), which are only visible when developer mode is enabled — see [`04_logging.md`](04_logging.md). Errors and warnings (LOG_FAIL, LOG_WARN) always print.
+- **Quiet Boot** – with developer mode off, the verbose log is replaced by a boot logo; the screen is cleared once initialisation finishes and the shell takes over.
 - **Cooperative Scheduling** – the scheduler is started after all subsystems are ready.
 
 ---
@@ -62,7 +64,9 @@ The kernel entry point is `_start`, defined with a special section attribute tha
 **First Actions:**
 1. Disable interrupts to ensure no interruptions occur during initialisation.
 2. Initialise the console to set up the framebuffer and colour palette.
-3. Begin logging using the coloured logging macros for status updates.
+3. Read the developer-mode flag directly off the raw disk image (`devmode_probe_early()`, see [`04_logging.md`](04_logging.md)) — before the filesystem is properly mounted, so even the very first log lines know whether to print.
+4. If developer mode is off, show the boot logo (a large scaled "LufiraOS" wordmark) instead of the verbose text log.
+5. Begin logging using the coloured logging macros for status updates (only visible with developer mode on).
 
 ---
 
@@ -78,7 +82,7 @@ The kernel performs the following steps in strict order:
 6. Physical Memory Manager (PMM)
 7. Paging
 8. Heap Initialisation
-9. FAT Filesystem
+9. LufiraFS Filesystem
 10. ACPI
 11. Process Manager
 12. PIT Timer
@@ -89,8 +93,9 @@ The kernel performs the following steps in strict order:
 17. PCI Bus
 18. AC'97 Audio
 19. Enable Interrupts and IRQs
-20. Create Shell Process
-21. Enter Main Loop
+20. UHCI/USB Controller
+21. Create Shell Process
+22. Enter Main Loop
 
 ---
 
@@ -282,24 +287,21 @@ The kernel performs the following steps in strict order:
 
 ---
 
-### 9. FAT Filesystem
+### 9. LufiraFS Filesystem
 
-**Function:** fat_init()
+**Function:** lufirafs_init()
 
-**Location:** fs/fat/fat.c
+**Location:** fs/lufirafs/lufirafs.c
 
-**Purpose:** Mounts the FAT filesystem image loaded by the bootloader.
+**Purpose:** Mounts LufiraFS, LufiraOS's own filesystem, over the part of the raw disk image that isn't the small FAT12 ESP UEFI firmware requires (see [`08_filesystem.md`](08_filesystem.md) for the full disk layout).
 
 **Process:**
-1. Parse the boot sector (BPB) to determine:
-   - FAT type (12, 16, or 32)
-   - Sector size and cluster size
-   - FAT location and size
-   - Root directory location
-2. Initialise the dirty sector bitmap for tracking modified sectors.
-3. Store the image pointer and filesystem state for later use.
+1. Copy the superblock from `bi->FATImageBase + LUFIRAFS_ESP_SIZE` and validate its magic number and block size.
+2. Allocate a dirty-block bitmap for tracking modified blocks (requires the heap, hence this step runs after heap initialisation).
+3. Set the global `lufirafs_mounted` flag on success.
+4. Read the real developer-mode flag from disk (`devmode_init()`) and create `/logs/system.log` if it doesn't already exist (`klog_init()`) — this supersedes the raw pre-mount guess made by `devmode_probe_early()` in step 1 of [Entry Point](#entry-point).
 
-**Result:** The filesystem is ready for file operations.
+**Result:** The filesystem is ready for file operations. If mounting fails (bad magic, wrong block size, or no disk image at all), a warning is printed and the kernel continues — but almost nothing that depends on persistent storage will work.
 
 ---
 
@@ -495,9 +497,25 @@ After all subsystems are initialised, the kernel enables interrupts and specific
 
 **Why IRQ2?** IRQ2 is the cascade line from the slave PIC; it must be enabled for slave IRQs (8–15) to work.
 
+A persistent flag (`cpu_mark_interrupts_active()`) is set right after this step — it records that interrupts have been enabled at least once this boot, and is what the shell's `status` command reports, since the live EFLAGS.IF bit is misleading when read from inside a synchronous IRQ-handler-driven shell command (see [`14_shell_commands.md`](14_shell_commands.md)).
+
 ---
 
-### 20. Create Shell Process
+### 20. UHCI/USB Controller
+
+**Function:** uhci_init()
+
+**Location:** drivers/usb/uhci.c
+
+**Purpose:** Finds a UHCI host controller on the PCI bus, resets it, and enumerates any connected USB devices, arming a boot-protocol HID keyboard/mouse if found.
+
+**Why after enabling interrupts?** UHCI's controller reset sequence uses `pit_wait_ms()` for real millisecond delays, which requires the PIT to already be ticking — that only happens once `sti`/`irq_enable(0)` have run.
+
+**Result:** Detected USB keyboards/mice are polled once per timer tick (`usb_poll()`, called from `timer_irq_handler()`) and fed into the same `drivers/input` dispatcher as the PS/2 keyboard and mouse.
+
+---
+
+### 21. Create Shell Process
 
 **Function:** process_create()
 
@@ -546,7 +564,7 @@ The BootInfo structure is passed from the bootloader and contains:
 - Memory information (total memory, memory map, descriptor size)
 - Kernel information (base address, size)
 - System table addresses (ACPI RSDP, SMBIOS)
-- FAT image information (base address, size)
+- Raw disk image information (`FATImageBase`/`FATImageSize` — the field names predate LufiraFS; the image contains both the FAT12 ESP and the LufiraFS region, see [`08_filesystem.md`](08_filesystem.md))
 
 For more details, see the BootInfo Documentation.
 
@@ -560,12 +578,13 @@ For more details, see the BootInfo Documentation.
 | PMM | BootInfo (memory map) |
 | Paging | PMM |
 | Heap | Paging, PMM |
-| FAT | BootInfo (FAT image) |
+| LufiraFS | BootInfo (raw disk image), Heap |
 | ACPI | BootInfo (RSDP address) |
-| VFS | FAT |
+| VFS | LufiraFS |
 | Process Manager | GDT, TSS, PMM, Paging, Heap |
 | System Calls | Process Manager, VFS, PIT |
 | Drivers | PCI, PMM, Console |
+| UHCI/USB | PCI, PIT (post-`sti`) |
 
 ---
 
@@ -574,7 +593,7 @@ For more details, see the BootInfo Documentation.
 - **PMM**: If bitmap allocation fails, the kernel halts with an infinite loop.
 - **Paging**: If a page table cannot be allocated, the kernel halts.
 - **Heap**: If the heap cannot be mapped, the kernel halts.
-- **FAT**: If mounting fails, a warning is printed, but the kernel continues.
+- **LufiraFS**: If mounting fails, a warning is printed, but the kernel continues (almost nothing persistent will work).
 - **ACPI**: If initialisation fails, a warning is printed, but the kernel continues.
 - **Drivers**: Most drivers continue even if they fail (mouse, audio, etc.).
 
@@ -588,6 +607,6 @@ For more details, refer to the source code in kernel.c and the individual subsys
 
 ---
 
-**Document Version:** 1.0  
+**Document Version:** 1.1  
 **Last Updated:** September 2026  
 **Project:** LufiraOS

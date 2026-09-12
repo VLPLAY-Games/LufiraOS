@@ -22,10 +22,11 @@ This document describes the interactive shell and the built-in command set of Lu
 4. [Command Reference](#command-reference)
 5. [Integration with Kernel Components](#integration-with-kernel-components)
    - [Keyboard Driver](#keyboard-driver)
-   - [Filesystem (FAT/VFS)](#filesystem-fatvfs)
+   - [Filesystem (LufiraFS/VFS)](#filesystem-lufirafsvfs)
    - [Process Manager and ELF Loader](#process-manager-and-elf-loader)
    - [Audio (AC'97)](#audio-ac97)
    - [ACPI](#acpi)
+   - [Developer Mode and Logging](#developer-mode-and-logging)
 6. [Future Extensions](#future-extensions)
 
 ---
@@ -100,7 +101,7 @@ Tab completion matches the current input against a list of built-in commands:
 2. **Single Match** – auto-complete the command and add a space.
 3. **Multiple Matches** – display all matches and re-display the prompt.
 
-**Command List:** Built-in commands: help, clear, reboot, shutdown, version, echo, history, status, trap, color, colors, fg, bg, reset, pwd, cd, ls, mkdir, rm, touch, cat, run, runbg, write, beep, mixer, music, ps, kill.
+**Command List:** Built-in commands: help, clear, reboot, shutdown, version, echo, history, status, trap, color, colors, fg, bg, reset, pwd, cd, ls, mkdir, rm, touch, cat, cp, mv, rename, write, edit, df, du, devmode, run, runbg, exec, beep, mixer, music, kill, wait.
 
 ### Current Working Directory
 
@@ -109,7 +110,7 @@ The shell maintains two global variables:
 | Variable | Description |
 |----------|-------------|
 | `cwd_path[256]` | The current directory path as a string (e.g., `/home/user`). |
-| `cwd_first_cluster` | The FAT cluster number of the current directory (`0` = root). |
+| `cwd_inode` | The LufiraFS inode number of the current directory (`LUFIRAFS_ROOT_INODE` = root). Renamed from `cwd_first_cluster` when the shell moved from FAT to LufiraFS. |
 
 **Commands that use CWD:**
 - `pwd` – prints the current path.
@@ -137,6 +138,7 @@ The shell maintains two global variables:
 | `trap` | Triggers test exceptions (`int3`, `ud2`, `pf`, `cli`, `sti`, `hlt`). |
 | `echo` | Prints the given text. |
 | `history` | Displays the command history. |
+| `devmode [on\|off]` | Shows or toggles developer mode (verbose driver/boot output) — see [`04_logging.md`](04_logging.md). |
 
 ### Colour Commands
 
@@ -165,7 +167,7 @@ The shell maintains two global variables:
 |---------|-------------|
 | `pwd` | Prints the current working directory. |
 | `cd <dir>` | Changes the current directory (supports `..`). |
-| `ls [-l]` | Lists directory contents. `-l` shows long format (type, size, name). |
+| `ls [-l] [path]` | Lists directory contents, colourised (directories vs. files). Defaults to the current directory; `-l` shows long format (type, size, name); `[path]` lists a different directory. |
 | `mkdir <name>` | Creates a new directory. |
 | `rm <name>` or `rm *` | Removes a file or empty directory. `rm *` removes all items. |
 | `touch <filename>` | Creates an empty file. |
@@ -175,6 +177,8 @@ The shell maintains two global variables:
 | `cp <src> <dst>` | Copies a file. |
 | `mv <src> <dst>` | Moves/renames a file. |
 | `rename <old> <new>` | Renames a file (alias for `mv`). |
+| `df` | Shows LufiraFS free/used space and inode counts. |
+| `du [path]` | Shows disk usage (blocks actually occupied on disk) of a file or directory, defaulting to the current directory. |
 
 ### Process Commands
 
@@ -182,8 +186,10 @@ The shell maintains two global variables:
 |---------|-------------|
 | `run <filename>` | Loads an ELF file and runs it in the foreground (blocks the shell). |
 | `runbg <filename>` | Loads an ELF file and runs it in the background (shell returns immediately). |
+| `exec <filename>` | Replaces the shell's own process image with the given ELF program — does not return on success. |
 | `ps` | Lists running processes with PID, state, and name. |
-| `kill <pid>` | Terminates a process by PID. |
+| `kill [-SIGNAL] <pid>` | Sends a signal to a process (`-TERM`/`-KILL`/`-STOP`/`-CONT`, or numeric; default `-TERM`). |
+| `wait <pid>` | Blocks until the given child process exits, then prints its exit code. |
 
 ### Audio Commands
 
@@ -201,13 +207,14 @@ The shell maintains two global variables:
 |---------|--------|-------------|
 | `help` | `help` | Displays all commands. |
 | `clear` | `clear` | Clears screen and shows prompt. |
-| `reboot` | `reboot` | Flushes FAT and reboots. |
-| `shutdown` | `shutdown` | Flushes FAT and shuts down. |
+| `reboot` | `reboot` | Flushes LufiraFS and reboots. |
+| `shutdown` | `shutdown` | Flushes LufiraFS and shuts down. |
 | `version` | `version` | Shows kernel version. |
 | `status` | `status` | Shows interrupt and CPU status. |
 | `trap` | `trap <type>` | Triggers exception (`int3`, `ud2`, `pf`, `cli`, `sti`, `hlt`). |
 | `echo` | `echo <text>` | Prints the argument. |
 | `history` | `history` | Shows command history. |
+| `devmode` | `devmode [on\|off]` | Shows/toggles developer mode. |
 | `color` | `color <fg> [bg]` | Sets colours (hex index or RGB). |
 | `colors` | `colors` | Shows colour palette. |
 | `fg` | `fg <color>` | Sets foreground only. |
@@ -215,7 +222,7 @@ The shell maintains two global variables:
 | `reset` | `reset` | Resets to default colours. |
 | `pwd` | `pwd` | Shows current directory. |
 | `cd` | `cd <dir>` | Changes directory (supports `..`). |
-| `ls` | `ls [-l]` | Lists directory entries. |
+| `ls` | `ls [-l] [path]` | Lists directory entries, colourised. |
 | `mkdir` | `mkdir <name>` | Creates a directory. |
 | `rm` | `rm <name>` or `rm *` | Removes a file/directory (or all). |
 | `touch` | `touch <filename>` | Creates an empty file. |
@@ -225,10 +232,14 @@ The shell maintains two global variables:
 | `cp` | `cp <src> <dst>` | Copies a file. |
 | `mv` | `mv <src> <dst>` | Moves/renames a file. |
 | `rename` | `rename <old> <new>` | Renames a file. |
-| `run` | `run <filename>` | Executes an ELF program. |
+| `df` | `df` | Shows filesystem free/used space. |
+| `du` | `du [path]` | Shows disk usage of a file/directory. |
+| `run` | `run <filename>` | Executes an ELF program in the foreground. |
 | `runbg` | `runbg <filename>` | Executes an ELF program in background. |
+| `exec` | `exec <filename>` | Replaces the shell's own process image. |
 | `ps` | `ps` | Lists running processes. |
-| `kill` | `kill <pid>` | Terminates a process. |
+| `kill` | `kill [-SIGNAL] <pid>` | Sends a signal to a process (default `-TERM`). |
+| `wait` | `wait <pid>` | Waits for a child process to exit. |
 | `beep` | `beep` | Plays a beep. |
 | `mixer` | `mixer [0-100]` | Gets/sets audio volume. |
 | `music` | `music` | Plays a test melody. |
@@ -241,9 +252,9 @@ The shell maintains two global variables:
 
 The shell receives keyboard input through the keyboard driver:
 
-1. Keyboard interrupt (IRQ1) → `keyboard_irq_handler()`.
-2. Scancode → ASCII conversion → `process_keypress()`.
-3. Shell handlers: `shell_handle_char()`, `shell_handle_backspace()`, etc.
+1. Keyboard interrupt (IRQ1, PS/2) or per-tick poll (USB HID) → `keyboard_scancode_to_key()` / `usb_hid_keyboard_report()`.
+2. Both paths funnel into the shared input dispatcher, `input_keyboard_event()` (see [`07_drivers.md` § Input Dispatcher](07_drivers.md#input-dispatcher)), which debounces duplicate keystrokes delivered by both input paths.
+3. Shell handlers: `shell_handle_char()`, `shell_handle_backspace()`, `shell_handle_ctrl_c()`, etc.
 
 **Key Mapping:**
 
@@ -257,30 +268,34 @@ The shell receives keyboard input through the keyboard driver:
 | Up arrow | `shell_handle_up_arrow()` |
 | Down arrow | `shell_handle_down_arrow()` |
 | Tab | `shell_handle_tab()` |
+| Ctrl+C | `shell_handle_ctrl_c()` — signals the foreground process (see [`12_elf_processes.md` § Signals and kill](12_elf_processes.md#signals-and-kill)). |
 
-### Filesystem (FAT/VFS)
+### Filesystem (LufiraFS/VFS)
 
-Filesystem commands use the FAT driver and VFS:
+Filesystem commands call the LufiraFS driver directly (with `cwd_inode` for cwd-relative resolution), rather than going through the VFS — see [`08_filesystem.md`](08_filesystem.md):
 
-- `ls` – uses `fat_opendir()` and `fat_readdir()` to list directory entries.
-- `cd` – uses `fat_find_entry()` to locate a directory and updates CWD.
-- `mkdir` – calls `fat_mkdir()`.
-- `rm` – calls `fat_rm()`.
-- `touch` – calls `fat_create_file()`.
-- `cat` – calls `fat_open()` and `fat_read_file()`.
-- `write` – calls `fat_write_file()`.
-- `edit` – calls `fat_append_file()`.
+- `ls`/`du` – use `lufirafs_opendir()`/`lufirafs_readdir()` to list directory entries; `ls` colourises directories vs. files and accepts an optional path argument, resolved via `lufirafs_lookup()`.
+- `cd` – uses `lufirafs_lookup()` (a real `..`/`.` directory entry, not a special case) to locate a directory and updates CWD.
+- `mkdir` – calls `lufirafs_create()` with `LUFIRAFS_MODE_DIR`.
+- `rm` – calls `lufirafs_unlink()`.
+- `touch` – calls `lufirafs_create()` with `LUFIRAFS_MODE_FILE`.
+- `cat` – calls `lufirafs_lookup()`/`lufirafs_read_inode()`/`lufirafs_read()`, allocating exactly `inode.size` bytes.
+- `write` – calls `lufirafs_truncate()` then `lufirafs_write()`.
+- `edit` – calls `lufirafs_write()` at the file's current end (append).
 - `cp` – reads the source file and writes to the destination.
-- `mv` – copies the file and deletes the source.
+- `mv`/`rename` – calls `lufirafs_create()` + copies the content, then `lufirafs_unlink()`s the source.
+- `df` – reads free/used block and inode counts straight from the superblock.
 
 ### Process Manager and ELF Loader
 
-Process commands use the process manager and ELF loader:
+Process commands use the process manager and ELF loader — see [`12_elf_processes.md`](12_elf_processes.md):
 
 - `run` – calls `elf_exec()` (foreground, blocks shell).
 - `runbg` – calls `elf_exec_background()` (background, returns immediately).
+- `exec` – calls `do_exec()` → `elf_exec_replace()` (in-place, does not return on success).
 - `ps` – calls `process_ps()` to list all processes.
-- `kill` – calls `process_kill()` to terminate a process.
+- `kill` – calls `process_signal()` with the requested signal (`process_kill()` is just `process_signal(pid, SIGKILL)`).
+- `wait` – calls `process_wait()`, blocking until the given child exits.
 
 ### Audio (AC'97)
 
@@ -297,6 +312,10 @@ The `shutdown` command uses ACPI:
 - `acpi_shutdown()` – performs ACPI S5 shutdown.
 - Falls back to legacy ports if ACPI is not available.
 
+### Developer Mode and Logging
+
+The `devmode` command wraps `devmode_set()`/`devmode_is_enabled()` from `system/devmode/` — see [`04_logging.md`](04_logging.md) for the full design. Regardless of developer mode, several commands (`run`, `runbg`) call `klog()` to record what they did to `/logs/system.log`, which can be read back with the ordinary `cat` command.
+
 ---
 
 ## Conclusion
@@ -307,6 +326,6 @@ For more details, refer to the source code in `shell/` and `shell/commands/`.
 
 ---
 
-**Document Version:** 1.0  
+**Document Version:** 1.1  
 **Last Updated:** September 2026  
 **Project:** LufiraOS

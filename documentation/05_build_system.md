@@ -32,7 +32,8 @@ The LufiraOS build system is designed to be simple, fast, and self-contained. It
 - Compile the UEFI bootloader using the GNU-EFI framework.
 - Compile the kernel using GCC with custom flags.
 - Link the kernel using a custom linker script.
-- Create a bootable disk image with a FAT filesystem.
+- Build the host-side `mkfs_lufirafs` tool and use it to format/populate the LufiraFS region of the disk image.
+- Create a bootable disk image with a small FAT12 ESP (for UEFI firmware) followed by a LufiraFS region.
 - Launch the system in QEMU for testing and debugging.
 
 **Key Features:**
@@ -101,7 +102,8 @@ All build artefacts are placed in the `build/` directory:
 | `BOOTX64.EFI` | UEFI bootloader binary. |
 | `kernel.bin` | Raw kernel binary (for bootloader to load). |
 | `kernel.elf` | Kernel ELF file with debug symbols. |
-| `disk.img` | Complete bootable disk image (FAT12 formatted). |
+| `mkfs_lufirafs` | Host-compiled tool for formatting/populating the LufiraFS region (see [`08_filesystem.md`](08_filesystem.md)). |
+| `disk.img` | Complete bootable disk image: a FAT12 ESP followed by a LufiraFS region. |
 | `*.o` | Object files for each source file. |
 
 **Build Directory Structure:**
@@ -178,25 +180,23 @@ build/
 
 ### Disk Image Creation
 
-1. **Create an empty disk image** using `dd` (512 KiB initially).
+The disk image (16 MiB by default, `DISK_TOTAL_SIZE`) is built in two independent stages that are then concatenated. `LUFIRAFS_ESP_SIZE` (4 MiB) must match the constant of the same name in `kernel/fs/lufirafs/lufirafs_format.h` — a mismatch means `mkfs_lufirafs` formats a different byte range than the one the kernel actually mounts.
 
-2. **Format as FAT12** using `mkfs.fat`:
-   - File Allocation Table: 12-bit (`-F 12`)
-   - Sector size: 512 bytes (`-S 512`)
+**Stage 1 — the ESP (FAT12, read by UEFI firmware):**
 
-3. **Create directories** using `mmd`:
-   - `:/EFI`
-   - `:/EFI/BOOT`
+1. Create an empty `build/esp.img` sized `LUFIRAFS_ESP_SIZE` using `dd`.
+2. Format it as FAT12 using `mkfs.fat -F 12 -S 512`.
+3. Create `::/EFI` and `::/EFI/BOOT` using `mmd`.
+4. Copy `build/BOOTX64.EFI` → `::/EFI/BOOT/BOOTX64.EFI` and `build/kernel.bin` → `::/kernel.bin` using `mcopy`.
+5. `dd` this ESP image into `disk.img` at offset 0 (`conv=notrunc`).
 
-4. **Copy the bootloader** using `mcopy`:
-   - `build/BOOTX64.EFI` → `:/EFI/BOOT/BOOTX64.EFI`
+**Stage 2 — the LufiraFS region:**
 
-5. **Copy the kernel** using `mcopy`:
-   - `build/kernel.bin` → `:/kernel.bin`
+6. Build `build/mkfs_lufirafs` (a normal hosted C program) from `tools/mkfs_lufirafs.c`.
+7. `mkfs_lufirafs format` writes a fresh LufiraFS superblock/bitmap/inode table into the remaining `LUFIRAFS_REGION_SIZE` bytes of `disk.img`.
+8. `mkfs_lufirafs mkdir`/`put` create `/test`, `/system`, `/logs`, and `/readme.txt`.
 
-6. **Create additional directories and test files**:
-   - `/test` directory
-   - `/readme.txt` with a greeting message
+See [`08_filesystem.md`](08_filesystem.md) for the on-disk format itself.
 
 ---
 
@@ -239,7 +239,9 @@ make debug
 - Debug logging: `-d cpu_reset,guest_errors`
 - Log output: `build/qemu_debug.log`
 
-**Use Case:** Useful for diagnosing early boot failures, page faults, and CPU exceptions.
+Before launching QEMU, the `debug` target writes a `/system/devmode.flag` marker file into `disk.img` (via `mkfs_lufirafs put`), which enables [developer mode](04_logging.md) automatically — every `make debug` run shows the full verbose boot/driver log. This step is idempotent, so running `make debug` repeatedly against the same image is safe. `make run` does **not** touch the flag, so it always starts with whatever developer-mode state the disk image already has (off, by default, on a freshly built image).
+
+**Use Case:** Useful for diagnosing early boot failures, page faults, CPU exceptions, and driver issues that developer mode's verbose log would otherwise hide.
 
 ### Monitor Mode
 
@@ -273,35 +275,28 @@ telnet localhost 4444
 
 ## Adding Files to the Disk Image
 
-### Using MTOOLS
+**Important:** `mtools` (`mcopy`/`mmd`) only understands the FAT12 ESP region — it cannot see or modify the LufiraFS region at all. Since the ESP is meant to hold only `/EFI/BOOT/BOOTX64.EFI` and `/kernel.bin` (see [`08_filesystem.md`](08_filesystem.md)), use `mkfs_lufirafs` to add anything else to the disk image.
 
+### Using `mkfs_lufirafs`
 
+```bash
+build/mkfs_lufirafs put   build/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) hello.elf /hello.elf
+build/mkfs_lufirafs mkdir build/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /newdir
 ```
-mcopy -i build/disk.img hello.elf ::/hello.elf
-mmd -i build/disk.img ::/newdir
-```
 
+`put` creates parent directories as needed; `mkdir` behaves like `mkdir -p`.
 
 ### Using Automatic Copy with Make
 
-The `make run` target can automatically copy files from the project root:
-
-
-```
-# Add to Makefile
-mcopy -i build/disk.img hello.elf ::/hello.elf
-```
-
+The `run` target already does this for the bundled test programs — see the `$(BUILD_DIR)/mkfs_lufirafs put ...` lines right before the `qemu-system-x86_64` invocation in the Makefile. Add another line there, following the same pattern, to bundle additional files on every `make run`.
 
 ### Checking Disk Contents
 
-
-```
-make check-disk
-mdir -i build/disk.img ::/
-mdir -i build/disk.img ::/EFI/BOOT/
+```bash
+make check-disk        # runs `file build/disk.img` — confirms it is a valid disk image
 ```
 
+There is currently no `mkfs_lufirafs` subcommand to list a directory's contents from the host side — boot the image and use the shell's `ls`/`cat` commands instead.
 
 ---
 
@@ -319,16 +314,19 @@ lufiraos/
 ├── kernel/                    # Kernel sources
 │   ├── kernel.c               # Kernel entry and init
 │   ├── linker.ld              # Linker script
-│   ├── drivers/               # Device drivers
-│   ├── fs/                    # Filesystem (FAT, VFS)
+│   ├── drivers/               # Device drivers (incl. usb/, input/)
+│   ├── fs/                    # Filesystem (lufirafs/, vfs/, legacy fat/)
 │   ├── lib/                   # System libraries
 │   ├── shell/                 # Shell and commands
-│   └── system/                # Kernel subsystems
+│   └── system/                # Kernel subsystems (incl. devmode/, klog/)
+├── tools/                     # Host-side build tools
+│   └── mkfs_lufirafs.c        # LufiraFS formatting/populating tool
 ├── build/                     # Build artefacts (created)
 │   ├── BOOTX64.EFI            # EFI bootloader
 │   ├── kernel.bin             # Kernel binary
 │   ├── kernel.elf             # Kernel with symbols
-│   └── disk.img               # Complete disk image
+│   ├── mkfs_lufirafs          # Host tool binary
+│   └── disk.img               # Complete disk image (ESP + LufiraFS)
 ├── Makefile                   # Build system
 └── README.md                  # Project documentation
 ```

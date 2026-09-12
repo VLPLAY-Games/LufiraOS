@@ -1,35 +1,38 @@
 # Filesystem Subsystem
 
-This document describes the filesystem subsystem of LufiraOS, which consists of a FAT12/16/32 driver and a Virtual Filesystem (VFS) abstraction layer. Together, they provide persistent storage access and a uniform API for file operations.
+This document describes the filesystem subsystem of LufiraOS, which consists of the **LufiraFS** driver (the primary, custom filesystem) and a Virtual Filesystem (VFS) abstraction layer. Together, they provide persistent storage access and a uniform API for file operations.
 
 ---
 
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [FAT Driver](#fat-driver)
+2. [Disk Layout](#disk-layout)
+3. [Architecture](#architecture)
+4. [LufiraFS On-Disk Format](#lufirafs-on-disk-format)
+   - [Superblock](#superblock)
+   - [Block Bitmap](#block-bitmap)
+   - [Inode Table](#inode-table)
+   - [Directory Entries](#directory-entries)
+5. [LufiraFS Driver](#lufirafs-driver)
    - [Initialisation](#initialisation)
-   - [Boot Sector Parsing](#boot-sector-parsing)
-   - [FAT Types](#fat-types)
-   - [Directory Operations](#directory-operations)
+   - [Path Resolution](#path-resolution)
    - [File Operations](#file-operations)
-   - [Cluster Management](#cluster-management)
+   - [Directory Operations](#directory-operations)
    - [Dirty Tracking and Flushing](#dirty-tracking-and-flushing)
-4. [Virtual Filesystem (VFS)](#virtual-filesystem-vfs)
+6. [Virtual Filesystem (VFS)](#virtual-filesystem-vfs)
    - [Core Concepts](#core-concepts)
    - [Inodes](#inodes)
    - [File Descriptors](#file-descriptors)
    - [File Operations](#file-operations-1)
    - [Inode Operations](#inode-operations)
    - [Per-Process File Tables](#per-process-file-tables)
-5. [FAT VFS Wrapper](#fat-vfs-wrapper)
-   - [Private Data](#private-data)
-   - [Path Resolution](#path-resolution)
-   - [Directory Iteration](#directory-iteration)
-6. [Special Devices](#special-devices)
-7. [Dependencies](#dependencies)
-8. [Future Extensions](#future-extensions)
+7. [LufiraFS VFS Wrapper](#lufirafs-vfs-wrapper)
+8. [The `mkfs_lufirafs` Tool](#the-mkfs_lufirafs-tool)
+9. [Special Devices](#special-devices)
+10. [Legacy FAT Driver](#legacy-fat-driver)
+11. [Dependencies](#dependencies)
+12. [Future Extensions](#future-extensions)
 
 ---
 
@@ -37,13 +40,35 @@ This document describes the filesystem subsystem of LufiraOS, which consists of 
 
 The filesystem subsystem provides two main layers:
 
-**FAT Driver (Raw Layer)**
-The low-level implementation of the FAT12/16/32 filesystem. It operates on a disk image loaded into memory, manages clusters, parses directory entries, and supports read and write operations with dirty-block tracking.
+**LufiraFS Driver (Raw Layer)**
+The low-level implementation of LufiraOS's own filesystem. It operates on a disk image loaded into memory, manages data blocks via a bitmap, parses a fixed-size inode table, and supports read and write operations with dirty-block tracking.
 
 **Virtual Filesystem (VFS)**
-A generic abstraction layer that presents files, directories, and devices as inodes and file descriptors. It dispatches operations to the underlying filesystem driver and provides a unified API for userspace programs.
+A generic abstraction layer that presents files, directories, and devices as inodes and file descriptors. It dispatches operations to the underlying filesystem driver and provides a unified API for userspace programs and shell commands.
 
-This design allows the kernel to support multiple filesystem types in the future without changing the userspace API.
+LufiraFS was written to remove the dependency on FAT (and its limitations — root-directory-only lookups, no real `.`/`..` handling, hardcoded parent clusters in several commands) for anything beyond what UEFI firmware itself requires.
+
+---
+
+## Disk Layout
+
+UEFI firmware can only read FAT12/16/32 — this is a hard requirement of the UEFI specification, not a design choice. Because of this, the disk is split into two regions with no partition table:
+
+| Region | Size | Format | Contents |
+|--------|------|--------|----------|
+| ESP (Elementary/EFI System Partition) | `LUFIRAFS_ESP_SIZE` (4 MiB) | FAT12 | `/EFI/BOOT/BOOTX64.EFI`, `/kernel.bin` — read directly by UEFI firmware and the bootloader |
+| LufiraFS region | remaining space (12 MiB in the default 16 MiB disk image) | LufiraFS | everything else: user files, `/system`, `/logs`, etc. |
+
+The bootloader (`boot/loaders/fat_loader.c`) is unaware of this split — it already loads the **entire raw disk** into RAM starting at LBA 0 (`bi->FATImageBase`/`bi->FATImageSize`), regardless of what filesystem(s) live where. The kernel simply computes:
+
+```c
+void   *fs_image   = (void*)(bi->FATImageBase + LUFIRAFS_ESP_SIZE);
+uint32_t fs_size   = bi->FATImageSize - LUFIRAFS_ESP_SIZE;
+uint32_t lba_offset = LUFIRAFS_ESP_SIZE / 512;
+lufirafs_init(&lufirafs, fs_image, fs_size, lba_offset);
+```
+
+and mounts LufiraFS over the remaining bytes. `LUFIRAFS_ESP_SIZE` must be kept in sync between the kernel (`lufirafs_format.h`) and the `Makefile`'s image-build recipe — a mismatch means `mkfs_lufirafs` formats a different region than the one the kernel reads.
 
 ---
 
@@ -52,124 +77,117 @@ This design allows the kernel to support multiple filesystem types in the future
 The filesystem subsystem follows a layered architecture:
 
 **Userspace / Shell**
-Applications and shell commands use the VFS API for all file operations.
+Applications and shell commands use the VFS API (or, for shell commands that need cwd-relative resolution, the LufiraFS API directly) for all file operations.
 
 **VFS Layer**
-Provides a uniform interface for file operations. Dispatches calls to the appropriate filesystem driver via function pointers.
+Provides a uniform interface for file operations. Dispatches calls to the underlying filesystem driver via function pointers. VFS-facing lookups always resolve from the root inode, matching what userland ELF syscalls expect.
 
-**FAT VFS Wrapper**
-Converts VFS operations to FAT driver calls. Implements inode and file operations for FAT filesystems.
+**LufiraFS VFS Wrapper**
+Converts VFS operations to LufiraFS driver calls. Implements inode and file operations for LufiraFS.
 
-**FAT Driver**
-Low-level FAT implementation. Manages clusters, directory entries, and the disk image in memory.
+**LufiraFS Driver**
+Low-level implementation. Manages the block bitmap, inode table, directory entries, and the disk image in memory.
 
 **Disk Image (Memory)**
-The FAT image loaded by the bootloader, residing in physical memory.
+The LufiraFS region of the disk, loaded by the bootloader as part of the raw disk image, residing in physical memory.
 
 **ATA Driver**
-Only used during flush operations to write dirty sectors back to disk.
+Only used during flush operations (`lufirafs_sync()`/`lufirafs_flush()`) to write dirty blocks back to disk.
 
 ---
 
-## FAT Driver
+## LufiraFS On-Disk Format
 
-### Initialisation
+The on-disk format is defined once, in `kernel/fs/lufirafs/lufirafs_format.h`, and shared verbatim between the freestanding kernel driver and the hosted `tools/mkfs_lufirafs.c` tool — both include the exact same header, so the two sides can never disagree about layout arithmetic.
 
-The FAT driver is initialised by calling `fat_init()` with the memory address of the FAT image and its size. The function:
+The LufiraFS region is laid out as one contiguous sequence of fixed-size (4096-byte) blocks:
 
-1. Parses the boot sector (BPB) to determine filesystem parameters.
-2. Determines the FAT type (12, 16, or 32) based on the number of clusters.
-3. Calculates the locations of the FAT tables, root directory, and data region.
-4. Allocates a dirty sector bitmap for tracking modified sectors.
-5. Stores all information in the `fat_fs_t` structure.
+```
+block 0                                    superblock
+[bitmap_start .. +bitmap_blocks)           block bitmap (1 bit per block, including reserved blocks)
+[inode_table_start .. +inode_table_blocks) inode table (fixed size)
+[data_start .. total_blocks)               data blocks (file/directory contents)
+```
 
-### Boot Sector Parsing
+`lufirafs_compute_layout()` computes `bitmap_start`/`bitmap_blocks`/`inode_table_start`/`inode_table_blocks`/`data_start` from `total_blocks` — this is the single source of truth used by both the kernel and `mkfs_lufirafs`.
 
-The driver reads the following fields from the boot sector:
+### Superblock
 
 | Field | Description |
 |-------|-------------|
-| `bytes_per_sector` | Usually 512 bytes. |
-| `sectors_per_cluster` | Number of sectors in a cluster (1, 2, 4, 8, 16, 32, 64, 128). |
-| `reserved_sectors` | Number of reserved sectors before the FAT. |
-| `num_fats` | Number of FAT copies (usually 2). |
-| `root_entries` | Number of root directory entries (FAT12/16 only). |
-| `total_sectors_16` | Total sectors (16-bit field). |
-| `total_sectors_32` | Total sectors (32-bit field, used if 16-bit field is 0). |
-| `sectors_per_fat_16` | Sectors per FAT (16-bit field). |
-| `sectors_per_fat_32` | Sectors per FAT (32-bit field, FAT32 only). |
-| `media` | Media descriptor byte. |
-| `root_cluster` | First cluster of the root directory (FAT32 only). |
+| `magic` | `0x31534C4F` ("OLS1" in little-endian bytes) — identifies a formatted LufiraFS region. |
+| `version` | Format version (currently 1). |
+| `block_size` | Always 4096 bytes. |
+| `total_blocks` | Total blocks in the region. |
+| `bitmap_start` / `bitmap_blocks` | Location and size of the block bitmap. |
+| `inode_table_start` / `inode_table_blocks` | Location and size of the inode table. |
+| `inode_count` | Fixed at 512 inodes, independent of region size. |
+| `data_start` | First data block. |
+| `root_inode` | Inode number of `/` (always 1; inode 0 is reserved as "no inode"). |
+| `free_blocks` / `free_inodes` | Cached statistics for `df`/`du` — recomputed if they ever disagree with the bitmap. |
 
-### FAT Types
+### Block Bitmap
 
-The FAT type is determined by the number of clusters:
+One bit per block for the **entire** region, including the superblock, the bitmap itself, and the inode table — all of these are marked used at format time so the allocator never hands them out.
 
-| Type | Cluster Count |
-|------|---------------|
-| FAT12 | Less than 4085 |
-| FAT16 | 4085 to 65524 |
-| FAT32 | 65525 or more |
+### Inode Table
 
-### Directory Operations
+Fixed-size table of 512 inodes, 64 bytes each:
 
-**Opening a Directory**
-`fat_opendir()` initialises a directory iterator for the specified cluster (or root for FAT12/16).
+| Field | Description |
+|-------|-------------|
+| `mode` | `LUFIRAFS_MODE_FREE` (0), `LUFIRAFS_MODE_FILE` (1), or `LUFIRAFS_MODE_DIR` (2). |
+| `size` | Size in bytes (for directories, bytes of directory-entry data). |
+| `links_count` | ≥1 while the inode is live; 0 means free. |
+| `direct[12]` | 12 direct block pointers. |
+| `indirect` | One single-indirect block pointer (1024 more pointers). |
 
-**Reading Directory Entries**
-`fat_readdir()` reads the next entry from the directory. It skips deleted entries (0xE5) and long file name entries (0x0F). Returns 1 on success, 0 at end of directory.
+Maximum file size is `(12 + 1024) * 4096` bytes (~4.2 MiB) — there is no double-indirect block.
 
-**Creating a Directory**
-`fat_mkdir()` creates a new directory with the specified name. It allocates a cluster, initialises "." and ".." entries, and creates a directory entry in the parent.
+### Directory Entries
 
-**Removing a Directory**
-`fat_rm()` removes a file or empty directory. It frees the cluster chain and marks the directory entry as deleted (0xE5). For directories, it checks that the directory is empty before deletion.
+Directories store fixed 64-byte entries (`uint32_t inode` + `char name[60]`, 59 usable characters). `mkdir` creates **real** `.` and `..` entries at creation time (root's `..` points to itself), which removes the need for any FAT-style special-casing of `.`/`..` in the driver or in shell commands, and enables full multi-level path resolution.
+
+---
+
+## LufiraFS Driver
+
+### Initialisation
+
+`lufirafs_init(fs, image, image_size, lba_offset)`:
+
+1. Stores the `image` pointer and `image_size`.
+2. Copies the superblock from the start of the image and validates `magic` and `block_size`.
+3. Allocates a dirty-block bitmap (`kmalloc`, `(total_blocks + 7) / 8` bytes).
+4. Sets the global `lufirafs_mounted` flag on success — checked by `devmode`/`klog` before they touch the filesystem.
+
+### Path Resolution
+
+`lufirafs_lookup(fs, start_inode, path, &out_inode)` resolves an absolute (`/a/b`) or relative path (starting from `start_inode`, typically the caller's cwd). `.` and `..` are ordinary directory entries, so no special-case logic is needed.
+
+`lufirafs_resolve_parent(fs, start_inode, path, &out_parent, out_name)` splits a path into a parent inode and a final component name — used by `create`/`mkdir`/`unlink`, whose target does not need to exist yet.
 
 ### File Operations
 
-**Opening a File**
-`fat_open()` finds a file in the root directory and returns its size.
+| Function | Description |
+|----------|-------------|
+| `lufirafs_read(fs, ino, offset, buf, count)` | Reads up to `count` bytes starting at `offset`. |
+| `lufirafs_write(fs, ino, offset, buf, count)` | Writes `count` bytes at `offset`, growing the file (and allocating blocks) as needed; updates `inode.size`. |
+| `lufirafs_truncate(fs, ino, new_size)` | Shrinks or clears a file, freeing now-unused blocks. |
+| `lufirafs_create(fs, parent_ino, name, mode, &out_ino)` | Creates a file or directory; for directories, also creates `.`/`..`. |
+| `lufirafs_unlink(fs, parent_ino, name)` | Removes a file or empty directory. |
 
-**Reading a File**
-`fat_read_file()` reads data from a file into a buffer. It follows the cluster chain and copies data until the requested size is reached or the end of file is encountered.
+### Directory Operations
 
-**Writing a File**
-`fat_write_file()` overwrites or creates a file with the given data. It frees any existing cluster chain, allocates new clusters, and copies the data. If the file size is 0, it frees all clusters.
+`lufirafs_opendir()`/`lufirafs_readdir()` provide a simple cursor-based iterator over a directory's entries, used both by the VFS wrapper and directly by shell commands (`ls`, `du`, etc.).
 
-**Appending to a File**
-`fat_append_file()` appends data to an existing file. It finds the last cluster, writes data starting from the current end, and allocates new clusters as needed.
-
-**Creating a File**
-`fat_create_file()` creates an empty file with a zero-length cluster chain.
-
-### Cluster Management
-
-**Reading FAT Entries**
-`get_fat_entry()` reads a FAT entry for a given cluster. The entry indicates the next cluster in the chain or an end-of-chain marker.
-
-**Writing FAT Entries**
-`set_fat_entry()` writes a FAT entry and marks the corresponding FAT sector as dirty.
-
-**End of Chain Detection**
-`is_eoc()` checks if a cluster value indicates the end of a cluster chain.
-
-**Allocating Clusters**
-`find_free_cluster()` scans the FAT for a free cluster (entry value 0).
-
-**Freeing Cluster Chains**
-`free_cluster_chain()` marks all clusters in a chain as free.
+`lufirafs_du_blocks(fs, ino)` recursively counts the blocks actually occupied by a file or directory tree (including indirect blocks), matching what real Unix `du` reports — as opposed to the logical file size (`inode.size`).
 
 ### Dirty Tracking and Flushing
 
-The FAT driver maintains a dirty sector bitmap to track which sectors have been modified. This allows the driver to efficiently write only changed sectors back to disk.
+The entire LufiraFS region lives in RAM (`fs->image`); all reads and writes touch this RAM copy directly. A per-block dirty bitmap (`fs->dirty_bitmap`) tracks which 4096-byte blocks have changed.
 
-**Marking Sectors Dirty**
-`fat_mark_sector_dirty()` sets a bit in the bitmap for the specified LBA.
-
-**Flushing to Disk**
-`fat_flush()` writes all dirty sectors back to the physical disk using the ATA driver. It compares memory sectors with disk sectors to avoid unnecessary writes.
-
-The dirty bitmap is stored in the `fat_fs_t` structure and is allocated during initialisation.
+`lufirafs_sync()`/`lufirafs_flush()` scan the dirty bitmap and write each dirty block back to disk via the existing ATA PIO driver (`disk_write_sectors()`), computing each block's absolute LBA as `fs->lba_offset + block_num * (LUFIRAFS_BLOCK_SIZE / 512)`. This mirrors the persistence strategy of the (now unused) FAT driver. Sync is called after every mutating shell operation and explicitly on `reboot`/`shutdown`.
 
 ---
 
@@ -184,7 +202,7 @@ An inode represents a filesystem object (file, directory, or device). It contain
 - **type** – file, directory, character device, block device, pipe, or symlink.
 - **size** – size of the object in bytes.
 - **reference count** – number of open file descriptors referencing this inode.
-- **private data** – filesystem-specific data (e.g., FAT cluster information).
+- **private data** – filesystem-specific data (LufiraFS inode number and directory cursor).
 - **operations** – function pointers for inode operations.
 
 **Files**
@@ -198,15 +216,13 @@ A file represents an open file descriptor. It contains:
 
 ### Inodes
 
-Inodes are created by `vfs_create_inode()`, which allocates memory and initialises the structure. The inode number is typically the cluster number of the file (or 1 for the root directory).
+Inodes are created by `vfs_create_inode()`, which allocates memory and initialises the structure. The VFS inode number is the LufiraFS inode number (or 1 for the root directory).
 
 ### File Descriptors
 
-File descriptors are allocated by `alloc_fd()`, which searches the current process's file table for an empty slot. The maximum number of file descriptors per process is 16.
+File descriptors are allocated by `alloc_fd()`, which searches the current process's file table for an empty slot. Each process has its own file descriptor table.
 
 ### File Operations
-
-File operations are function pointers that define how to perform operations on an open file:
 
 | Operation | Description |
 |-----------|-------------|
@@ -217,8 +233,6 @@ File operations are function pointers that define how to perform operations on a
 
 ### Inode Operations
 
-Inode operations define how to perform operations on a filesystem object:
-
 | Operation | Description |
 |-----------|-------------|
 | `lookup` | Finds a file or directory by name within a directory. |
@@ -228,48 +242,35 @@ Inode operations define how to perform operations on a filesystem object:
 
 ### Per-Process File Tables
 
-Each process has its own file descriptor table (`fd_table_t`). This allows processes to have independent file descriptors. The current process's table is pointed to by `current_fd_table`.
+Each process has its own file descriptor table (`fd_table_t`), initialised by `vfs_init_fd_table()` for every new process (not just the first one). The current process's table is pointed to by `current_fd_table`. `fork()` duplicates the parent's table (shared `file_t`/inode with an incremented reference count); anonymous pipes (`vfs_pipe()`) and `dup2()`-style redirection build on this same table.
 
 ---
 
-## FAT VFS Wrapper
+## LufiraFS VFS Wrapper
 
-The FAT VFS wrapper (`fat_vfs.c`) bridges the raw FAT driver and the VFS layer.
+The LufiraFS VFS wrapper (`lufirafs_vfs.c`) bridges the raw LufiraFS driver and the VFS layer, mirroring the design of the old FAT wrapper.
 
-### Private Data
+**Private Data:** `lufirafs_private_t` (stored in `inode_t::private_data`) holds the LufiraFS inode number, whether the object is a directory, and (for directories) a `lufirafs_dir_t` cursor.
 
-The wrapper defines `fat_private_t`, which is stored in `inode_t::private_data`. It contains:
+**VFS entry points:** `vfs_open_lufirafs`, `vfs_lufirafs_create`, `vfs_lufirafs_mkdir`, `vfs_lufirafs_unlink`, `vfs_lufirafs_lookup`, `vfs_lufirafs_get_root` — these replace the equivalent `vfs_fat_*` functions in `kernel/fs/vfs/vfs.c` one-for-one.
 
-- **cluster** – the first cluster of the file/directory.
-- **entry** – the raw FAT directory entry.
-- **is_dir** – whether the object is a directory.
-- **dir** – a `fat_dir_t` iterator for directories.
+VFS-facing lookups always resolve from the LufiraFS root inode. Shell commands that need cwd-relative behaviour (`cd`, `ls`, `mkdir`, etc.) call the lower-level `lufirafs_*` functions directly with the shell's own `cwd_inode`, rather than going through the VFS layer.
 
-### Path Resolution
+---
 
-`fat_lookup_path()` resolves a full path by walking through directory entries. It handles `.` and `..` correctly and returns the final directory entry and its cluster.
+## The `mkfs_lufirafs` Tool
 
-**Path Resolution Algorithm:**
-1. Split the path into components.
-2. Start from the root directory (cluster 0).
-3. For each component, search the current directory for the name.
-4. If the component is `..`, move to the parent directory.
-5. If the component is `.`, skip it.
-6. If a component is not found, return an error.
-7. Return the final entry and its cluster.
+`tools/mkfs_lufirafs.c` is a normal hosted C program (built with the host's `gcc`, full libc) that formats and populates the LufiraFS region of the disk image at build time. It `#include`s the same `lufirafs_format.h` used by the freestanding kernel driver, guaranteeing format compatibility, and reimplements a minimal block/inode allocator and directory-entry manager independently (intentionally not shared code, since one side is freestanding and the other hosted).
 
-### Parent Resolution
+**Subcommands:**
 
-`fat_resolve_parent()` splits a path into the parent directory and the base name. This is used by `vfs_fat_create()` and `vfs_fat_mkdir()` to determine where to create a new object.
+| Subcommand | Usage | Description |
+|------------|-------|-------------|
+| `format` | `mkfs_lufirafs format <image> <esp_size> <region_size>` | Writes a fresh superblock, bitmap, and empty inode table. |
+| `mkdir` | `mkfs_lufirafs mkdir <image> <esp_size> <region_size> </path>` | Creates a directory, including any missing intermediate directories ("mkdir -p" style). |
+| `put` | `mkfs_lufirafs put <image> <esp_size> <region_size> <host_file> </dest/path>` | Copies a host file into the image, creating parent directories as needed. |
 
-### Directory Iteration
-
-The wrapper uses the FAT driver's directory iteration functions:
-- `fat_opendir()` initialises a directory iterator.
-- `fat_readdir()` reads the next entry.
-- `fat_closedir()` closes the iterator.
-
-The VFS `readdir` operation calls `fat_readdir()` and converts the FAT entry to a `vfs_dirent_t` structure with inode number, type, and name.
+The `Makefile`'s disk-image recipe uses these to create `/test`, `/system`, `/logs`, and `/readme.txt` when building `disk.img`, and `make debug` uses `put` to drop a `/system/devmode.flag` marker before launching QEMU (see [`04_logging.md`](04_logging.md)).
 
 ---
 
@@ -283,7 +284,13 @@ The console device uses the `file_ops_t` structure with:
 - `seek` – returns -1 (not supported).
 - `close` – does nothing.
 
-Standard file descriptors (stdin, stdout, stderr) are connected to the console device.
+Standard file descriptors (stdin, stdout, stderr) are connected to the console device. Anonymous pipes (`vfs_pipe()`) use a similar `file_ops_t`-based approach backed by a fixed-size ring buffer.
+
+---
+
+## Legacy FAT Driver
+
+The original FAT12/16/32 driver (`kernel/fs/fat/`) is still present in the source tree but is **no longer compiled into the kernel** — it has been fully superseded by LufiraFS for anything the kernel itself mounts. It is kept only for reference. The UEFI ESP partition (see [Disk Layout](#disk-layout)) is still FAT12, but it is read exclusively by UEFI firmware and the bootloader's own FAT reader, not by this kernel driver.
 
 ---
 
@@ -291,24 +298,24 @@ Standard file descriptors (stdin, stdout, stderr) are connected to the console d
 
 | Component | Depends On | Purpose |
 |-----------|------------|---------|
-| FAT Driver | Heap | Memory allocation for dirty bitmap |
-| FAT Driver | ATA Driver | Flushing dirty sectors to disk |
-| FAT Driver | Console | Error reporting and logging |
+| LufiraFS Driver | Heap | Memory allocation for the dirty-block bitmap |
+| LufiraFS Driver | ATA Driver | Flushing dirty blocks to disk |
+| LufiraFS Driver | Console | Error reporting and logging (gated by developer mode — see `04_logging.md`) |
 | VFS | Heap | Memory allocation for inodes and files |
-| VFS | FAT Driver | Underlying filesystem operations |
-| FAT VFS Wrapper | FAT Driver, VFS | Bridge between layers |
+| VFS | LufiraFS Driver | Underlying filesystem operations |
+| LufiraFS VFS Wrapper | LufiraFS Driver, VFS | Bridge between layers |
 | Special Devices | Console | Output operations |
 
 ---
 
 ## Conclusion
 
-The filesystem subsystem provides a solid foundation for persistent storage and device I/O. The separation between the low-level FAT driver and the generic VFS layer makes the system extensible and maintainable. The current implementation supports the core operations needed for a hobby operating system.
+The filesystem subsystem provides a solid foundation for persistent storage and device I/O. The separation between the low-level LufiraFS driver and the generic VFS layer keeps the system extensible and maintainable, while the shared on-disk format header keeps the kernel driver and the host-side `mkfs_lufirafs` tool from ever disagreeing about layout.
 
-For more details, refer to the source code in `fs/fat/`, `fs/vfs/`, and the FAT VFS wrapper.
+For more details, refer to the source code in `fs/lufirafs/`, `fs/vfs/`, and `tools/mkfs_lufirafs.c`.
 
 ---
 
-**Document Version:** 1.0  
-**Last Updated:** September 2026  
+**Document Version:** 2.0
+**Last Updated:** September 2026
 **Project:** LufiraOS

@@ -12,9 +12,11 @@ This document describes the logging system used throughout the LufiraOS kernel. 
 3. [Status Macros](#status-macros)
 4. [Progress Macros](#progress-macros)
 5. [Decorative Macros](#decorative-macros)
-6. [Implementation Notes](#implementation-notes)
-7. [Dependencies](#dependencies)
-8. [Future Extensions](#future-extensions)
+6. [Developer Mode](#developer-mode)
+7. [Persistent Logging (`klog`)](#persistent-logging-klog)
+8. [Implementation Notes](#implementation-notes)
+9. [Dependencies](#dependencies)
+10. [Future Extensions](#future-extensions)
 
 ---
 
@@ -31,6 +33,7 @@ The logging system is defined in `log.h` and provides a set of macros that expan
 - Every log message has a clear visual indicator of its severity or status.
 - Progress operations show a pending state that is replaced with a final status when complete.
 - Section headers and separators make log output easy to navigate.
+- Since v0.3.0, the "everything is fine" status macros (`LOG_OK`, `LOG_PENDING`, `LOG_DONE_OK`, `LOG_STATUS_LINE`) are silent unless **developer mode** is enabled — see [Developer Mode](#developer-mode) below. `LOG_FAIL`/`LOG_WARN`/`LOG_DONE_FAIL`/`LOG_DONE_WARN` always print, since they indicate a genuine problem rather than routine progress.
 
 ---
 
@@ -158,6 +161,68 @@ Prints a status line with a coloured label and value.
 
 ---
 
+## Developer Mode
+
+Introduced in v0.3.0 (`kernel/system/devmode/`), developer mode is a persistent, on-disk toggle that decides how much of the kernel's internal diagnostic chatter reaches the screen.
+
+**Why it exists:** driver initialisation (PCI enumeration, AC'97/UHCI setup, ELF segment loading, process creation, etc.) used to print dozens of lines on every boot and every `run`/`runbg`. That's useful while debugging, but noisy for normal use — developer mode lets both exist without duplicating the code paths.
+
+### The Flag
+
+The flag is a single marker file, `/system/devmode.flag`, on LufiraFS. Its **presence**, not its content, is what matters:
+
+- Present → developer mode ON.
+- Absent → developer mode OFF (the default).
+
+### Reading and Writing the Flag
+
+| Function | Location | Purpose |
+|----------|----------|---------|
+| `devmode_probe_early(fs_image, fs_size)` | `devmode.c` | Walks the on-disk directory structure directly (no `kmalloc`, no full `lufirafs_init()`) to answer "is devmode on?" before the filesystem is properly mounted — see [`02_kernel_init.md`](02_kernel_init.md). |
+| `devmode_init(void)` | `devmode.c` | The authoritative check, run right after `lufirafs_init()` succeeds; overwrites whatever `devmode_probe_early()` guessed. |
+| `devmode_is_enabled(void)` | `devmode.c` | Returns the cached state — this is what `DLOG()` and the gated `LOG_*` macros call. |
+| `devmode_set(int enabled)` | `devmode.c` | Creates or deletes the flag file and updates the cached state; used by the `devmode` shell command. |
+
+### The `DLOG` Macro
+
+```c
+#define DLOG(...) do { if (devmode_is_enabled()) printf(__VA_ARGS__); } while (0)
+```
+
+`DLOG()` is a drop-in replacement for `printf()` used throughout the drivers (PCI, AC'97, UHCI, ELF loader, process manager, ACPI, syscalls, PIT, LufiraFS) for messages that are informative but not actionable — device-enumeration details, per-segment ELF load progress, per-process creation/exit lines, and so on. Genuine failures (out-of-memory, "device not found", timeouts) are left as plain `printf()` calls so they are never hidden.
+
+### The `devmode` Shell Command
+
+```
+devmode            # shows current state
+devmode on         # creates /system/devmode.flag, syncs to disk
+devmode off        # removes it, syncs to disk
+```
+
+The flag is persistent, so it survives `reboot`. `make debug` (see [`05_build_system.md`](05_build_system.md)) writes the flag file into the disk image before launching QEMU, so debug runs are always verbose.
+
+---
+
+## Persistent Logging (`klog`)
+
+Also introduced in v0.3.0 (`kernel/system/klog/`), `klog()` is a small, independent logger that writes short lines to `/logs/system.log` on LufiraFS — **regardless** of developer mode. It exists so that boot and process events are still recorded somewhere even when the screen stays quiet.
+
+```c
+void klog_init(void);              // create /logs/system.log if missing — call after lufirafs_init()
+void klog(const char *format, ...);
+```
+
+`klog()` supports a small subset of `printf`-style format specifiers (`%s`, `%c`, `%d`, `%u`, `%p`, `%x`, and the `%l*` variants) — implemented independently of the console's own formatter, since that one writes character-by-character to the screen instead of into a buffer. Each call:
+
+1. Formats the message into a fixed-size line buffer.
+2. Looks up (or, via `klog_init()`, creates) `/logs/system.log`.
+3. Appends the line at the file's current end (`lufirafs_write()` at `inode.size`).
+4. Calls `lufirafs_sync()` to flush the write to disk immediately.
+
+Because it flushes every call, `klog()` is used sparingly — for milestones such as "PCI: N device(s) found", "AC'97 audio ready", "UHCI controller ready", process creation/exit/fork, and ELF `run`/`runbg`/`exec` — not for every line a `DLOG()` call might print. View the log with the regular `cat` shell command: `cat /logs/system.log`.
+
+---
+
 ## Implementation Notes
 
 ### How the Progress Macros Work
@@ -194,8 +259,10 @@ All logging macros accept `printf`-style format strings and variable arguments. 
 | `drivers/console/console.h` | Console output functions (printf, colour management) |
 | `lib/colors.h` | Colour constants and definitions |
 | `lib/stdarg.h` | Variable argument handling for formatted output |
+| `system/devmode/devmode.h` | Gates the `LOG_OK`/`LOG_PENDING`/`LOG_DONE_OK`/`LOG_STATUS_LINE` macros and provides `DLOG()` |
+| `fs/lufirafs/lufirafs.h` | Backing storage for both the developer-mode flag and `klog()`'s log file |
 
-The logging macros expand to `printf` calls, so the console driver must be initialised before any logging occurs. This is why console initialisation is the very first step in the kernel.
+The logging macros expand to `printf` calls, so the console driver must be initialised before any logging occurs. This is why console initialisation is the very first step in the kernel. `klog()` additionally requires LufiraFS to be mounted (`lufirafs_mounted`); calls made before that point are silently dropped.
 
 ---
 
@@ -207,6 +274,6 @@ For more details, refer to the source code in `log.h` and the console driver in 
 
 ---
 
-**Document Version:** 1.0  
+**Document Version:** 1.1  
 **Last Updated:** September 2026  
 **Project:** LufiraOS

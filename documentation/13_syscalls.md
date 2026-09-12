@@ -28,8 +28,8 @@ This document describes the system call interface of LufiraOS. System calls prov
 
 System calls provide the interface between user-mode programs and the kernel. They allow user programs to:
 
-- Perform file operations (open, close, read, write, seek).
-- Manage processes (create, terminate, sleep, kill).
+- Perform file operations (open, close, read, write, seek, pipe).
+- Manage processes (fork, exec, wait, kill/signals, sleep).
 - Query system information (PID, timer ticks).
 - Control system behaviour (yield CPU, exit).
 
@@ -95,13 +95,16 @@ The system call table is an array of function pointers indexed by system call nu
 | 8 | `SYS_SEEK` | Reposition file offset | Implemented |
 | 9 | `SYS_MMAP` | Memory map a file or device | Stub |
 | 10 | `SYS_MUNMAP` | Unmap memory | Stub |
-| 11 | `SYS_EXEC` | Execute a program | Stub |
-| 12 | `SYS_FORK` | Create a child process | Stub |
-| 13 | `SYS_WAIT` | Wait for a child process | Stub |
+| 11 | `SYS_EXEC` | Replace the current process image with a new program | Implemented (see caveat below) |
+| 12 | `SYS_FORK` | Create a child process | Implemented (see caveat below) |
+| 13 | `SYS_WAIT` | Wait for a child process | Implemented |
 | 14 | `SYS_GETCWD` | Get current working directory | Stub |
 | 15 | `SYS_CHDIR` | Change current directory | Stub |
 | 16 | `SYS_SLEEP` | Sleep for milliseconds | Implemented |
-| 17 | `SYS_KILL` | Terminate a process | Implemented |
+| 17 | `SYS_KILL` | Send a signal to a process | Implemented |
+| 18 | `SYS_PIPE` | Create an anonymous pipe | Implemented |
+
+> **Caveat:** `SYS_FORK`/`SYS_EXEC` are implemented but not fully reliable — see [`12_elf_processes.md` § Known Issue](12_elf_processes.md#known-issue) and [README.md § Known Issues](../README.md#known-issues-and-limitations).
 
 ---
 
@@ -165,11 +168,35 @@ The system call table is an array of function pointers indexed by system call nu
 - **Returns:** `0` (always).
 - **Implementation:** Calls `process_sleep(milliseconds)`.
 
+**SYS_FORK (12)**
+- **Signature:** `pid_t fork(void)`
+- **Description:** Duplicates the calling process (address space, file descriptors). Handled specially in `syscall_handler()` rather than through the normal `syscall_table[]`, since it needs a pointer to the entire saved register frame, not just the usual five arguments.
+- **Returns:** Child PID to the parent, `0` to the child, `(uint64_t)-1` on failure.
+- **Implementation:** Calls `process_fork(frame_ptr)`. See [`12_elf_processes.md`](12_elf_processes.md#fork) for the address-space cloning details and its known reliability issue.
+
+**SYS_EXEC (11)**
+- **Signature:** `int exec(const char *filename, char **argv, char **envp)`
+- **Description:** Replaces the calling process's image with a new ELF program, in place (same PID). `argv`/`envp` are accepted but not yet passed to the new program.
+- **Returns:** Does not return on success; `-1` on error (e.g. file not found).
+- **Implementation:** Calls `do_exec()` → `elf_exec_replace()`.
+
+**SYS_WAIT (13)**
+- **Signature:** `pid_t wait(pid_t pid, int *status)`
+- **Description:** Blocks until the given child (`pid == 0` = any child) terminates.
+- **Returns:** The reaped child's PID, or `-1` if the caller has no such child.
+- **Implementation:** Calls `process_wait(pid, &status)`.
+
 **SYS_KILL (17)**
-- **Signature:** `int kill(pid_t pid)`
-- **Description:** Terminates a process by PID.
+- **Signature:** `int kill(pid_t pid, int sig)`
+- **Description:** Sends a signal to a process (`sig == 0` defaults to `SIGTERM`). Only default actions are implemented — no user-space signal handlers.
+- **Returns:** `0` on success, `-1` if the process was not found.
+- **Implementation:** Calls `process_signal(pid, sig)`. See [`12_elf_processes.md` § Signals and kill](12_elf_processes.md#signals-and-kill).
+
+**SYS_PIPE (18)**
+- **Signature:** `int pipe(int fds[2])`
+- **Description:** Creates an anonymous pipe; `fds[0]` is the read end, `fds[1]` the write end, both in the calling process's own file descriptor table.
 - **Returns:** `0` on success, `-1` on error.
-- **Implementation:** Calls `process_kill(pid)`.
+- **Implementation:** Calls `vfs_pipe(fds)`.
 
 ### System Information
 
@@ -185,9 +212,6 @@ The system call table is an array of function pointers indexed by system call nu
 |-------------|-------------|
 | `SYS_MMAP` | Memory maps a file or device. |
 | `SYS_MUNMAP` | Unmaps a memory mapping. |
-| `SYS_EXEC` | Replaces the current process with a new program. |
-| `SYS_FORK` | Creates a child process. |
-| `SYS_WAIT` | Waits for a child process to terminate. |
 | `SYS_GETCWD` | Gets the current working directory. |
 | `SYS_CHDIR` | Changes the current working directory. |
 
@@ -227,10 +251,12 @@ System calls return `-1` on error (or an appropriate negative value). The error 
 | `SYS_READ`/`SYS_WRITE` | Invalid file descriptor. |
 | `SYS_CLOSE` | Invalid file descriptor. |
 | `SYS_SEEK` | Invalid file descriptor or unsupported operation. |
-| `SYS_KILL` | Process not found. |
-| `SYS_MMAP` | Unsupported (always returns `-1`). |
-| `SYS_EXEC` | Unsupported (always returns `-1`). |
-| `SYS_FORK` | Unsupported (always returns `-1`). |
+| `SYS_KILL` | Process not found or unknown signal. |
+| `SYS_WAIT` | No such child (including one already reaped). |
+| `SYS_FORK` | Out of memory while cloning the address space. |
+| `SYS_EXEC` | File not found, or not enough memory for the new address space. |
+| `SYS_MMAP` / `SYS_MUNMAP` | Unsupported (stubs, always return `0`). |
+| `SYS_GETCWD` / `SYS_CHDIR` | Unsupported (stubs). |
 
 ---
 
@@ -248,12 +274,12 @@ System calls return `-1` on error (or an appropriate negative value). The error 
 
 ## Conclusion
 
-The system call interface provides a clean and efficient mechanism for user-mode programs to request kernel services. With 18 implemented system calls, it covers the essential functionality needed for basic user programs. The use of the `syscall` instruction ensures fast transitions, and the calling convention follows the x86-64 ABI for compatibility.
+The system call interface provides a clean and efficient mechanism for user-mode programs to request kernel services. With 15 of 19 defined system calls implemented (`mmap`, `munmap`, `getcwd`, `chdir` remain stubs), it covers process control (including `fork`/`exec`/`wait`/signals/pipes as of v0.3.0), file I/O, and basic system information. The use of the `syscall` instruction ensures fast transitions, and the calling convention follows the x86-64 ABI for compatibility.
 
 For more details, refer to the source code in `system/syscall/`.
 
 ---
 
-**Document Version:** 1.0  
+**Document Version:** 1.1  
 **Last Updated:** September 2026  
 **Project:** LufiraOS
