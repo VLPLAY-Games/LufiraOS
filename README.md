@@ -28,7 +28,7 @@
 |-----------|---------------------|
 | **Architecture** | x86_64 (64-bit) |
 | **RAM** | 64 MB |
-| **Disk Space** | ~512 KB (kernel + bootloader) |
+| **Disk Space** | 16 MB (fixed-size disk image: FAT12 ESP + LufiraFS region) |
 | **Firmware** | UEFI (BIOS/Legacy not supported) |
 | **Display** | Any VESA/VBE-compatible framebuffer |
 | **Audio (optional)** | AC'97 compatible audio controller |
@@ -106,7 +106,7 @@ LufiraOS is a from-scratch operating system that boots via UEFI, features a grap
   - **Debug** – detailed system information, memory map dumps, table listings.
   - **Safe** – minimal mode for troubleshooting.
 - Gathers system information (memory map, framebuffer, ACPI/SMBIOS).
-- Loads kernel and optional FAT image.
+- Loads the kernel and the raw disk image (FAT12 ESP + LufiraFS region — see `documentation/08_filesystem.md`).
 
 ### Kernel
 
@@ -272,11 +272,11 @@ Detailed documentation is available in the `documentation/` directory:
 | [`01_bootloader.md`](https://documentation/01_bootloader.md)               | UEFI bootloader, boot modes, BootInfo structure             |
 | [`02_kernel_init.md`](https://documentation/02_kernel_init.md)             | Kernel entry point and initialization order                 |
 | [`03_bootinfo.md`](https://documentation/03_bootinfo.md)                   | BootInfo structure reference                                |
-| [`04_logging.md`](https://documentation/04_logging.md)                     | Logging macros (log.h)                                      |
+| [`04_logging.md`](https://documentation/04_logging.md)                     | Logging macros (log.h), developer mode, and `klog`          |
 | [`05_build_system.md`](https://documentation/05_build_system.md)           | Build system and QEMU usage                                 |
 | [`06_libraries.md`](https://documentation/06_libraries.md)                 | System libraries (types, colors, string, etc.)              |
-| [`07_drivers.md`](https://documentation/07_drivers.md)                     | Device drivers (console, disk, keyboard, mouse, PCI, AC'97) |
-| [`08_filesystem.md`](https://documentation/08_filesystem.md)               | FAT driver and Virtual Filesystem (VFS)                     |
+| [`07_drivers.md`](https://documentation/07_drivers.md)                     | Device drivers (console, disk, keyboard, mouse, USB, PCI, AC'97) |
+| [`08_filesystem.md`](https://documentation/08_filesystem.md)               | LufiraFS driver and Virtual Filesystem (VFS)                |
 | [`09_acpi.md`](https://documentation/09_acpi.md)                           | ACPI subsystem (RSDP, FADT, shutdown)                       |
 | [`10_cpu_interrupts.md`](https://documentation/10_cpu_interrupts.md)       | CPU, GDT, IDT, IRQ, TSS, PIT                                |
 | [`11_memory_management.md`](https://documentation/11_memory_management.md) | PMM, Paging, Heap                                           |
