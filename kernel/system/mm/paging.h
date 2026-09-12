@@ -41,3 +41,12 @@ uint64_t get_current_pml4(void);
 
 // Синхронизировать kernel mappings между PML4
 void sync_kernel_mappings(uint64_t dest_pml4_phys, uint64_t src_pml4_phys);
+
+// Даёт новому адресному пространству СОБСТВЕННУЮ (не общую с остальными
+// процессами) копию PDPT+PD, покрывающих identity map нижних физических
+// гигабайт (PML4[0], см. paging_init()). Без этого все процессы делят один
+// и тот же физический PDPT/PD, и map_page_in_pml4()/map_page(), расщепляя
+// huge-страницу под пользовательский код (например, ELF по 0x400000),
+// портят identity map сразу для всей системы. См. подробный комментарий у
+// реализации в paging.c.
+void clone_low_identity_map(uint64_t dest_pml4_phys);

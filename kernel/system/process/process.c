@@ -149,18 +149,28 @@ static uint64_t create_address_space(uint64_t kernel_pml4_phys) {
 
     // Копируем ВСЕ записи, но с модификацией флагов
     for (int i = 0; i < 512; i++) {
+        // Индекс 0 (identity map низких физических гигабайт, см.
+        // paging_init()) НЕ копируем по указателю сюда — иначе все процессы
+        // разделяли бы один и тот же физический PDPT/PD, и расщепление
+        // huge-страницы под ELF одного процесса (см. clone_low_identity_map()
+        // в paging.c) портило бы identity map для всей системы. Вместо
+        // этого ниже даём процессу СОБСТВЕННУЮ копию.
+        if (i == 0) continue;
+
         if (kernel_pml4[i] & PAGE_PRESENT) {
             uint64_t entry = kernel_pml4[i];
-            
+
             // Для user space (0-255) - снимаем флаг USER
             if (i < 256) {
                 entry &= ~PAGE_USER;  // Убираем доступ из user mode
             }
-            
+
             new_pml4[i] = entry;
         }
     }
-    
+
+    clone_low_identity_map(new_pml4_phys);
+
     return new_pml4_phys;
 }
 

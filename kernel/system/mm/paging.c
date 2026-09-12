@@ -244,6 +244,55 @@ uint64_t get_physical_address(uint64_t virt) {
     return get_physical_address_in_pml4(get_current_pml4(), virt);
 }
 
+// PML4[0] у ЛЮБОГО процесса (см. create_address_space() в process.c) до сих
+// пор просто копировал значение kernel_pml4[0] — указатель на ОБЩИЙ,
+// статический kernel_pdpt/PD, построенный один раз в paging_init(). Это
+// нормально для физического-указательного трюка (весь код в paging.c/
+// process.c/elf.c читает и пишет по физическим адресам как по указателям,
+// полагаясь на то, что ЛЮБОЙ активный CR3 identity-мапит всю RAM) — ПОКА
+// никто не пытается замапить туда что-то СВОЁ. Но обычные ELF грузятся по
+// конвенционному низкому адресу (например 0x400000), который лежит ВНУТРИ
+// этого identity-mapped диапазона. map_page_in_pml4()/map_page() видят там
+// huge-страницу (2MB) и расщепляют её на 4KB PT — и, так как PD, в котором
+// лежит расщепляемая запись, был ОБЩИЙ для всех процессов, это меняло
+// identity map СРАЗУ ДЛЯ ВСЕЙ СИСТЕМЫ (включая процессы, которые появятся
+// позже!), вписывая туда конкретные физические страницы ELF с правами
+// read-only+user. После завершения процесса эти физические страницы
+// освобождались и переиспользовались под что-то другое (например, PDPT
+// следующего процесса в sync_kernel_mappings()) — а общий PT всё ещё
+// указывал на них как на read-only — следующая же попытка записать туда по
+// "identity"-указателю падала с page fault.
+//
+// Даём КАЖДОМУ процессу СВОЮ приватную копию PDPT и всех его PD (leaf-записи
+// huge-страниц копируются ПО ЗНАЧЕНИЮ, а не по общему указателю) — теперь
+// расщепление huge-страницы одним процессом создаёт НОВЫЙ PT только в ЕГО
+// СОБСТВЕННОМ PD и не задевает ни kernel_pdpt, ни таблицы других процессов.
+void clone_low_identity_map(uint64_t dest_pml4_phys) {
+    pt_entry_t *dest_pml4 = (pt_entry_t*)dest_pml4_phys;
+
+    uint64_t new_pdpt_phys = pmm_alloc_page();
+    if (!new_pdpt_phys) return;
+
+    pt_entry_t *new_pdpt = (pt_entry_t*)new_pdpt_phys;
+    for (int i = 0; i < 512; i++) new_pdpt[i] = 0;
+
+    for (int gb = 0; gb < 512; gb++) {
+        if (!(kernel_pdpt[gb] & PAGE_PRESENT)) continue;
+
+        pt_entry_t *src_pd = (pt_entry_t*)(kernel_pdpt[gb] & 0x000FFFFFFFFFF000ULL);
+
+        uint64_t new_pd_phys = pmm_alloc_page();
+        if (!new_pd_phys) continue;
+
+        pt_entry_t *new_pd = (pt_entry_t*)new_pd_phys;
+        for (int i = 0; i < 512; i++) new_pd[i] = src_pd[i];
+
+        new_pdpt[gb] = paddr_to_entry(new_pd_phys, kernel_pdpt[gb] & 0xFFF);
+    }
+
+    dest_pml4[0] = paddr_to_entry(new_pdpt_phys, PAGE_PRESENT | PAGE_WRITE);
+}
+
 // Синхронизация kernel space записей между PML4 (для процессов)
 void sync_kernel_mappings(uint64_t dest_pml4_phys, uint64_t src_pml4_phys) {
     pt_entry_t *dest_pml4 = (pt_entry_t*)dest_pml4_phys;
