@@ -1,5 +1,6 @@
 #include "lib/types.h"
 #include "lib/stdarg.h"
+#include "lib/cpu.h"
 #include "bootinfo.h"
 #include "system/mm/pmm.h"
 #include "system/mm/paging.h"
@@ -81,10 +82,7 @@ static void show_boot_logo(void) {
 // Маленькая наклонная "визитка" сверху терминала — как большое лого при
 // загрузке, только компактнее (см. draw_text_tilted() в console.c).
 static void draw_shell_watermark(void) {
-    uint32_t scale = 2;
-    uint32_t w = text_scaled_width("LufiraOS", scale) + (8 * scale) / 2;
-    uint32_t x = (screen_width_pixels > w) ? (screen_width_pixels - w) / 2 : 0;
-    draw_text_tilted("LufiraOS", x, 4, scale, RGB_DARK_GRAY);
+    draw_text_tilted("LufiraOS", 10, 4, 2, RGB_DARK_GRAY);
 }
 
 static void shell_task(void) {
@@ -221,6 +219,7 @@ void _start(BootInfo* bi) {
     irq_enable(1);  // клавиатура
     irq_enable(2);
     irq_enable(12); // мышь
+    cpu_mark_interrupts_active();
 
     // Требует, чтобы прерывания таймера уже тикали (pit_wait_ms() внутри
     // сброса UHCI-контроллера), поэтому вызывается только после sti/irq_enable.

@@ -104,7 +104,7 @@ void command_status(void) {
     printf("\nSYSTEM STATUS:\n");
     printf("--------------\n");
     printf(" Interrupt Flag: %s\n", interrupts_enabled() ? "SET" : "CLEAR");
-    printf(" Interrupts: %s\n", interrupts_enabled() ? "ENABLED" : "DISABLED");
+    printf(" Interrupts: %s\n", cpu_interrupts_active() ? "ENABLED" : "DISABLED");
     printf(" CPU Test: trap int3 / ud2 / pf\n");
 }
 
