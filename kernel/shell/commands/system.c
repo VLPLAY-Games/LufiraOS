@@ -33,7 +33,7 @@ void command_help(void) {
     printf("\nFile system commands:\n");
     printf(" pwd - Print current directory\n");
     printf(" cd <dir> - Change directory\n");
-    printf(" ls [-l] - List directory contents\n");
+    printf(" ls [-l] [path] - List directory contents\n");
     printf(" mkdir <name> - Create directory\n");
     printf(" rm <name> - Remove file/directory\n");
     printf(" cp <src> <dst> - Copy file\n");

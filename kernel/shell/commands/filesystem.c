@@ -8,6 +8,10 @@
 #include "system/mm/heap.h"
 #include "system/devmode/devmode.h"
 #include "system/klog/klog.h"
+#include "lib/string.h"
+
+#define LS_COLOR_DIR  COLOR_LIGHT_BLUE
+#define LS_COLOR_FILE COLOR_WHITE
 
 extern lufirafs_t lufirafs;
 extern char cwd_path[256];
@@ -16,10 +20,41 @@ extern uint32_t cwd_inode;
 // ls, cd, pwd, mkdir, rm, touch, cat
 void command_ls(const char* flags) {
     int long_fmt = 0;
-    if (flags && flags[0] == '-' && flags[1] == 'l') long_fmt = 1;
+    char path_buf[LUFIRAFS_MAX_NAME * 4];
+    const char *path = NULL;
+
+    const char *p = flags ? skip_spaces(flags) : "";
+    while (*p) {
+        int len = token_length(p);
+        if (token_equals(p, "-l")) {
+            long_fmt = 1;
+        } else {
+            int copy_len = len < (int)sizeof(path_buf) - 1 ? len : (int)sizeof(path_buf) - 1;
+            for (int i = 0; i < copy_len; i++) path_buf[i] = p[i];
+            path_buf[copy_len] = '\0';
+            path = path_buf;
+        }
+        p = skip_spaces(p + len);
+    }
+
+    uint32_t target_inode = cwd_inode;
+    if (path) {
+        uint32_t found;
+        if (lufirafs_lookup(&lufirafs, cwd_inode, path, &found) != 0) {
+            printf("\nls: cannot access '%s': No such file or directory\n", path);
+            return;
+        }
+        lufirafs_inode_t target;
+        lufirafs_read_inode(&lufirafs, found, &target);
+        if (target.mode != LUFIRAFS_MODE_DIR) {
+            printf("\n%s\n", path);
+            return;
+        }
+        target_inode = found;
+    }
 
     lufirafs_dir_t dir;
-    if (lufirafs_opendir(&lufirafs, cwd_inode, &dir) != 0) {
+    if (lufirafs_opendir(&lufirafs, target_inode, &dir) != 0) {
         printf("\nCannot open directory\n");
         return;
     }
@@ -31,18 +66,21 @@ void command_ls(const char* flags) {
         if (strcmp(entry.name, ".") == 0 || strcmp(entry.name, "..") == 0)
             continue;
 
+        lufirafs_inode_t inode;
+        lufirafs_read_inode(&lufirafs, entry.inode, &inode);
+        int is_dir = (inode.mode == LUFIRAFS_MODE_DIR);
+
+        set_foreground_color(is_dir ? LS_COLOR_DIR : LS_COLOR_FILE);
+
         if (long_fmt) {
-            lufirafs_inode_t inode;
-            lufirafs_read_inode(&lufirafs, entry.inode, &inode);
-            char type = (inode.mode == LUFIRAFS_MODE_DIR) ? 'd' : '-';
-            printf("%c ", type);
-            printf("%u ", inode.size);
+            printf("%c %u ", is_dir ? 'd' : '-', inode.size);
             printf("%s\n", entry.name);
         } else {
             printf("%s  ", entry.name);
             if (++count % 4 == 0) printf("\n");
         }
     }
+    set_foreground_color(LOG_COLOR_INFO);
     if (!long_fmt && count % 4 != 0) printf("\n");
 }
 
