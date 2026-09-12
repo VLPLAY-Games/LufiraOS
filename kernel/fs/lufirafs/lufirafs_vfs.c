@@ -13,6 +13,7 @@
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
 #include "lib/string.h"
+#include "system/devmode/devmode.h"
 
 extern lufirafs_t lufirafs;
 
@@ -177,7 +178,7 @@ int vfs_open_lufirafs(const char *path, int flags) {
     current_fd_table->files[fd] = f;
     current_fd_table->count++;
 
-    printf("[VFS] Opened '%s' as fd=%d\n", path, fd);
+    DLOG("[VFS] Opened '%s' as fd=%d\n", path, fd);
     return fd;
 }
 

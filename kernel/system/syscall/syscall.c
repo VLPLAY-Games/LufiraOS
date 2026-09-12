@@ -7,6 +7,7 @@
 #include "system/mm/heap.h"
 #include "lib/stddef.h"
 #include "fs/vfs/vfs.h"
+#include "system/devmode/devmode.h"
 
 // Открывает filename через VFS, читает его целиком и заменяет им текущий
 // процесс через elf_exec_replace() (настоящий execve()). Используется и
@@ -350,7 +351,7 @@ void syscall_init(void) {
     asm volatile("wrmsr" : : "c"(0xC0000080), "a"((uint32_t)efer),
                  "d"((uint32_t)(efer >> 32)));
     
-    printf("[SYSCALL] 19 system calls registered\n");
+    DLOG("[SYSCALL] 19 system calls registered\n");
 }
 
 // ========== ДИСПАТЧЕР ==========

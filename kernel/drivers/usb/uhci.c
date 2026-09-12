@@ -7,6 +7,8 @@
 #include "system/timer/pit.h"
 #include "drivers/console/console.h"
 #include "lib/string.h"
+#include "system/devmode/devmode.h"
+#include "system/klog/klog.h"
 
 /* ======================================================================== */
 /* Port I/O                                                                  */
@@ -212,7 +214,7 @@ static int uhci_find_controller(void) {
         return 0;
     }
 
-    printf("[UHCI] Controller found at %u:%u.%u (vendor=%04X device=%04X)\n",
+    DLOG("[UHCI] Controller found at %u:%u.%u (vendor=%04X device=%04X)\n",
            dev->bus, dev->device, dev->function,
            dev->vendor_id, dev->device_id);
 
@@ -235,7 +237,7 @@ static int uhci_find_controller(void) {
     uhci_dev = dev;
     uhci_io_base = (uint16_t)bar4.address;
 
-    printf("[UHCI] I/O base = %04X\n", uhci_io_base);
+    DLOG("[UHCI] I/O base = %04X\n", uhci_io_base);
 
     // Отключаем перехват контроллера через SMI (BIOS legacy PS/2-эмуляция) —
     // иначе прошивка может продолжать "владеть" контроллером параллельно с нами.
@@ -386,12 +388,12 @@ static void uhci_check_port(int index, uint16_t port_reg) {
     uint16_t val = uhci_in16(port_reg);
 
     if (!(val & UHCI_PORTSC_CCS)) {
-        printf("[UHCI] Port %d: no device\n", index);
+        DLOG("[UHCI] Port %d: no device\n", index);
         return;
     }
 
     int low_speed = (val & UHCI_PORTSC_LSDA) ? 1 : 0;
-    printf("[UHCI] Port %d: device connected (%s-speed)\n",
+    DLOG("[UHCI] Port %d: device connected (%s-speed)\n",
            index, low_speed ? "low" : "full");
 
     uhci_ports[index].connected = 1;
@@ -401,7 +403,7 @@ static void uhci_check_port(int index, uint16_t port_reg) {
 
     val = uhci_in16(port_reg);
     if (val & UHCI_PORTSC_PE) {
-        printf("[UHCI] Port %d: enabled\n", index);
+        DLOG("[UHCI] Port %d: enabled\n", index);
         uhci_ports[index].enabled = 1;
     } else {
         printf("[UHCI] Port %d: failed to enable after reset\n", index);
@@ -713,7 +715,7 @@ static void uhci_enumerate_device(int port_index) {
         return;
     }
 
-    printf("[UHCI] Port %d: addr=%u vendor=%04X product=%04X class=%02X\n",
+    DLOG("[UHCI] Port %d: addr=%u vendor=%04X product=%04X class=%02X\n",
            port_index, new_addr, dev_desc.idVendor, dev_desc.idProduct,
            dev_desc.bDeviceClass);
 
@@ -814,12 +816,14 @@ static void uhci_enumerate_device(int port_index) {
 
         uhci_hid_devices[port_index] = hid;
 
-        printf("[UHCI] Port %d: HID %s ready (addr=%u ep=%u max_packet=%u interval=%ums)\n",
+        DLOG("[UHCI] Port %d: HID %s ready (addr=%u ep=%u max_packet=%u interval=%ums)\n",
                port_index,
                hid.protocol == USB_HID_PROTOCOL_KEYBOARD ? "keyboard" : "mouse",
                hid.address, hid.ep_addr, hid.max_packet, hid.interval);
+        klog("[UHCI] Port %d: HID %s ready (addr=%u)", port_index,
+             hid.protocol == USB_HID_PROTOCOL_KEYBOARD ? "keyboard" : "mouse", hid.address);
     } else {
-        printf("[UHCI] Port %d: no boot-protocol HID interface found\n", port_index);
+        DLOG("[UHCI] Port %d: no boot-protocol HID interface found\n", port_index);
     }
 }
 
@@ -958,7 +962,7 @@ void uhci_init(void) {
         {
             if (uhci_start_keyboard_interrupt(&uhci_hid_devices[i]) == 0) {
                 uhci_ready = 1;
-                printf("[UHCI] Port %d: keyboard interrupt transfer armed\n", i);
+                DLOG("[UHCI] Port %d: keyboard interrupt transfer armed\n", i);
             } else {
                 printf("[UHCI] Port %d: failed to arm keyboard interrupt transfer\n", i);
             }
@@ -972,7 +976,7 @@ void uhci_init(void) {
         {
             if (uhci_start_mouse_interrupt(&uhci_hid_devices[i]) == 0) {
                 uhci_ready = 1;
-                printf("[UHCI] Port %d: mouse interrupt transfer armed\n", i);
+                DLOG("[UHCI] Port %d: mouse interrupt transfer armed\n", i);
             } else {
                 printf("[UHCI] Port %d: failed to arm mouse interrupt transfer\n", i);
             }
@@ -980,7 +984,8 @@ void uhci_init(void) {
         }
     }
 
-    printf("[UHCI] Controller ready\n");
+    DLOG("[UHCI] Controller ready\n");
+    klog("[UHCI] controller ready");
 }
 
 const uhci_hid_device_t *uhci_get_hid_device(int port_index) {

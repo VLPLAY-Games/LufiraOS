@@ -1,6 +1,8 @@
 #include "acpi.h"
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
+#include "system/devmode/devmode.h"
+#include "system/klog/klog.h"
 
 // I/O port helpers
 static inline uint8_t inb(uint16_t port) {
@@ -96,7 +98,7 @@ int acpi_init(uint64_t rsdp_address) {
         return -1;
     }
     
-    printf("[ACPI] RSDP found, Revision %d\n", rsdp->rev1.Revision);
+    DLOG("[ACPI] RSDP found, Revision %d\n", rsdp->rev1.Revision);
     
     int use_64bit = 0;
     void *sdt = NULL;
@@ -113,7 +115,7 @@ int acpi_init(uint64_t rsdp_address) {
         }
         
         sdt_entries = (header->Length - sizeof(ACPI_SDTHeader)) / 8;
-        printf("[ACPI] Using XSDT at 0x%lx\n", (uint64_t)rsdp->XsdtAddress);
+        DLOG("[ACPI] Using XSDT at 0x%lx\n", (uint64_t)rsdp->XsdtAddress);
     } else {
         use_64bit = 0;
         sdt = (void*)(uint64_t)rsdp->rev1.RsdtAddress;
@@ -125,10 +127,10 @@ int acpi_init(uint64_t rsdp_address) {
         }
         
         sdt_entries = (header->Length - sizeof(ACPI_SDTHeader)) / 4;
-        printf("[ACPI] Using RSDT at 0x%x\n", rsdp->rev1.RsdtAddress);
+        DLOG("[ACPI] Using RSDT at 0x%x\n", rsdp->rev1.RsdtAddress);
     }
-    
-    printf("[ACPI] %u SDT entries found\n", sdt_entries);
+
+    DLOG("[ACPI] %u SDT entries found\n", sdt_entries);
     
     // Ищем FADT
     fadt = (ACPI_FADT*)acpi_find_table(sdt, sdt_entries, use_64bit, "FACP");
@@ -142,14 +144,14 @@ int acpi_init(uint64_t rsdp_address) {
         return -1;
     }
     
-    printf("[ACPI] FADT found at 0x%lx\n", (uint64_t)fadt);
-    printf("[ACPI] SMI_CMD: 0x%x\n", fadt->SMI_CMD);
-    printf("[ACPI] ACPI_ENABLE: 0x%x\n", fadt->ACPI_ENABLE);
-    printf("[ACPI] PM1a_CNT_BLK: 0x%x\n", fadt->PM1a_CNT_BLK);
-    
+    DLOG("[ACPI] FADT found at 0x%lx\n", (uint64_t)fadt);
+    DLOG("[ACPI] SMI_CMD: 0x%x\n", fadt->SMI_CMD);
+    DLOG("[ACPI] ACPI_ENABLE: 0x%x\n", fadt->ACPI_ENABLE);
+    DLOG("[ACPI] PM1a_CNT_BLK: 0x%x\n", fadt->PM1a_CNT_BLK);
+
     // Включаем ACPI режим, если нужно
     if (fadt->SMI_CMD != 0 && fadt->ACPI_ENABLE != 0) {
-        printf("[ACPI] Enabling ACPI mode...\n");
+        DLOG("[ACPI] Enabling ACPI mode...\n");
         
         // Проверяем, включён ли уже ACPI
         if (fadt->PM1a_CNT_BLK != 0) {
@@ -166,19 +168,20 @@ int acpi_init(uint64_t rsdp_address) {
                 }
                 
                 if (pm1a & 0x01) {
-                    printf("[ACPI] ACPI mode enabled\n");
+                    DLOG("[ACPI] ACPI mode enabled\n");
                 } else {
                     printf("[ACPI] WARNING: Failed to enable ACPI mode (timeout)\n");
                     // Продолжаем - может, всё равно сработает
                 }
             } else {
-                printf("[ACPI] ACPI already enabled\n");
+                DLOG("[ACPI] ACPI already enabled\n");
             }
         }
     }
-    
+
     acpi_ready = 1;
-    printf("[ACPI] Initialization complete\n");
+    DLOG("[ACPI] Initialization complete\n");
+    klog("[ACPI] initialized");
     return 0;
 }
 
@@ -193,7 +196,7 @@ void acpi_shutdown(void) {
         outw(0x8900, 0xdead); // old bochs
     }
     
-    printf("[ACPI] Shutting down via ACPI...\n");
+    DLOG("[ACPI] Shutting down via ACPI...\n");
     
     // Стандартное SLP_TYPa для S5 обычно 0
     uint16_t slp_typa = 0;  // Можно также прочитать из _S5 объекта DSDT
@@ -201,7 +204,7 @@ void acpi_shutdown(void) {
     // Формируем значение для порта: SLP_TYPa | SLP_EN
     uint16_t pm1a_value = slp_typa | ACPI_SLP_EN;
     
-    printf("[ACPI] Writing 0x%x to PM1a_CNT (0x%x)\n", 
+    DLOG("[ACPI] Writing 0x%x to PM1a_CNT (0x%x)\n",
            pm1a_value, fadt->PM1a_CNT_BLK);
     
     if (fadt->PM1a_CNT_BLK != 0) {

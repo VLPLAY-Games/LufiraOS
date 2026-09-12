@@ -1,6 +1,8 @@
 #include "drivers/pci/pci.h"
 #include "drivers/console/console.h"
 #include "lib/string.h"
+#include "system/devmode/devmode.h"
+#include "system/klog/klog.h"
 
 /* =========================================================
  * PCI device storage
@@ -419,7 +421,7 @@ static void pci_register_device(
 
     pci_device_count++;
 
-    printf(
+    DLOG(
         "[PCI] %02X:%02X.%u "
         "vendor=%04X "
         "device=%04X "
@@ -562,16 +564,17 @@ void pci_init(void)
 {
     pci_device_count = 0;
 
-    printf(
+    DLOG(
         "[PCI] Initializing PCI subsystem...\n"
     );
 
     pci_scan();
 
-    printf(
+    DLOG(
         "[PCI] Found %u device(s)\n",
         pci_device_count
     );
+    klog("[PCI] %u device(s) found", pci_device_count);
 }
 
 /* =========================================================

@@ -8,6 +8,8 @@
 #include "system/process/process.h"
 #include "system/mm/heap.h"
 #include "system/elf/elf.h"
+#include "system/devmode/devmode.h"
+#include "system/klog/klog.h"
 
 extern lufirafs_t lufirafs;
 extern uint32_t cwd_inode;
@@ -50,6 +52,29 @@ void command_help(void) {
     printf(" music - Play sample music to check sound\n");
     printf(" mixer <volume> - Change sound volume\n");
     printf(" exec <file> - Replace current process with ELF program\n");
+    printf(" devmode [on|off] - Show/toggle developer mode (verbose driver output)\n");
+}
+
+// devmode [on|off] — без аргументов показывает текущее состояние.
+// Флаг персистентный (файл /system/devmode.flag на LufiraFS, см. devmode.h),
+// поэтому переживает reboot. Все события всё равно попадают в
+// /logs/system.log независимо от режима — см. klog.h.
+void command_devmode(const char *args) {
+    if (!args || *args == '\0') {
+        printf("\nDeveloper mode: %s\n", devmode_is_enabled() ? "ON" : "OFF");
+        printf("Usage: devmode <on|off>\n");
+        return;
+    }
+
+    if (token_equals(args, "on")) {
+        if (devmode_set(1) == 0) printf("\nDeveloper mode: ON\n");
+        else printf("\nFailed to enable developer mode\n");
+    } else if (token_equals(args, "off")) {
+        if (devmode_set(0) == 0) printf("\nDeveloper mode: OFF\n");
+        else printf("\nFailed to disable developer mode\n");
+    } else {
+        printf("\nUsage: devmode <on|off>\n");
+    }
 }
 
 void command_clear(void) { clear_screen(); show_prompt(); }
@@ -132,9 +157,10 @@ void command_runbg(const char *filename) {
         return;
     }
 
-    printf("\nLoading ELF in background: %s (%u bytes)...\n",
+    DLOG("\nLoading ELF in background: %s (%u bytes)...\n",
            filename,
            fsize);
+    klog("[SHELL] runbg '%s' (%u bytes)", filename, fsize);
 
     int pid = elf_exec_background(file_buf, fsize, filename);
     if (pid < 0) {

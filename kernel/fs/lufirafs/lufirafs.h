@@ -20,6 +20,7 @@ typedef struct {
 } lufirafs_t;
 
 int lufirafs_init(lufirafs_t *fs, void *image, uint32_t image_size, uint32_t lba_offset);
+extern int lufirafs_mounted; // 1 после успешного lufirafs_init() — для devmode.c/klog.c
 
 // Курсор чтения каталога.
 typedef struct {

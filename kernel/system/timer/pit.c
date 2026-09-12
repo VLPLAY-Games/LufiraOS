@@ -2,6 +2,7 @@
 #include "drivers/console/console.h"
 #include "system/process/process.h"
 #include "drivers/usb/uhci.h"
+#include "system/devmode/devmode.h"
 
 // Порты I/O
 static inline void outb(uint16_t port, uint8_t val) {
@@ -24,7 +25,7 @@ void pit_init(void) {
     outb(PIT_CHANNEL_0, (uint8_t)(divisor & 0xFF));
     outb(PIT_CHANNEL_0, (uint8_t)((divisor >> 8) & 0xFF));
     
-    printf("[PIT] Timer initialized at %u Hz (divisor %u)\n", PIT_FREQUENCY, divisor);
+    DLOG("[PIT] Timer initialized at %u Hz (divisor %u)\n", PIT_FREQUENCY, divisor);
 }
 
 void pit_set_frequency(uint32_t hz) {

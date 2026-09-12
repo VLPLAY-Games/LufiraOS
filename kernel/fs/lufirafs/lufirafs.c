@@ -1,20 +1,18 @@
-// Драйвер LufiraFS — собственная файловая система ядра, независимая от
-// FAT (см. подробный комментарий о формате диска в lufirafs_format.h).
-//
-// Персистентность устроена так же, как у FAT (см. kernel/fs/fat/fat.c):
-// bi->FATImageBase — это РАВНО загруженный при старте единым куском весь
-// диск (см. boot/loaders/fat_loader.c — он читает LBA 0..N сырыми блоками,
-// а не через какую-то файловую систему), поэтому чтение — это просто
-// работа с RAM (fs->image), а запись отслеживается битовой картой "грязных"
-// блоков и сбрасывается на настоящий диск через drivers/disk (ATA PIO) при
-// вызове lufirafs_sync()/lufirafs_flush().
+// Драйвер LufiraFS — собственная файловая система ядра, независимая от FAT
+// (см. формат диска в lufirafs_format.h). Персистентность как у FAT: весь
+// диск загружен в RAM единым куском (fs->image), запись отслеживается
+// битовой картой "грязных" блоков и сбрасывается на диск через drivers/disk
+// в lufirafs_sync()/lufirafs_flush().
 #include "lufirafs.h"
 #include "system/mm/pmm.h"
 #include "system/mm/heap.h"
 #include "drivers/disk/disk.h"
 #include "drivers/console/console.h"
+#include "system/devmode/devmode.h"
 #include "lib/stddef.h"
 #include "lib/string.h"
+
+int lufirafs_mounted = 0;
 
 static inline uint8_t* get_block_ptr(lufirafs_t *fs, uint32_t block) {
     return fs->image + (uint64_t)block * LUFIRAFS_BLOCK_SIZE;
@@ -555,6 +553,7 @@ int lufirafs_init(lufirafs_t *fs, void *image, uint32_t image_size, uint32_t lba
     if (!fs->dirty_bitmap) return -1;
     memset(fs->dirty_bitmap, 0, dirty_bytes);
 
+    lufirafs_mounted = 1;
     return 0;
 }
 
@@ -575,7 +574,7 @@ void lufirafs_sync(lufirafs_t *fs) {
     }
 
     if (written > 0) {
-        printf("[LufiraFS] Synced %u block(s) to disk\n", written);
+        DLOG("[LufiraFS] Synced %u block(s) to disk\n", written);
     }
 }
 

@@ -218,6 +218,8 @@ void execute_command(void) {
         command_df();
     } else if (strcmp(cmd_lower, "du") == 0) {
         command_du(args);
+    } else if (strcmp(cmd_lower, "devmode") == 0) {
+        command_devmode(args);
     } else if (strcmp(cmd_lower, "edit") == 0) {
         if (*args == '\0') printf("\nUsage: edit <filename> <text>\n");
         else command_edit(args);
@@ -283,7 +285,7 @@ void shell_handle_tab(void) {
         "color", "colors", "fg", "bg", "reset",
         "pwd", "cd", "ls", "mkdir", "rm", "touch", "cat",
         "run", "runbg", "exec", "write", "beep", "mixer", "music",
-        "kill", "wait", "df", "du",
+        "kill", "wait", "df", "du", "devmode",
         NULL
     };
     

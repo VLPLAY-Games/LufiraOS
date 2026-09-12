@@ -45,6 +45,8 @@ $(shell mkdir -p $(BUILD_DIR) \
 	$(BUILD_DIR)/kernel/system/process \
 	$(BUILD_DIR)/kernel/system/syscall \
 	$(BUILD_DIR)/kernel/system/elf \
+	$(BUILD_DIR)/kernel/system/devmode \
+	$(BUILD_DIR)/kernel/system/klog \
 	$(BUILD_DIR)/kernel/fs/vfs \
     $(BUILD_DIR)/kernel/fs/lufirafs)
 
@@ -99,6 +101,8 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/system/process/process.c \
 	$(KERNEL_DIR)/system/syscall/syscall.c \
 	$(KERNEL_DIR)/system/elf/elf.c \
+	$(KERNEL_DIR)/system/devmode/devmode.c \
+	$(KERNEL_DIR)/system/klog/klog.c \
 	$(KERNEL_DIR)/fs/vfs/vfs.c \
 	$(KERNEL_DIR)/fs/lufirafs/lufirafs.c \
 	$(KERNEL_DIR)/fs/lufirafs/lufirafs_vfs.c
@@ -189,6 +193,8 @@ $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin $(BUILD_
 	$(BUILD_DIR)/mkfs_lufirafs format $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE)
 	@echo "  Populating initial files..."
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /test
+	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /system
+	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /logs
 	echo "Hello from LufiraOS!" > $(BUILD_DIR)/readme.txt
 	$(BUILD_DIR)/mkfs_lufirafs put $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(BUILD_DIR)/readme.txt /readme.txt
 	rm -f $(BUILD_DIR)/readme.txt

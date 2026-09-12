@@ -3,6 +3,8 @@
 #include "drivers/pci/pci.h"
 #include "system/mm/pmm.h"
 #include "drivers/console/console.h"
+#include "system/devmode/devmode.h"
+#include "system/klog/klog.h"
 
 /* ======================================================================== */
 /* Port I/O                                                                  */
@@ -192,14 +194,14 @@ static int ac97_find_controller(void)
         return 0;
     }
 
-    printf(
+    DLOG(
         "[AC97] Controller found at %u:%u.%u\n",
         dev->bus,
         dev->device,
         dev->function
     );
 
-    printf(
+    DLOG(
         "[AC97] vendor=%04X device=%04X\n",
         dev->vendor_id,
         dev->device_id
@@ -237,12 +239,12 @@ static int ac97_find_controller(void)
     ac97_nam_base = (uint16_t)bar0.address;
     ac97_nabm_base = (uint16_t)bar1.address;
 
-    printf(
+    DLOG(
         "[AC97] NAM  I/O base = %04X\n",
         ac97_nam_base
     );
 
-    printf(
+    DLOG(
         "[AC97] NABM I/O base = %04X\n",
         ac97_nabm_base
     );
@@ -269,7 +271,7 @@ static int ac97_find_controller(void)
 
 static int ac97_controller_reset(void)
 {
-    printf("[AC97] Controller reset...\n");
+    DLOG("[AC97] Controller reset...\n");
 
     /*
      * Cold reset.
@@ -311,7 +313,7 @@ static int ac97_controller_reset(void)
             );
 
         if (status & AC97_GLOB_PCR) {
-            printf("[AC97] Primary codec ready\n");
+            DLOG("[AC97] Primary codec ready\n");
             return 1;
         }
 
@@ -329,7 +331,7 @@ static int ac97_controller_reset(void)
 
 static int ac97_codec_init(void)
 {
-    printf("[AC97] Resetting codec...\n");
+    DLOG("[AC97] Resetting codec...\n");
 
     /*
      * Writing anything to codec register 0 resets
@@ -354,13 +356,13 @@ static int ac97_codec_init(void)
     ac97_codec.ext_audio_ctrl =
         ac97_read_codec(AC97_REG_EXT_AUDIO_CTRL);
 
-    printf(
+    DLOG(
         "[AC97] Codec vendor = %04X:%04X\n",
         ac97_codec.vendor_id1,
         ac97_codec.vendor_id2
     );
 
-    printf(
+    DLOG(
         "[AC97] Extended Audio ID = %04X\n",
         ac97_codec.ext_audio_id
     );
@@ -417,7 +419,7 @@ static int ac97_codec_init(void)
         power
     );
 
-    printf("[AC97] Codec initialized\n");
+    DLOG("[AC97] Codec initialized\n");
 
     return 1;
 }
@@ -428,7 +430,7 @@ static int ac97_codec_init(void)
 
 static int ac97_alloc_dma(void)
 {
-    printf("[AC97] Allocating DMA buffers...\n");
+    DLOG("[AC97] Allocating DMA buffers...\n");
 
     /*
      * BDL itself.
@@ -508,7 +510,7 @@ static int ac97_alloc_dma(void)
         ac97_bdl[i].flags = 0;
     }
 
-    printf(
+    DLOG(
         "[AC97] DMA buffers ready (%u pages)\n",
         AC97_BDL_ENTRIES
     );
@@ -1053,7 +1055,7 @@ void ac97_stop(void)
 
 int ac97_init(void)
 {
-    printf("[AC97] Initializing AC'97 audio...\n");
+    DLOG("[AC97] Initializing AC'97 audio...\n");
 
     if (!ac97_find_controller()) {
         return 0;
@@ -1084,10 +1086,11 @@ int ac97_init(void)
     ac97_set_sample_rate(48000);
     ac97_set_volume(80);
 
-    printf("[AC97] Sample rate: %u Hz\n", ac97_sample_rate);
-    printf("[AC97] Volume: %u%%\n", ac97_volume);
-    printf("[AC97] PCM OUT DMA: READY\n");
-    printf("[AC97] AC'97 audio READY\n");
+    DLOG("[AC97] Sample rate: %u Hz\n", ac97_sample_rate);
+    DLOG("[AC97] Volume: %u%%\n", ac97_volume);
+    DLOG("[AC97] PCM OUT DMA: READY\n");
+    DLOG("[AC97] AC'97 audio READY\n");
+    klog("[AC97] audio ready (%u Hz, %u%%)", ac97_sample_rate, ac97_volume);
 
     return 1;
 }

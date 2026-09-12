@@ -6,6 +6,8 @@
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
 #include "lib/string.h"
+#include "system/devmode/devmode.h"
+#include "system/klog/klog.h"
 
 #ifndef PAGE_PS
 #define PAGE_PS     0x80    // Page size (2MB / 1GB)
@@ -280,7 +282,7 @@ void* elf_load_to_process(const void *elf_data,
     if (elf_validate(header) != 0)
         return NULL;
 
-    printf("[ELF] Loading '%s' into process %u\n",
+    DLOG("[ELF] Loading '%s' into process %u\n",
            name,
            proc->pid);
 
@@ -339,7 +341,7 @@ void* elf_load_to_process(const void *elf_data,
         uint64_t seg_pages =
             (seg_end - seg_start) / PAGE_SIZE;
 
-        printf("[ELF] Segment %d: 0x%lx - 0x%lx (%lu pages)\n",
+        DLOG("[ELF] Segment %d: 0x%lx - 0x%lx (%lu pages)\n",
                i,
                seg_start,
                seg_end,
@@ -382,19 +384,10 @@ void* elf_load_to_process(const void *elf_data,
     }
 
     // ========================================================
-    // ZERO + COPY — постранично, по физическим адресам, БЕЗ
-    // переключения CR3.
-    //
-    // Раньше эта функция переключала CR3 на proc_pml4 и писала через
-    // виртуальные адреса ОДНИМ большим memset()/memcpy() на весь
-    // сегмент — но segments[] лежит локальным массивом на стеке
-    // ВЫЗЫВАЮЩЕГО кода (elf_load_to_process вызывается из process_create,
-    // обычно прямо из keyboard_irq_handler — а он выполняется на
-    // пользовательском стеке ВЫЗЫВАЮЩЕГО процесса, чей PML4-индекс в
-    // свежесозданном proc_pml4 отсутствует), плюс сам elf_data — указатель
-    // на буфер вызывающего. Переключение CR3 мгновенно обрывало этот
-    // стек. См. подробное объяснение у allocate_ring0_stack() в process.c.
-    // ========================================================
+    // ZERO + COPY — постранично, по физическим адресам, БЕЗ переключения CR3:
+    // segments[]/elf_data лежат на стеке вызывающего процесса, чей PML4-индекс
+    // в свежесозданном proc_pml4 ещё отсутствует (см. allocate_ring0_stack()
+    // в process.c) — переключение CR3 оборвало бы этот стек.
 
     for (int i = 0; i < seg_count; i++) {
 
@@ -483,19 +476,16 @@ void* elf_load_to_process(const void *elf_data,
         }
     }
 
-    printf("[ELF] Loaded successfully\n");
+    DLOG("[ELF] Loaded successfully\n");
 
     return (void*)header->entry;
 }
 
-// Сохраняет текущее EFLAGS.IF и отключает прерывания. Команды шелла
-// (run/exec) выполняются синхронно прямо из обработчика IRQ1 клавиатуры
-// (см. комментарий про exec ниже), где прерывания уже аппаратно отключены
-// самим CPU — безусловный "sti" на ранних return'ах ниже раньше
-// ПРЕЖДЕВРЕМЕННО включал их посреди создания процесса, позволяя
-// таймерному IRQ (который теперь ещё и опрашивает USB) вклиниться прямо в
-// этот момент и повредить кучу/список процессов. Восстанавливаем именно
-// то состояние, что было на входе, а не форсируем "включено".
+// Сохраняет текущее EFLAGS.IF и отключает прерывания. run/exec выполняются
+// синхронно прямо из обработчика IRQ1 клавиатуры, где прерывания уже
+// отключены самим CPU — безусловный "sti" на ранних return'ах раньше
+// включал их преждевременно, позволяя таймерному IRQ вклиниться и повредить
+// кучу/список процессов. Восстанавливаем именно то состояние, что было на входе.
 static inline uint64_t elf_irq_save(void) {
     uint64_t flags;
     asm volatile("pushfq; popq %0" : "=r"(flags) :: "memory");
@@ -548,7 +538,8 @@ static int elf_exec_internal(const void *elf_data,
 
     if (background) {
         proc->state = PROCESS_READY;
-        printf("[ELF] Background process ready: PID %u\n", proc->pid);
+        DLOG("[ELF] Background process ready: PID %u\n", proc->pid);
+        klog("[ELF] background process ready: PID %u", proc->pid);
         elf_irq_restore(irq_flags);
         return (int)proc->pid;
     }
@@ -556,22 +547,12 @@ static int elf_exec_internal(const void *elf_data,
     // FOREGROUND
     asm volatile("cli");
 
-    // Отсюда мы прыгаем в новый процесс сырым context_switch() и можем
-    // не вернуться в этот стек вызовов ещё очень долго (пока proc сам не
-    // уступит CPU) — значит обычный send_eoi() в irq_handler(), который
-    // выполнился бы ПОСЛЕ штатного возврата из текущего обработчика IRQ,
-    // не выполнится вовсе. В этом ядре ЛЮБАЯ команда шелла (run/exec/...)
-    // может быть вызвана не только из PS/2 keyboard_irq_handler() (IRQ1),
-    // но и из timer_irq_handler() (IRQ0) — потому что USB HID-клавиатура
-    // опрашивается через usb_poll() прямо оттуда, а QEMU обычно доставляет
-    // один и тот же keystroke сразу на PS/2 и на USB устройство. Если
-    // "Enter" был обработан именно через USB-путь, "потерянный" EOI — это
-    // EOI САМОГО ТАЙМЕРА: PIC считает IRQ0 бесконечно "в обслуживании",
-    // и ни один следующий таймерный тик больше никогда не доставляется —
-    // весь планировщик виснет намертво (наблюдалось: EFLAGS.IF=1, HLT=1,
-    // но `info pic` показывает isr=01 для IRQ0). Шлём EOI на оба PIC
-    // вручную и безусловно (это no-op, если реально нечего подтверждать)
-    // — какой бы IRQ ни привёл нас сюда.
+    // Отсюда мы прыгаем в новый процесс сырым context_switch() и можем не
+    // вернуться в этот стек вызовов ещё очень долго — обычный send_eoi() в
+    // irq_handler() после штатного возврата не выполнится вовсе. Команда
+    // шелла может быть вызвана и из timer_irq_handler() (USB HID опрашивается
+    // оттуда же) — "потерянный" EOI таймера вешает весь планировщик намертво.
+    // Шлём EOI на оба PIC вручную и безусловно, какой бы IRQ ни привёл сюда.
     outb(0xA0, 0x20);
     outb(0x20, 0x20);
 
@@ -672,20 +653,14 @@ int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
     ctx->rflags = 0x202;
     ctx->cr3 = new_pml4;
 
-    printf("[ELF] Process %u replaced with '%s' (entry=0x%lx)\n",
+    DLOG("[ELF] Process %u replaced with '%s' (entry=0x%lx)\n",
            proc->pid, name, (uint64_t)entry);
+    klog("[ELF] PID %u exec'd '%s'", proc->pid, name);
 
-    // Отсюда мы уже никогда не вернёмся по этому стеку вызовов, а shell-
-    // команда "exec" обычно вызывается прямо из обработчика IRQ (PS/2
-    // клавиатура — IRQ1, но и таймер — IRQ0, поскольку USB HID-клавиатура
-    // опрашивается через usb_poll() прямо из timer_irq_handler(), а QEMU
-    // обычно доставляет один и тот же keystroke сразу на оба устройства),
-    // и штатный send_eoi() в irq_handler() для этого прерывания не
-    // выполнится. Подтверждаем вручную на обоих PIC (безусловно — если
-    // подтверждать нечего, это no-op) — иначе PIC считает соответствующий
-    // IRQ "в обслуживании" навсегда; для IRQ0 это означает, что ни один
-    // следующий таймерный тик больше никогда не доставляется и весь
-    // планировщик виснет намертво.
+    // Отсюда мы уже не вернёмся по этому стеку вызовов, а "exec" может быть
+    // вызван и из timer_irq_handler() (см. комментарий выше) — штатный
+    // send_eoi() не выполнится. Подтверждаем вручную на обоих PIC, иначе
+    // соответствующий IRQ считается "в обслуживании" навсегда.
     outb(0xA0, 0x20);
     outb(0x20, 0x20);
 

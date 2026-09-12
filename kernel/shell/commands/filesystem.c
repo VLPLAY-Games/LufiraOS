@@ -6,6 +6,8 @@
 #include "system/process/process.h"
 #include "system/syscall/syscall.h"
 #include "system/mm/heap.h"
+#include "system/devmode/devmode.h"
+#include "system/klog/klog.h"
 
 extern lufirafs_t lufirafs;
 extern char cwd_path[256];
@@ -273,7 +275,8 @@ void command_run(const char *filename) {
         return;
     }
 
-    printf("\nLoading ELF: %s (%u bytes)...\n", filename, fsize);
+    DLOG("\nLoading ELF: %s (%u bytes)...\n", filename, fsize);
+    klog("[SHELL] run '%s' (%u bytes)", filename, fsize);
 
     if (elf_exec(file_buf, fsize, filename) == 0) {
         printf("Process started!\n");

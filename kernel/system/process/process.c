@@ -7,6 +7,8 @@
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
 #include "lib/string.h"
+#include "system/devmode/devmode.h"
+#include "system/klog/klog.h"
 
 #ifndef PAGE_PS
 #define PAGE_PS 0x80    // Page size (2MB/1GB) — как и в elf.c
@@ -39,20 +41,11 @@ static uint32_t next_pid = 1;
 static process_t *idle_process = NULL;
 uint64_t kernel_cr3 = 0;
 
-// Глобальный счётчик для вложенных запретов прерываний.
-//
-// irq_disable()/irq_enable() вызываются не только из обычного кода ядра,
-// но и синхронно ИЗНУТРИ обработчиков IRQ (шелл выполняет команды прямо в
-// keyboard_irq_handler() — см. комментарий в elf.c про exec), где
-// прерывания уже аппаратно отключены самим CPU при входе в interrupt
-// gate. Раньше irq_enable() при обнулении счётчика безусловно делал
-// "sti" — если самый первый irq_disable() в цепочке вызовов на самом деле
-// застал прерывания УЖЕ выключенными (мы внутри чужого IRQ), это
-// ПРЕЖДЕВРЕМЕННО включало их посреди создания процесса, и вложенный
-// таймерный IRQ (который теперь ещё и опрашивает USB через usb_poll())
-// мог вклиниться прямо в этот момент. Поэтому запоминаем реальное
-// состояние EFLAGS.IF на момент самого первого захвата и включаем
-// прерывания обратно, только если они действительно были включены.
+// Счётчик вложенных запретов прерываний. irq_disable()/irq_enable() иногда
+// вызываются уже ИЗНУТРИ обработчика IRQ (например, шелл выполняет команды
+// прямо в keyboard_irq_handler()), где прерывания уже отключены самим CPU —
+// поэтому запоминаем реальное состояние EFLAGS.IF на первом захвате и делаем
+// sti обратно, только если они действительно были включены.
 static volatile uint32_t irq_disable_counter = 0;
 static uint64_t irq_saved_flags = 0;
 
@@ -74,24 +67,12 @@ static inline void irq_enable(void) {
     }
 }
 
-// Выделение Ring 0 стека.
-//
-// НЕ переключает CR3 — раньше эта функция временно переключалась на
-// proc->page_table, чтобы иметь возможность вызвать обычный map_page()
-// (который всегда работает с ТЕКУЩИМ CR3). Но весь этот вызов идёт вложенно
-// из process_create(), которая, в свою очередь, обычно вызывается прямо из
-// keyboard_irq_handler() — а значит текущий стек вызовов физически лежит
-// на ПОЛЬЗОВАТЕЛЬСКОМ стеке ВЫЗЫВАЮЩЕГО процесса (shell и любой другой
-// процесс в этом ядре выполняется на CPL0, но на СВОЁМ user-стеке, пока не
-// сделает первый syscall). Индекс PML4, покрывающий этот стек, не может
-// присутствовать в свежесозданном proc->page_table: kernel_cr3 был снят
-// до того, как хоть один процесс успел выделить себе пользовательский
-// стек, а sync_kernel_mappings() синхронизирует только kernel-space
-// (256-511). Переключение CR3 мгновенно обрывало сам стек вызовов —
-// instruction fetch следующей же инструкции ронял систему в triple fault.
-// Вместо этого маппим напрямую в proc->page_table по физическому
-// указателю через map_page_in_pml4() (identity mapping), как это уже
-// делает elf_load_to_process() для сегментов ELF.
+// Выделение Ring 0 стека. НЕ переключает CR3: process_create() обычно
+// вызывается прямо из keyboard_irq_handler(), то есть текущий стек вызовов
+// лежит на user-стеке вызывающего процесса, чей PML4-индекс ещё не
+// синхронизирован в свежесозданный proc->page_table — переключение CR3 тут
+// оборвало бы сам стек вызовов. Маппим напрямую по физическому адресу через
+// map_page_in_pml4(), как elf_load_to_process() для сегментов ELF.
 static uint64_t allocate_ring0_stack(process_t *proc) {
     uint64_t stack_base = KERNEL_STACK_AREA_START +
                           (proc->pid * KERNEL_STACK_SIZE);
@@ -153,28 +134,17 @@ static uint64_t create_address_space(uint64_t kernel_pml4_phys) {
     uint64_t *new_pml4 = (uint64_t*)phys_to_virt(new_pml4_phys);
     uint64_t *kernel_pml4 = (uint64_t*)phys_to_virt(kernel_pml4_phys);
 
-    // pmm_alloc_page() НЕ гарантирует нулевую страницу — в ней остаётся
-    // мусор от предыдущего владельца этой физической страницы (или от
-    // прошивки, если страница вообще ни разу не использовалась). Цикл
-    // ниже пишет new_pml4[i] только там, где соответствующая запись ЕСТЬ
-    // в kernel_pml4 (например, kernel_cr3 захвачен ДО того, как хоть один
-    // процесс выделил себе стек, так что записей для
-    // KERNEL_STACK_AREA_START/USER_STACK_AREA_START там нет и не может
-    // быть) — без обнуления в остальных индексах остался бы мусор, и если
-    // в нём случайно выставлен бит PRESENT, он воспринимался бы как
-    // указатель на настоящую PDPT.
+    // pmm_alloc_page() не гарантирует нулевую страницу — обнуляем, иначе
+    // мусор со случайно выставленным PRESENT сойдёт за указатель на PDPT.
     for (int i = 0; i < 512; i++) {
         new_pml4[i] = 0;
     }
 
-    // Копируем ВСЕ записи, но с модификацией флагов
     for (int i = 0; i < 512; i++) {
-        // Индекс 0 (identity map низких физических гигабайт, см.
-        // paging_init()) НЕ копируем по указателю сюда — иначе все процессы
-        // разделяли бы один и тот же физический PDPT/PD, и расщепление
-        // huge-страницы под ELF одного процесса (см. clone_low_identity_map()
-        // в paging.c) портило бы identity map для всей системы. Вместо
-        // этого ниже даём процессу СОБСТВЕННУЮ копию.
+        // Индекс 0 (identity map, см. paging_init()) не копируем по указателю —
+        // иначе все процессы делили бы один физический PDPT/PD, и расщепление
+        // huge-страницы под ELF одного процесса портило бы identity map всей
+        // системы. Вместо этого ниже даём процессу собственную копию.
         if (i == 0) continue;
 
         if (kernel_pml4[i] & PAGE_PRESENT) {
@@ -194,19 +164,12 @@ static uint64_t create_address_space(uint64_t kernel_pml4_phys) {
     return new_pml4_phys;
 }
 
-// Настоящий глубокий клон адресного пространства для fork(): ядерная
-// половина (индексы PML4 256-511) заводится штатно, как для любого нового
-// процесса (create_address_space(kernel_cr3) + sync_kernel_mappings) —
-// она в любом случае общая для всех процессов. Пользовательская половина
-// (индексы 0-255) рекурсивно обходится по src_pml4_phys, и КАЖДАЯ занятая
-// страница данных копируется в новую физическую страницу (eager copy, без
-// copy-on-write — в paging.c сейчас нет инфраструктуры под COW).
-//
-// При нехватке памяти на каком-либо уровне возвращает 0; уже выделенные
-// до этого момента страницы частично построенного дерева намеренно не
-// освобождаются — как и во всей остальной работе с адресными
-// пространствами в этом файле (см. process_reap()), полного разбора PML4
-// здесь пока нет, а fork() при нехватке памяти — редкий крайний случай.
+// Глубокий клон адресного пространства для fork(): ядерная половина
+// (256-511) заводится штатно (create_address_space + sync_kernel_mappings),
+// пользовательская (0-255) рекурсивно обходится и копируется eager (без
+// copy-on-write — инфраструктуры под COW в paging.c пока нет). При нехватке
+// памяти возвращает 0; частично выделенное дерево не освобождается (как и
+// везде в этом файле — полного разбора PML4 пока нет, см. process_reap()).
 static uint64_t clone_address_space_deep(uint64_t src_pml4_phys) {
     uint64_t new_pml4_phys = create_address_space(kernel_cr3);
     if (!new_pml4_phys)
@@ -331,7 +294,7 @@ void process_init(void) {
     memset(&idle_process->fd_table, 0, sizeof(fd_table_t));
     current_fd_table = &idle_process->fd_table;
 
-    printf("[PROCESS] Process manager initialized\n");
+    DLOG("[PROCESS] Process manager initialized\n");
 }
 
 // Тоже без переключения CR3 (см. подробное объяснение у
@@ -477,8 +440,9 @@ process_t* process_create(const char *name, void (*entry)(void)) {
         proc->next = process_list;
     }
     
-    printf("[PROCESS] Created '%s' (PID %u, Ring 3, user stack: 0x%lx)\n", 
+    DLOG("[PROCESS] Created '%s' (PID %u, Ring 3, user stack: 0x%lx)\n",
            name, proc->pid, proc->stack_base);
+    klog("[PROCESS] created '%s' (PID %u)", name, proc->pid);
     
     irq_enable();
     return proc;
@@ -570,10 +534,12 @@ void process_exit(int exit_code) {
             asm volatile("hlt");
     }
 
-    printf("\n[PROCESS] Process %u ('%s') exiting (code %d)\n",
+    DLOG("\n[PROCESS] Process %u ('%s') exiting (code %d)\n",
            exiting_process->pid,
            exiting_process->name,
            exit_code);
+    klog("[PROCESS] PID %u ('%s') exited (code %d)",
+         exiting_process->pid, exiting_process->name, exit_code);
 
     exiting_process->exit_code = exit_code;
     exiting_process->state = PROCESS_TERMINATED;
@@ -687,16 +653,10 @@ int process_prepare_exec(process_t *proc,
     return 0;
 }
 
-// Подтверждает exec(): переключает proc на уже подготовленные (и
-// заполненные загруженным ELF) адресное пространство и стек. PID,
-// ring0-стек и позиция в списке планировщика не меняются — это замена
-// образа процесса на месте, а не создание нового процесса.
-//
-// Старое адресное пространство/стек proc намеренно не освобождаются:
-// в кодовой базе пока нет функции разбора/освобождения PML4 целиком
-// (process_reap() точно так же не освобождает page_table завершённых
-// процессов), так что делать это только здесь было бы половинчатым
-// решением.
+// Подтверждает exec(): переключает proc на уже подготовленные адресное
+// пространство и стек (замена образа процесса на месте, PID не меняется).
+// Старые page_table/стек не освобождаются — разбора PML4 в кодовой базе
+// пока нет вообще (process_reap() тоже его не делает).
 int process_commit_exec(process_t *proc,
                         uint64_t new_pml4,
                         uint64_t new_stack,
@@ -734,7 +694,7 @@ void process_reap(void) {
         }
         
         if (p->state == PROCESS_TERMINATED && p != idle_process) {
-            printf("[PROCESS] Reaping zombie PID %u ('%s')\n", p->pid, p->name);
+            DLOG("[PROCESS] Reaping zombie PID %u ('%s')\n", p->pid, p->name);
             
             if (prev == NULL) {
                 if (p->next == p) {
@@ -999,6 +959,7 @@ static int terminate_process_by_signal(process_t *p, int sig) {
 
     printf("[PROCESS] PID %u ('%s') terminated by signal %d\n",
            p->pid, p->name, sig);
+    klog("[PROCESS] PID %u ('%s') terminated by signal %d", p->pid, p->name, sig);
 
     // Как и в настоящих шеллах: $? для процесса, убитого сигналом, — 128+sig.
     p->exit_code = 128 + sig;
@@ -1200,7 +1161,8 @@ uint64_t process_fork(uint64_t frame_ptr) {
 
     child->state = PROCESS_READY;
 
-    printf("[FORK] PID %u forked into PID %u\n", parent->pid, child->pid);
+    DLOG("[FORK] PID %u forked into PID %u\n", parent->pid, child->pid);
+    klog("[FORK] PID %u forked into PID %u", parent->pid, child->pid);
 
     return (uint64_t)child->pid;
 }

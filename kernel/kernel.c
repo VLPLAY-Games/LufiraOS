@@ -21,6 +21,8 @@
 #include "system/timer/pit.h"
 #include "system/syscall/syscall.h"
 #include "fs/vfs/vfs.h"
+#include "system/devmode/devmode.h"
+#include "system/klog/klog.h"
 #include "log.h"
 
 
@@ -119,6 +121,9 @@ void _start(BootInfo* bi) {
         uint32_t lba_offset = LUFIRAFS_ESP_SIZE / 512;
         if (lufirafs_init(&lufirafs, fs_image, fs_size, lba_offset) == 0) {
             LOG_DONE_OK("LufiraFS mounted");
+            devmode_init();
+            klog_init();
+            klog("[BOOT] LufiraOS booting, devmode=%u", devmode_is_enabled());
         } else {
             LOG_DONE_FAIL("LufiraFS mount failed");
         }
@@ -202,7 +207,8 @@ void _start(BootInfo* bi) {
     printf("  Memory manager: INITIALIZED\n");
     printf("  Scheduler: COOPERATIVE\n");
     printf("  Process manager: INITIALIZED\n");
-    printf("  FAT filesystem: MOUNTED\n");
+    printf("  LufiraFS: %s\n", lufirafs_mounted ? "MOUNTED" : "NOT MOUNTED");
+    printf("  Developer mode: %s\n", devmode_is_enabled() ? "ON" : "OFF");
     set_foreground_color(LOG_COLOR_INFO);
 
     process_set_shell_entry(shell_task);
