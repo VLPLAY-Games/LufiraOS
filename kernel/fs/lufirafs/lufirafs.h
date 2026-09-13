@@ -46,6 +46,13 @@ int lufirafs_lookup(lufirafs_t *fs, uint32_t start_inode, const char *path, uint
 int lufirafs_resolve_parent(lufirafs_t *fs, uint32_t start_inode, const char *path,
                              uint32_t *out_parent, char *out_name);
 
+// Восстанавливает абсолютный путь для inode, поднимаясь по ".." до корня и
+// на каждом шаге находя своё имя в родительском каталоге. Используется вместо
+// ручного редактирования строки cwd_path — так cd корректно работает для
+// "..", ".", абсолютных и составных путей без дублирования логики lookup.
+// -1, если inode не найден или путь не влезает в out_size.
+int lufirafs_get_path(lufirafs_t *fs, uint32_t ino, char *out, uint32_t out_size);
+
 // mode — LUFIRAFS_MODE_FILE или LUFIRAFS_MODE_DIR. Для директорий сразу
 // создаёт "." и "..". Ошибки: -1 неверные параметры/уже существует,
 // -2 нет свободного inode, -3 не удалось добавить запись в каталог.

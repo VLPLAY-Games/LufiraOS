@@ -229,7 +229,7 @@ void _start(BootInfo* bi) {
         printf("\n");
         set_foreground_color(LOG_COLOR_HEADER);
         printf("================================================\n");
-        printf("     LufiraOS Kernel v0.3.0                     \n");
+        printf("     LufiraOS Kernel v0.3.1                     \n");
         printf("================================================\n");
         set_foreground_color(LOG_COLOR_INFO);
 

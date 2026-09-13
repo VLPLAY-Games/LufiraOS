@@ -334,6 +334,61 @@ int lufirafs_resolve_parent(lufirafs_t *fs, uint32_t start_inode, const char *pa
     return lufirafs_lookup(fs, start_inode, dir_path, out_parent);
 }
 
+// Ищет в parent_ino запись (кроме "." и ".."), ведущую на child_ino, и
+// копирует её имя в out_name. Нужно для восстановления пути "снизу вверх".
+static int find_name_in_parent(lufirafs_t *fs, uint32_t parent_ino, uint32_t child_ino, char *out_name) {
+    lufirafs_dir_t dir;
+    lufirafs_opendir(fs, parent_ino, &dir);
+    lufirafs_dirent_t ent;
+    while (lufirafs_readdir(&dir, &ent) == 0) {
+        if (strcmp(ent.name, ".") == 0 || strcmp(ent.name, "..") == 0) continue;
+        if (ent.inode == child_ino) {
+            copy_name(out_name, ent.name, LUFIRAFS_MAX_NAME);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+#define LUFIRAFS_MAX_PATH_DEPTH 32
+
+int lufirafs_get_path(lufirafs_t *fs, uint32_t ino, char *out, uint32_t out_size) {
+    if (!fs || !out || out_size < 2) return -1;
+
+    if (ino == fs->sb.root_inode) {
+        out[0] = '/';
+        out[1] = '\0';
+        return 0;
+    }
+
+    char names[LUFIRAFS_MAX_PATH_DEPTH][LUFIRAFS_MAX_NAME + 1];
+    int depth = 0;
+
+    uint32_t cur = ino;
+    while (cur != fs->sb.root_inode) {
+        if (depth >= LUFIRAFS_MAX_PATH_DEPTH) return -1;
+
+        uint32_t parent;
+        if (lookup_in_dir(fs, cur, "..", &parent) != 0) return -1;
+        if (find_name_in_parent(fs, parent, cur, names[depth]) != 0) return -1;
+        depth++;
+
+        if (parent == cur) break; // защита от зацикливания, в норме не бывает
+        cur = parent;
+    }
+
+    uint32_t pos = 0;
+    for (int i = depth - 1; i >= 0; i--) {
+        uint32_t len = (uint32_t)strlen(names[i]);
+        if (pos + 1 + len >= out_size) return -1;
+        out[pos++] = '/';
+        memcpy(out + pos, names[i], len);
+        pos += len;
+    }
+    out[pos] = '\0';
+    return 0;
+}
+
 // ===== Создание / удаление =====
 
 int lufirafs_create(lufirafs_t *fs, uint32_t parent_ino, const char *name, uint32_t mode, uint32_t *out_ino) {

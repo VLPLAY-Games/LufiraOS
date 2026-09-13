@@ -99,27 +99,14 @@ void command_cd(const char* path) {
         return;
     }
 
-    if (strcmp(path, "..") == 0) {
-        if (cwd_inode != lufirafs.sb.root_inode) {
-            int len = 0; while (cwd_path[len]) len++;
-            if (len > 1) {
-                cwd_path[len - 1] = '\0'; // убираем хвостовой '/'
-                char *slash = NULL;
-                for (int i = 0; cwd_path[i]; i++)
-                    if (cwd_path[i] == '/') slash = &cwd_path[i];
-                if (slash) *slash = '\0';
-                else { cwd_path[0] = '/'; cwd_path[1] = '\0'; }
-            }
-        }
-    } else if (strcmp(path, ".") != 0) {
-        int len = 0; while (cwd_path[len]) len++;
-        int plen = 0; while (path[plen]) plen++;
-        if (len + 1 + plen < 255) {
-            if (cwd_path[0] != '/' || cwd_path[1] != '\0') // не просто "/"
-                cwd_path[len++] = '/';
-            for (int i = 0; path[i]; i++) cwd_path[len++] = path[i];
-            cwd_path[len] = '\0';
-        }
+    // cwd_path раньше достраивался вручную (конкатенацией/обрезкой строки),
+    // что ломалось на "..", абсолютных и составных путях. Проще и надёжнее
+    // каждый раз пересчитать его с нуля из нового inode, поднимаясь по
+    // реальным записям ".." в файловой системе — так же, как это делает
+    // lufirafs_lookup для самого перехода.
+    if (lufirafs_get_path(&lufirafs, new_inode, cwd_path, sizeof(cwd_path)) != 0) {
+        cwd_path[0] = '/';
+        cwd_path[1] = '\0';
     }
 
     cwd_inode = new_inode;
@@ -439,9 +426,21 @@ void command_cp(const char *args) {
         return;
     }
 
+    // dst_name может содержать путь к каталогу (например "system/copy.txt") —
+    // lufirafs_create принимает только (родитель, простое имя), поэтому
+    // сначала разбиваем dst_name на родительский inode и конечное имя, а не
+    // передаём его целиком как имя записи в cwd_inode.
+    uint32_t dst_parent;
+    char dst_leaf[LUFIRAFS_MAX_NAME + 1];
+    if (lufirafs_resolve_parent(&lufirafs, cwd_inode, dst_name, &dst_parent, dst_leaf) != 0) {
+        printf("\ncp: invalid destination path: %s\n", dst_name);
+        kfree(buf);
+        return;
+    }
+
     uint32_t dst_ino;
-    if (lufirafs_lookup(&lufirafs, cwd_inode, dst_name, &dst_ino) != 0) {
-        if (lufirafs_create(&lufirafs, cwd_inode, dst_name, LUFIRAFS_MODE_FILE, &dst_ino) != 0) {
+    if (lufirafs_lookup(&lufirafs, dst_parent, dst_leaf, &dst_ino) != 0) {
+        if (lufirafs_create(&lufirafs, dst_parent, dst_leaf, LUFIRAFS_MODE_FILE, &dst_ino) != 0) {
             printf("\ncp: error creating destination file\n");
             kfree(buf);
             return;
@@ -498,8 +497,20 @@ void command_mv(const char *args) {
         return;
     }
 
+    // Как и в cp: src_name/dst_name могут содержать путь к каталогу, а не
+    // просто имя файла в cwd_inode — резолвим родителя для каждого из них
+    // отдельно, чтобы unlink() снял запись из настоящего родительского
+    // каталога источника, а create()/lookup() для назначения работали в его
+    // собственном каталоге, а не всегда в cwd_inode.
+    uint32_t src_parent;
+    char src_leaf[LUFIRAFS_MAX_NAME + 1];
+    if (lufirafs_resolve_parent(&lufirafs, cwd_inode, src_name, &src_parent, src_leaf) != 0) {
+        printf("\nmv: invalid source path: %s\n", src_name);
+        return;
+    }
+
     uint32_t src_ino;
-    if (lufirafs_lookup(&lufirafs, cwd_inode, src_name, &src_ino) != 0) {
+    if (lufirafs_lookup(&lufirafs, src_parent, src_leaf, &src_ino) != 0) {
         printf("\nmv: source file not found: %s\n", src_name);
         return;
     }
@@ -520,15 +531,27 @@ void command_mv(const char *args) {
         return;
     }
 
+    uint32_t dst_parent;
+    char dst_leaf[LUFIRAFS_MAX_NAME + 1];
+    if (lufirafs_resolve_parent(&lufirafs, cwd_inode, dst_name, &dst_parent, dst_leaf) != 0) {
+        printf("\nmv: invalid destination path: %s\n", dst_name);
+        kfree(buf);
+        return;
+    }
+
     uint32_t dst_ino;
-    if (lufirafs_lookup(&lufirafs, cwd_inode, dst_name, &dst_ino) != 0) {
-        lufirafs_create(&lufirafs, cwd_inode, dst_name, LUFIRAFS_MODE_FILE, &dst_ino);
+    if (lufirafs_lookup(&lufirafs, dst_parent, dst_leaf, &dst_ino) != 0) {
+        if (lufirafs_create(&lufirafs, dst_parent, dst_leaf, LUFIRAFS_MODE_FILE, &dst_ino) != 0) {
+            printf("\nmv: error creating destination file\n");
+            kfree(buf);
+            return;
+        }
     } else {
         lufirafs_truncate(&lufirafs, dst_ino, 0);
     }
     lufirafs_write(&lufirafs, dst_ino, 0, buf, src_inode.size);
 
-    lufirafs_unlink(&lufirafs, cwd_inode, src_name);
+    lufirafs_unlink(&lufirafs, src_parent, src_leaf);
     lufirafs_sync(&lufirafs);
 
     printf("\nMoved '%s' to '%s' (%u bytes)\n", src_name, dst_name, src_inode.size);
