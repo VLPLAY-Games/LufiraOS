@@ -318,7 +318,43 @@ void command_exec(const char *filename) {
         return;
     }
 
-    if (do_exec(filename) != 0) {
+    // do_exec() идёт через VFS, а там пути ВСЕГДА разрешаются от корня (см.
+    // комментарий вверху lufirafs_vfs.c) — в отличие от run(), который бьёт
+    // напрямую в lufirafs_lookup(cwd_inode, ...) и потому понимает путь
+    // относительно текущей папки шелла. Поэтому сами резолвим filename через
+    // cwd_inode и собираем готовый абсолютный путь для do_exec().
+    //
+    // filename указывает на ФАЙЛ, а не на директорию, поэтому у него самого
+    // нет записи ".." (она есть только у директорий) — lufirafs_get_path()
+    // нельзя вызвать прямо на нём. Сначала берём родительскую директорию
+    // через lufirafs_resolve_parent() (она точно директория, get_path для
+    // неё работает), затем приклеиваем к её абсолютному пути имя файла.
+    uint32_t parent_ino;
+    char leaf[LUFIRAFS_MAX_NAME + 1];
+    if (lufirafs_resolve_parent(&lufirafs, cwd_inode, filename, &parent_ino, leaf) != 0) {
+        printf("\nExec failed: %s\n", filename);
+        return;
+    }
+
+    char abs_path[256];
+    if (lufirafs_get_path(&lufirafs, parent_ino, abs_path, sizeof(abs_path)) != 0) {
+        printf("\nExec failed: %s\n", filename);
+        return;
+    }
+
+    int pos = 0;
+    while (abs_path[pos]) pos++;
+    int leaf_len = 0;
+    while (leaf[leaf_len]) leaf_len++;
+    if (pos + 1 + leaf_len >= (int)sizeof(abs_path)) {
+        printf("\nExec failed: %s\n", filename);
+        return;
+    }
+    if (pos == 0 || abs_path[pos - 1] != '/') abs_path[pos++] = '/';
+    for (int i = 0; i < leaf_len; i++) abs_path[pos++] = leaf[i];
+    abs_path[pos] = '\0';
+
+    if (do_exec(abs_path) != 0) {
         printf("\nExec failed: %s\n", filename);
     }
     // Не освобождаем буфер - он используется процессом
