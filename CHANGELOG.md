@@ -2,6 +2,19 @@
 
 All notable changes to LufiraOS are documented in this file.
 
+## [0.3.1] - 2026-09-13
+
+### Fixed
+
+- `cd`, `cp`, `du`, and `mv` commands 
+- `exec` command path bug
+
+### Known Issues
+
+- Holding down a keyboard key does not repeat the character.
+- `fork()` and `exec()` are unreliable — a forked child process can crash before it reaches its first instruction.
+
+
 ## [0.3.0] - 2026-09-12
 
 Covers all changes since `v0.1.0` (commit `1fa52bd`, "fix bug with clear", inclusive).
