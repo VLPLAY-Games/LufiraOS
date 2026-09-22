@@ -400,10 +400,19 @@ int lufirafs_create(lufirafs_t *fs, uint32_t parent_ino, const char *name, uint3
     uint32_t ino = alloc_inode(fs);
     if (!ino) return -2;
 
+    // links_count сразу выставляем в финальное значение (2 для директорий —
+    // за счёт её собственной "."), а не переписываем его отдельным write_inode
+    // ПОСЛЕ add_dirent(): та стартовая структура тут ещё нулевая (size=0,
+    // все direct[] нули), и такой второй write затирал бы блок с "."/".. ",
+    // который add_dirent только что честно выделил и прописал в inode —
+    // каталог на диске оставался бы мёртвым, с size=0, хотя дальше исправно
+    // добавлен в родителя и виден в ls как имя (баг: "cd .." из свежесозданной
+    // через mkdir папки не находил ни "..", ни даже "." — inode "думал", что
+    // у него нет ни одного блока).
     lufirafs_inode_t inode;
     memset(&inode, 0, sizeof(inode));
     inode.mode = mode;
-    inode.links_count = 1;
+    inode.links_count = (mode == LUFIRAFS_MODE_DIR) ? 2 : 1;
     lufirafs_write_inode(fs, ino, &inode);
 
     if (mode == LUFIRAFS_MODE_DIR) {
@@ -412,8 +421,6 @@ int lufirafs_create(lufirafs_t *fs, uint32_t parent_ino, const char *name, uint3
             free_inode_slot(fs, ino);
             return -3;
         }
-        inode.links_count = 2;
-        lufirafs_write_inode(fs, ino, &inode);
     }
 
     if (add_dirent(fs, parent_ino, name, ino) != 0) {
