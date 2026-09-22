@@ -117,9 +117,16 @@ context_switch:
     # Restore RDI before RSI
     movq 40(%rsi), %rdi
 
-    # Prepare RFLAGS restore value
-    movq 136(%rsi), %rax
-    pushq %rax
+    # Prepare RFLAGS restore value. Pushed straight from memory (NOT via
+    # %rax as a scratch register, like before) — %rax was just restored to
+    # its real context value a few lines up (0(%rsi)), and routing RFLAGS
+    # through it here clobbered that value right before the jmp below. For
+    # a freshly-forked child this %rax IS the fork() return value (0, so it
+    # takes the "child" branch) — with the clobber it silently became
+    # whatever RFLAGS happened to be (always non-zero, e.g. 0x202+), so the
+    # child always fell through to the "parent" branch instead ("Parent
+    # process here!" printed twice, "Child process here!" never printed).
+    pushq 136(%rsi)
 
     # Restore RSI LAST
     movq 32(%rsi), %rsi
