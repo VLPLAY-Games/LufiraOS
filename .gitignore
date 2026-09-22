@@ -7,3 +7,4 @@ test/pipe_test.o
 pipe_test.o
 fork_test.o
 hello_simple.o
+count.py
