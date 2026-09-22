@@ -13,6 +13,25 @@ BUILD_DIR := build
 BOOTLOADER_DIR := boot
 KERNEL_DIR := kernel
 
+# Цвета для вывода (ANSI escape-коды)
+RESET   := \033[0m
+BOLD    := \033[1m
+DIM     := \033[2m
+RED     := \033[31m
+GREEN   := \033[32m
+YELLOW  := \033[33m
+BLUE    := \033[34m
+MAGENTA := \033[35m
+CYAN    := \033[36m
+WHITE   := \033[37m
+BRED    := \033[91m
+BGREEN  := \033[92m
+BYELLOW := \033[93m
+BBLUE   := \033[94m
+BMAGENTA:= \033[95m
+BCYAN   := \033[96m
+BWHITE  := \033[97m
+
 # Держите в синхроне с LUFIRAFS_ESP_SIZE в
 # kernel/fs/lufirafs/lufirafs_format.h — расхождение означает, что mkfs
 # отформатирует не тот регион диска, который потом читает ядро.
@@ -124,44 +143,44 @@ kernel: $(BUILD_DIR)/kernel.bin
 disk: $(BUILD_DIR)/disk.img
 
 $(BUILD_DIR)/boot/%.o: $(BOOTLOADER_DIR)/%.c
-	@echo "  CC    $<"
+	@printf "  $(BCYAN)CC$(RESET)      $(DIM)$<$(RESET)\n"
 	@mkdir -p $(dir $@)
 	$(CC) $(BOOTLOADER_CFLAGS) -c -o $@ $<
 
 $(BUILD_DIR)/boot.so: $(BOOTLOADER_OBJECTS)
-	@echo "  LD    $@"
+	@printf "  $(BMAGENTA)LD$(RESET)      $(DIM)$@$(RESET)\n"
 	$(LD) $(BOOTLOADER_LDFLAGS) -o $@ $(BOOTLOADER_OBJECTS) -lefi -lgnuefi
 
 $(BUILD_DIR)/BOOTX64.EFI: $(BUILD_DIR)/boot.so
-	@echo "  OBJCOPY $@"
+	@printf "  $(BYELLOW)OBJCOPY$(RESET) $(DIM)$@$(RESET)\n"
 	$(OBJCOPY) -j .text -j .sdata -j .data -j .dynamic -j .dynsym \
 		-j .rel -j .rela -j .reloc --target=efi-app-x86_64 $< $@
 
 $(BUILD_DIR)/kernel/%.o: $(KERNEL_DIR)/%.c
-	@echo "  CC    $<"
+	@printf "  $(BGREEN)CC$(RESET)      $(DIM)$<$(RESET)\n"
 	@mkdir -p $(dir $@)
 	$(CC) $(KERNEL_CFLAGS) -o $@ $<
 
 $(BUILD_DIR)/kernel/%.o: $(KERNEL_DIR)/%.S
-	@echo "  AS    $<"
+	@printf "  $(BBLUE)AS$(RESET)      $(DIM)$<$(RESET)\n"
 	@mkdir -p $(dir $@)
 	$(CC) $(KERNEL_CFLAGS) -x assembler-with-cpp -o $@ $<
 
 $(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(KERNEL_DIR)/linker.ld
-	@echo "  LD    $@"
+	@printf "  $(BMAGENTA)LD$(RESET)      $(DIM)$@$(RESET)\n"
 	$(LD) $(KERNEL_LDFLAGS) -T $(KERNEL_DIR)/linker.ld -o $@ $(KERNEL_OBJECTS)
 
 $(BUILD_DIR)/kernel.bin: $(BUILD_DIR)/kernel.elf
-	@echo "  OBJCOPY $@"
+	@printf "  $(BYELLOW)OBJCOPY$(RESET) $(DIM)$@$(RESET)\n"
 	$(OBJCOPY) -O binary $< $@
 	@KERNEL_END=$$(nm $(BUILD_DIR)/kernel.elf | awk '$$3=="__kernel_end"{print $$1}'); \
 	KERNEL_SIZE=$$((0x$$KERNEL_END - 0x100000)); \
-	echo "  Kernel runtime size: $$KERNEL_SIZE bytes"; \
-	echo "  Kernel end: 0x$$KERNEL_END"; \
+	printf "  $(BOLD)$(BGREEN)✓ Kernel runtime size:$(RESET) $(BWHITE)%s bytes$(RESET)\n" "$$KERNEL_SIZE"; \
+	printf "  $(BOLD)$(BGREEN)✓ Kernel end:$(RESET)          $(BWHITE)0x%s$(RESET)\n" "$$KERNEL_END"; \
 	truncate -s $$KERNEL_SIZE $@
 
 $(BUILD_DIR)/mkfs_lufirafs: tools/mkfs_lufirafs.c $(KERNEL_DIR)/fs/lufirafs/lufirafs_format.h
-	@echo "  CC(host) $<"
+	@printf "  $(BCYAN)CC(host)$(RESET) $(DIM)$<$(RESET)\n"
 	$(CC) -O2 -Wall -o $@ $<
 
 # Диск — два региона без таблицы разделов (bootloader грузит в RAM ВЕСЬ
@@ -177,10 +196,10 @@ $(BUILD_DIR)/mkfs_lufirafs: tools/mkfs_lufirafs.c $(KERNEL_DIR)/fs/lufirafs/lufi
 # время меньший образ (512КБ) реально исчерпывал место при сборке
 # (mcopy проваливался с ошибкой), 16МБ даёт кратный запас.
 $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin $(BUILD_DIR)/mkfs_lufirafs
-	@echo "=== Creating disk image ==="
+	@printf "\n$(BOLD)$(BCYAN)═══ Creating disk image ═══$(RESET)\n"
 	@rm -f $@ $(BUILD_DIR)/esp.img
 	dd if=/dev/zero of=$@ bs=1024 count=$$(($(DISK_TOTAL_SIZE) / 1024)) status=none
-	@echo "  Building ESP (FAT12, bootloader + kernel.bin only)..."
+	@printf "  $(BBLUE)▸$(RESET) Building ESP (FAT12, bootloader + kernel.bin only)...\n"
 	dd if=/dev/zero of=$(BUILD_DIR)/esp.img bs=1024 count=$$(($(LUFIRAFS_ESP_SIZE) / 1024)) status=none
 	mkfs.fat -F 12 -S 512 $(BUILD_DIR)/esp.img
 	mmd -i $(BUILD_DIR)/esp.img ::/EFI
@@ -189,9 +208,9 @@ $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin $(BUILD_
 	mcopy -i $(BUILD_DIR)/esp.img $(BUILD_DIR)/kernel.bin ::/kernel.bin
 	dd if=$(BUILD_DIR)/esp.img of=$@ conv=notrunc status=none
 	rm -f $(BUILD_DIR)/esp.img
-	@echo "  Formatting LufiraFS region..."
+	@printf "  $(BBLUE)▸$(RESET) Formatting LufiraFS region...\n"
 	$(BUILD_DIR)/mkfs_lufirafs format $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE)
-	@echo "  Populating initial files..."
+	@printf "  $(BBLUE)▸$(RESET) Populating initial files...\n"
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /test
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /system
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /logs
@@ -199,17 +218,18 @@ $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin $(BUILD_
 	$(BUILD_DIR)/mkfs_lufirafs put $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(BUILD_DIR)/readme.txt /readme.txt
 	rm -f $(BUILD_DIR)/readme.txt
 	sync
-	@echo "=== Disk image created: $@ ==="
+	@printf "$(BOLD)$(BGREEN)═══ Disk image created: $(BWHITE)$@$(RESET)\n\n"
 
 check-disk: $(BUILD_DIR)/disk.img
-	@echo "=== Checking disk image ==="
+	@printf "\n$(BOLD)$(BCYAN)═══ Checking disk image ═══$(RESET)\n"
 	@file $@
+	@printf "\n"
 
 run: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs
 	$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) test/hello.elf /hello.elf
 	$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) test/fork_test.elf /fork.elf
 	$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) test/pipe_test.elf /pipe.elf
-	@echo "=== Starting QEMU ==="
+	@printf "\n$(BOLD)$(BMAGENTA)═══ Starting QEMU ═══$(RESET)\n\n"
 	qemu-system-x86_64 \
 		-bios /usr/share/ovmf/OVMF.fd \
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
@@ -244,15 +264,22 @@ monitor: $(BUILD_DIR)/disk.img
 		-no-reboot -no-shutdown
 
 clean:
-	@echo "=== Cleaning ==="
+	@printf "\n$(BOLD)$(BRED)═══ Cleaning ═══$(RESET)\n"
 	rm -rf $(BUILD_DIR)
+	@printf "$(BGREEN)✓ Build directory removed$(RESET)\n\n"
 
 info:
-	@echo "=== Build Information ==="
-	@echo "Architecture: $(ARCH)"
-	@echo "Build directory: $(BUILD_DIR)"
-	@echo "Bootloader sources: $(BOOTLOADER_SOURCES)"
-	@echo "Kernel C sources: $(KERNEL_C_SOURCES)"
-	@echo "Kernel ASM sources: $(KERNEL_ASM_SOURCES)"
+	@printf "\n$(BOLD)$(BCYAN)╔══════════════════════════════════════════╗$(RESET)\n"
+	@printf "$(BOLD)$(BCYAN)║       Build Information                  ║$(RESET)\n"
+	@printf "$(BOLD)$(BCYAN)╚══════════════════════════════════════════╝$(RESET)\n"
+	@printf "  $(BOLD)Architecture:$(RESET)       $(BWHITE)$(ARCH)$(RESET)\n"
+	@printf "  $(BOLD)Build directory:$(RESET)    $(BWHITE)$(BUILD_DIR)$(RESET)\n"
+	@printf "\n  $(BOLD)$(BCYAN)Bootloader sources:$(RESET)\n"
+	@for src in $(BOOTLOADER_SOURCES); do printf "    $(DIM)•$$RESET $$src\n"; done
+	@printf "\n  $(BOLD)$(BGREEN)Kernel C sources:$(RESET)\n"
+	@for src in $(KERNEL_C_SOURCES); do printf "    $(DIM)•$$RESET $$src\n"; done
+	@printf "\n  $(BOLD)$(BBLUE)Kernel ASM sources:$(RESET)\n"
+	@for src in $(KERNEL_ASM_SOURCES); do printf "    $(DIM)•$$RESET $$src\n"; done
+	@printf "\n"
 
 quick: clean all
