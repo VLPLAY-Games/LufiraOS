@@ -9,6 +9,7 @@
 #include "lib/string.h"
 #include "system/devmode/devmode.h"
 #include "system/klog/klog.h"
+#include "fs/lufirafs/lufirafs.h"
 
 #ifndef PAGE_PS
 #define PAGE_PS 0x80    // Page size (2MB/1GB) — как и в elf.c
@@ -303,6 +304,9 @@ void process_init(void) {
     // поле вообще когда-нибудь тронут.
     idle_process->next_mmap_addr = MMAP_AREA_START;
     memset(idle_process->mmap_regions, 0, sizeof(idle_process->mmap_regions));
+    idle_process->cwd_inode = LUFIRAFS_ROOT_INODE;
+    idle_process->cwd_path[0] = '/';
+    idle_process->cwd_path[1] = '\0';
 
     const char *name = "idle";
     for (int i = 0; i < 31 && name[i]; i++) idle_process->name[i] = name[i];
@@ -394,6 +398,9 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     proc->first_run = (entry == NULL);
     proc->next_mmap_addr = MMAP_AREA_START;
     memset(proc->mmap_regions, 0, sizeof(proc->mmap_regions));
+    proc->cwd_inode = LUFIRAFS_ROOT_INODE;
+    proc->cwd_path[0] = '/';
+    proc->cwd_path[1] = '\0';
 
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
     proc->name[31] = '\0';
@@ -714,6 +721,10 @@ int process_commit_exec(process_t *proc,
     // просто нет.
     proc->next_mmap_addr = MMAP_AREA_START;
     memset(proc->mmap_regions, 0, sizeof(proc->mmap_regions));
+
+    // cwd (proc->cwd_path/cwd_inode) НЕ сбрасывается здесь — в отличие от
+    // mmap-регионов, exec() не должен менять текущий каталог процесса
+    // (POSIX execve() тоже сохраняет cwd).
 
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
     proc->name[31] = '\0';
@@ -1199,6 +1210,10 @@ uint64_t process_fork(uint64_t frame_ptr) {
     // то, что уже унаследовал от родителя по тем же адресам.
     child->next_mmap_addr = parent->next_mmap_addr;
     memcpy(child->mmap_regions, parent->mmap_regions, sizeof(parent->mmap_regions));
+
+    // POSIX: ребёнок наследует cwd родителя 1:1.
+    child->cwd_inode = parent->cwd_inode;
+    strcpy(child->cwd_path, parent->cwd_path);
 
     // Контекст ребёнка продолжает выполнение СРАЗУ ПОСЛЕ инструкции
     // syscall в родителе — тот же rip/rflags и те же callee-saved регистры

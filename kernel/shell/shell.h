@@ -3,6 +3,7 @@
 #include "drivers/console/console.h"
 #include "drivers/keyboard/keyboard.h"
 #include "lib/string.h"
+#include "system/process/process.h"
 
 // Прототипы функций
 void show_prompt(void);
@@ -25,6 +26,11 @@ void load_command_from_history(int history_idx);
 void shell_handle_tab(void);
 void shell_handle_ctrl_c(void);
 
-// Текущий путь и inode текущего каталога (LufiraFS)
-extern char cwd_path[256];
-extern uint32_t cwd_inode;
+// Текущий путь и inode текущего каталога (LufiraFS) — раньше отдельные
+// шелл-глобалы, теперь макросы поверх полей current_process: шелл — тоже
+// просто процесс, и должен видеть/менять ТУ ЖЕ cwd, что видят системные
+// вызовы SYS_CHDIR/SYS_GETCWD (kernel/system/syscall/syscall.c), а не
+// независимую копию. current_process гарантированно не NULL здесь — этот
+// заголовок используется только кодом, исполняющимся как процесс "shell".
+#define cwd_path (current_process->cwd_path)
+#define cwd_inode (current_process->cwd_inode)

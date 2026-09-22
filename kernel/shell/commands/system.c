@@ -12,7 +12,7 @@
 #include "system/klog/klog.h"
 
 extern lufirafs_t lufirafs;
-extern uint32_t cwd_inode;
+// cwd_inode теперь макрос поверх current_process->cwd_inode (shell.h).
 
 // help, clear, reboot, shutdown, version, status, trap
 void command_help(void) {

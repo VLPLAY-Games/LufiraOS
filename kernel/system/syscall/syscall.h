@@ -51,6 +51,23 @@
 #define MAP_FIXED      0x10
 #define MAP_ANONYMOUS  0x20
 
+// Коды ошибок — подмножество POSIX/Linux errno (те же числа, незачем
+// изобретать свои — пригодится будущей libc). Возвращаются из syscall'ов
+// как (uint64_t)-CODE, тем же соглашением, что уже использовалось для
+// (uint64_t)-1 везде в этом файле. Только то, что реально различают новые
+// проверки user-указателей и sys_getcwd()/sys_chdir() — остальные
+// (VFS-уровня) сбои пока остаются простым -1, см. syscall.c.
+#define ENOENT   2
+#define ENOTDIR  20
+#define EFAULT   14
+#define EINVAL   22
+#define ERANGE   34
+
+// Потолок длины ЛЮБОЙ NUL-терминированной строки от пользователя (filename
+// для open/exec, path для chdir) — не даёт неверно терминированному буферу
+// заставить нас сканировать по странице за страницей бесконечно.
+#define USER_STRING_MAX 4096
+
 // Прототипы
 void syscall_init(void);
 // frame_ptr — указатель на кадр регистров, сохранённый syscall_entry.S на

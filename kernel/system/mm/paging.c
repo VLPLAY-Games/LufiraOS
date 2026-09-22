@@ -273,6 +273,70 @@ uint64_t get_physical_address_in_pml4(uint64_t pml4_phys, uint64_t virt) {
     }
 }
 
+// Проверяет, что 4KB-страница, содержащая virt, отображена в адресном
+// пространстве pml4_phys И доступна из ring3: PAGE_USER должен стоять на
+// КАЖДОМ уровне трансляции (PML4E/PDPTE/PDE[/PTE]) — x86-64 берёт U/S-бит
+// по всем уровням сразу (см. комментарий у get_or_create_table() выше), так
+// что "низкий/канонический адрес" сам по себе ничего не доказывает: код
+// самого ядра (clone_low_identity_map(), huge-страницы, намеренно БЕЗ
+// PAGE_USER) лежит в том же низком диапазоне, что и пользовательский код
+// ELF/mmap-регионы — отличить одно от другого можно только реальным
+// проходом по битам прав, не диапазоном адреса. need_write дополнительно
+// требует PAGE_WRITE на листовой записи (PDE для huge-страницы, иначе PTE
+// — map_page_in_pml4() расщепляет huge-страницу по частям при первом
+// пользовательском обращении, так что разные 4KB одного 2MB-региона могут
+// иметь разные флаги; проверять нужно именно тот уровень, где реально
+// заканчивается трансляция ЭТОГО конкретного адреса).
+int is_user_accessible(uint64_t pml4_phys, uint64_t virt, int need_write) {
+    pt_entry_t *pml4 = (pt_entry_t*)phys_to_virt(pml4_phys);
+    if (!pml4) return 0;
+
+    pt_entry_t pml4e = pml4[PML4_INDEX(virt)];
+    if (!(pml4e & PAGE_PRESENT) || !(pml4e & PAGE_USER)) return 0;
+
+    pt_entry_t *pdpt = (pt_entry_t*)phys_to_virt(pml4e & 0x000FFFFFFFFFF000ULL);
+    pt_entry_t pdpte = pdpt[PDPT_INDEX(virt)];
+    if (!(pdpte & PAGE_PRESENT) || !(pdpte & PAGE_USER)) return 0;
+
+    pt_entry_t *pd = (pt_entry_t*)phys_to_virt(pdpte & 0x000FFFFFFFFFF000ULL);
+    pt_entry_t pde = pd[PD_INDEX(virt)];
+    if (!(pde & PAGE_PRESENT)) return 0;
+
+    if (pde & PAGE_HUGE) {
+        if (!(pde & PAGE_USER)) return 0;
+        if (need_write && !(pde & PAGE_WRITE)) return 0;
+        return 1;
+    }
+    if (!(pde & PAGE_USER)) return 0;
+
+    pt_entry_t *pt = (pt_entry_t*)phys_to_virt(pde & 0x000FFFFFFFFFF000ULL);
+    pt_entry_t pte = pt[PT_INDEX(virt)];
+    if (!(pte & PAGE_PRESENT) || !(pte & PAGE_USER)) return 0;
+    if (need_write && !(pte & PAGE_WRITE)) return 0;
+
+    return 1;
+}
+
+// То же самое для целого диапазона [addr, addr+len) — проверяет КАЖДУЮ
+// затронутую 4KB-страницу отдельно, а не только первую/последнюю (см.
+// комментарий у is_user_accessible() про расщепление huge-страниц).
+// len==0 тривиально валиден (нечего проверять).
+int is_user_range_valid(uint64_t pml4_phys, uint64_t addr, uint64_t len, int need_write) {
+    if (len == 0) return 1;
+
+    uint64_t end = addr + len - 1;
+    if (end < addr) return 0;   // переполнение addr+len
+
+    uint64_t page = addr & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t last_page = end & ~(uint64_t)(PAGE_SIZE - 1);
+    for (;;) {
+        if (!is_user_accessible(pml4_phys, page, need_write)) return 0;
+        if (page == last_page) break;
+        page += PAGE_SIZE;
+    }
+    return 1;
+}
+
 uint64_t get_physical_address(uint64_t virt) {
     return get_physical_address_in_pml4(get_current_pml4(), virt);
 }

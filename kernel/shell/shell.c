@@ -2,14 +2,9 @@
 #include "commands.h"
 #include "drivers/console/console.h"
 #include "drivers/keyboard/keyboard.h"
-#include "fs/lufirafs/lufirafs.h"
 #include "system/process/process.h"
 
 #define HISTORY_SIZE 20
-
-// Текущий рабочий каталог
-char cwd_path[256] = "/";
-uint32_t cwd_inode = LUFIRAFS_ROOT_INODE;
 
 static uint32_t cursor_position_in_line = 0;
 static uint32_t command_start_x = 0;

@@ -15,8 +15,8 @@
 #define LS_COLOR_EXEC COLOR_LIGHT_GREEN
 
 extern lufirafs_t lufirafs;
-extern char cwd_path[256];
-extern uint32_t cwd_inode;
+// cwd_path/cwd_inode теперь макросы поверх current_process->... (shell.h),
+// а не отдельные extern-переменные.
 
 // Все имена в LufiraFS уже приводятся к нижнему регистру ещё на входе в
 // шелл (execute_command() лоуеркейсит всю строку до разбора команды),

@@ -56,6 +56,12 @@ uint64_t get_physical_address(uint64_t virt);
 // PML4 — не переключая CR3 (identity mapping).
 uint64_t get_physical_address_in_pml4(uint64_t pml4_phys, uint64_t virt);
 
+// Проверка user-указателей, приходящих в syscall'ы (см. paging.c) — истина,
+// только если ВСЕ уровни трансляции для этого адреса/диапазона имеют
+// PAGE_USER (и PAGE_WRITE, если need_write).
+int is_user_accessible(uint64_t pml4_phys, uint64_t virt, int need_write);
+int is_user_range_valid(uint64_t pml4_phys, uint64_t addr, uint64_t len, int need_write);
+
 // Получить физический адрес текущего PML4
 uint64_t get_current_pml4(void);
 

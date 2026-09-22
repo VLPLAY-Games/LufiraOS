@@ -10,7 +10,10 @@
 #include "lib/stddef.h"
 #include "lib/string.h"
 #include "fs/vfs/vfs.h"
+#include "fs/lufirafs/lufirafs.h"
 #include "system/devmode/devmode.h"
+
+extern lufirafs_t lufirafs;
 
 // Открывает filename через VFS, читает его целиком и заменяет им текущий
 // процесс через elf_exec_replace() (настоящий execve()). Используется и
@@ -55,16 +58,46 @@ int do_exec(const char *filename) {
 
 typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
+// Проверяет, что addr указывает на NUL-терминированную строку длиной не
+// более max_len байт (без учёта терминатора), целиком лежащую в читаемой
+// памяти ТЕКУЩЕГО процесса — is_user_accessible() проверяется на каждой
+// впервые пересечённой странице, ПЕРЕД тем как эта страница разыменовывается
+// в поиске '\0'. pml4_phys ОБЯЗАН быть активным CR3 (вызывается только из
+// обработчиков syscall'ов, которые всегда исполняются под собственным CR3
+// вызывающего процесса) — иначе прямое разыменование (const char*)addr
+// ниже указывало бы не туда. Возвращает длину строки (>=0) при успехе, -1
+// при невалидном адресе/странице или если '\0' не найден в пределах max_len.
+static int64_t validate_user_string(uint64_t pml4_phys, uint64_t addr, uint64_t max_len) {
+    if (addr == 0) return -1;
+
+    uint64_t checked_page = 0;
+    int have_checked = 0;
+
+    for (uint64_t i = 0; i < max_len; i++) {
+        uint64_t cur = addr + i;
+        uint64_t page = cur & ~(uint64_t)(PAGE_SIZE - 1);
+        if (!have_checked || page != checked_page) {
+            if (!is_user_accessible(pml4_phys, page, 0)) return -1;
+            checked_page = page;
+            have_checked = 1;
+        }
+        if (*(const char*)cur == '\0') return (int64_t)i;
+    }
+    return -1;
+}
+
 // ========== РЕАЛИЗАЦИИ СИСТЕМНЫХ ВЫЗОВОВ ==========
 
 // SYS_WRITE (0): fd, buffer, length
-static uint64_t sys_write(uint64_t fd, uint64_t buffer, uint64_t length, 
+static uint64_t sys_write(uint64_t fd, uint64_t buffer, uint64_t length,
                           uint64_t unused1, uint64_t unused2) {
     (void)unused1;
     (void)unused2;
-    
-    if (buffer == 0 || length == 0) return 0;
-    
+
+    if (length == 0) return 0;
+    if (!current_process || !is_user_range_valid(current_process->page_table, buffer, length, 0))
+        return (uint64_t)-EFAULT;
+
     // Используем VFS!
     return (uint64_t)vfs_write((int)fd, (const void *)buffer, (size_t)length);
 }
@@ -74,9 +107,12 @@ static uint64_t sys_read(uint64_t fd, uint64_t buffer, uint64_t length,
                          uint64_t unused1, uint64_t unused2) {
     (void)unused1;
     (void)unused2;
-    
-    if (buffer == 0 || length == 0) return 0;
-    
+
+    if (length == 0) return 0;
+    // need_write=1: ядро ПИШЕТ в buffer прочитанные байты.
+    if (!current_process || !is_user_range_valid(current_process->page_table, buffer, length, 1))
+        return (uint64_t)-EFAULT;
+
     // Используем VFS!
     return (uint64_t)vfs_read((int)fd, (void *)buffer, (size_t)length);
 }
@@ -126,9 +162,11 @@ static uint64_t sys_open(uint64_t filename_ptr, uint64_t flags, uint64_t mode,
     (void)mode;
     (void)unused1;
     (void)unused2;
-    
-    if (filename_ptr == 0) return (uint64_t)-1;
-    
+
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (validate_user_string(current_process->page_table, filename_ptr, USER_STRING_MAX) < 0)
+        return (uint64_t)-EFAULT;
+
     return (uint64_t)vfs_open((const char *)filename_ptr, (int)flags);
 }
 
@@ -264,7 +302,9 @@ static uint64_t sys_munmap(uint64_t addr, uint64_t length,
 static uint64_t sys_exec(uint64_t filename_ptr, uint64_t argv_ptr, 
                          uint64_t envp_ptr, uint64_t unused1, uint64_t unused2) {
     (void)argv_ptr; (void)envp_ptr; (void)unused1; (void)unused2;
-    if (filename_ptr == 0) return (uint64_t)-1;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (validate_user_string(current_process->page_table, filename_ptr, USER_STRING_MAX) < 0)
+        return (uint64_t)-EFAULT;
     const char *filename = (const char *)filename_ptr;
 
     // do_exec() -> elf_exec_replace() не возвращается по этому стеку
@@ -284,6 +324,14 @@ static uint64_t sys_wait(uint64_t pid, uint64_t status_ptr, uint64_t options,
     (void)unused1;
     (void)unused2;
 
+    // Проверяем указатель ДО блокирующего process_wait() — плохой указатель
+    // должен провалиться сразу, а не после того, как мы уже дождались
+    // ребёнка (и тем более не должен разыменовываться напрямую после).
+    if (status_ptr != 0) {
+        if (!current_process || !is_user_range_valid(current_process->page_table, status_ptr, sizeof(int), 1))
+            return (uint64_t)-EFAULT;
+    }
+
     int status = 0;
     int result = process_wait((uint32_t)pid, &status);
 
@@ -294,30 +342,62 @@ static uint64_t sys_wait(uint64_t pid, uint64_t status_ptr, uint64_t options,
     return (uint64_t)result;
 }
 
-// SYS_GETCWD (14): buffer, size
+// SYS_GETCWD (14): buffer, size — копирует cwd текущего процесса (с NUL) в
+// buffer, если влезает. Возвращает длину строки (без NUL) при успехе.
 static uint64_t sys_getcwd(uint64_t buffer, uint64_t size,
                            uint64_t unused1, uint64_t unused2, uint64_t unused3) {
-    (void)buffer;
-    (void)size;
     (void)unused1;
     (void)unused2;
     (void)unused3;
-    
-    // Заглушка
-    return 0;
+
+    if (!current_process || buffer == 0) return (uint64_t)-EFAULT;
+    if (size == 0) return (uint64_t)-EINVAL;
+    if (!is_user_range_valid(current_process->page_table, buffer, size, 1))
+        return (uint64_t)-EFAULT;
+
+    size_t len = strlen(current_process->cwd_path);
+    if (len + 1 > size) return (uint64_t)-ERANGE;
+
+    memcpy((void *)buffer, current_process->cwd_path, len + 1);
+    return (uint64_t)len;
 }
 
-// SYS_CHDIR (15): path
+// SYS_CHDIR (15): path — та же логика, что и command_cd() (kernel/shell/
+// commands/filesystem.c), но на current_process->cwd_*, а не на
+// шелл-глобалах (которые теперь и есть эти же поля, см. shell.h), и с
+// проверкой указателя вместо прямого разыменования.
 static uint64_t sys_chdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
                           uint64_t unused3, uint64_t unused4) {
-    (void)path_ptr;
     (void)unused1;
     (void)unused2;
     (void)unused3;
     (void)unused4;
-    
-    // Заглушка
-    return (uint64_t)-1;
+
+    if (!current_process) return (uint64_t)-EFAULT;
+
+    int64_t slen = validate_user_string(current_process->page_table, path_ptr, USER_STRING_MAX);
+    if (slen < 0) return (uint64_t)-EFAULT;
+    if (slen == 0) return (uint64_t)-EINVAL;
+
+    const char *path = (const char *)path_ptr;
+
+    uint32_t new_inode;
+    if (lufirafs_lookup(&lufirafs, current_process->cwd_inode, path, &new_inode) != 0)
+        return (uint64_t)-ENOENT;
+
+    lufirafs_inode_t inode;
+    if (lufirafs_read_inode(&lufirafs, new_inode, &inode) != 0 ||
+        inode.mode != LUFIRAFS_MODE_DIR)
+        return (uint64_t)-ENOTDIR;
+
+    if (lufirafs_get_path(&lufirafs, new_inode, current_process->cwd_path,
+                          sizeof(current_process->cwd_path)) != 0) {
+        current_process->cwd_path[0] = '/';
+        current_process->cwd_path[1] = '\0';
+    }
+    current_process->cwd_inode = new_inode;
+
+    return 0;
 }
 
 // SYS_SLEEP (16): milliseconds
@@ -369,8 +449,8 @@ static uint64_t sys_pipe(uint64_t fds_ptr,
     (void)unused3;
     (void)unused4;
 
-    if (fds_ptr == 0)
-        return (uint64_t)-1;
+    if (!current_process || !is_user_range_valid(current_process->page_table, fds_ptr, 2 * sizeof(int), 1))
+        return (uint64_t)-EFAULT;
 
     int fds[2];
     if (vfs_pipe(fds) != 0)
