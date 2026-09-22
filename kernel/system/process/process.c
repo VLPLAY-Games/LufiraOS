@@ -298,6 +298,11 @@ void process_init(void) {
     // hlt-цикле и не должен НИКОГДА идти через context_enter_ring3() (у него
     // ring0_stack=0 — там просто некуда строить iretq-кадр для ring3).
     idle_process->first_run = 0;
+    // idle никогда не вызывает mmap, но kmalloc() тут ничего не зануляет
+    // (см. heap.c) — оставить как есть значило бы читать мусор, если это
+    // поле вообще когда-нибудь тронут.
+    idle_process->next_mmap_addr = MMAP_AREA_START;
+    memset(idle_process->mmap_regions, 0, sizeof(idle_process->mmap_regions));
 
     const char *name = "idle";
     for (int i = 0; i < 31 && name[i]; i++) idle_process->name[i] = name[i];
@@ -387,6 +392,8 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     // обычный context_switch(), как и раньше, иначе ring3-инструкция
     // попытается выполнить код ядра без PAGE_USER и упадёт в page fault.
     proc->first_run = (entry == NULL);
+    proc->next_mmap_addr = MMAP_AREA_START;
+    memset(proc->mmap_regions, 0, sizeof(proc->mmap_regions));
 
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
     proc->name[31] = '\0';
@@ -699,6 +706,14 @@ int process_commit_exec(process_t *proc,
     proc->page_table = new_pml4;
     proc->stack_base = new_stack;
     proc->stack_size = USER_STACK_SIZE;
+
+    // exec() заменяет ВСЁ адресное пространство новым new_pml4 — старые
+    // mmap-регионы (как и старый стек/образ) физически больше не
+    // существуют в нём. Без сброса здесь процесс унаследовал бы учёт,
+    // указывающий на память, которой в его свежем адресном пространстве
+    // просто нет.
+    proc->next_mmap_addr = MMAP_AREA_START;
+    memset(proc->mmap_regions, 0, sizeof(proc->mmap_regions));
 
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
     proc->name[31] = '\0';
@@ -1174,6 +1189,16 @@ uint64_t process_fork(uint64_t frame_ptr) {
             vfs_dup_fd(f);
         }
     }
+
+    // clone_address_space_deep() выше уже физически продублировала страницы
+    // под всеми mmap-регионами родителя (это просто present-записи в
+    // диапазоне PML4[0..255], как и всё остальное адресное пространство) —
+    // тут нужно только скопировать сам учёт, иначе ребёнок "не будет знать"
+    // об унаследованных регионах (не сможет их munmap()) и начнёт свой
+    // bump-указатель заново с MMAP_AREA_START, затирая своими будущими mmap()
+    // то, что уже унаследовал от родителя по тем же адресам.
+    child->next_mmap_addr = parent->next_mmap_addr;
+    memcpy(child->mmap_regions, parent->mmap_regions, sizeof(parent->mmap_regions));
 
     // Контекст ребёнка продолжает выполнение СРАЗУ ПОСЛЕ инструкции
     // syscall в родителе — тот же rip/rflags и те же callee-saved регистры

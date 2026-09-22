@@ -5,7 +5,10 @@
 #include "system/timer/pit.h"
 #include "system/cpu/gdt.h"
 #include "system/mm/heap.h"
+#include "system/mm/pmm.h"
+#include "system/mm/paging.h"
 #include "lib/stddef.h"
+#include "lib/string.h"
 #include "fs/vfs/vfs.h"
 #include "system/devmode/devmode.h"
 
@@ -146,34 +149,115 @@ static uint64_t sys_seek(uint64_t fd, uint64_t offset, uint64_t whence,
     return (uint64_t)vfs_seek((int)fd, (off_t)offset, (int)whence);
 }
 
-// SYS_MMAP (9): addr, length, prot, flags, fd, offset
-// Заглушка: как и остальные syscall'ы, ограничена 5 аргументами (arg1-arg5)
-// диспетчера — offset для настоящего mmap() придётся передавать иначе,
-// когда эта функция будет реально реализована.
+// SYS_MMAP (9): addr, length, prot, flags, fd
+// Только анонимная память (MAP_ANONYMOUS обязателен, addr/fd игнорируются —
+// MAP_FIXED не поддерживается, своего адреса не бывает). offset шестым
+// аргументом не нужен для анонимного mmap и диспетчер всё равно передаёт
+// только 5 аргументов (см. комментарий у syscall_frame_t в process.c) —
+// файловый mmap с offset остаётся будущей задачей.
+//
+// Выделение "eager": все страницы физически выделяются и маппятся прямо
+// здесь, а не по требованию через page fault — обработчик page fault
+// (isr_common_handler(), idt.c) сейчас безусловно останавливает систему на
+// ЛЮБОМ фолте, реального пути восстановления для demand paging нет.
+//
+// Вызывается как syscall самого процесса, значит current_process->page_table
+// — это уже активный CR3: свежесмапленная страница сразу доступна по своему
+// пользовательскому адресу без обхода через phys_to_virt().
+//
+// Вытеснение планировщиком не может прервать эту функцию посередине: таймер
+// преемптит только когда прерванный код был в ring3 (CS==0x33, см. pit.c) —
+// сам syscall-обработчик всегда исполняется в ring0, так что блокировка
+// прерываний тут не нужна отдельно.
 static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
                          uint64_t flags, uint64_t fd) {
     (void)addr;
-    (void)length;
-    (void)prot;
-    (void)flags;
     (void)fd;
 
-    // Заглушка: выделение памяти пользователю
-    // Будет реализовано позже
-    return 0;
+    if (!current_process || length == 0)
+        return (uint64_t)-1;
+    if (!(flags & MAP_ANONYMOUS))
+        return (uint64_t)-1;   // файловый mmap не поддерживается
+    if (flags & MAP_FIXED)
+        return (uint64_t)-1;   // свой адрес в этой версии не учитывается
+
+    uint64_t aligned_len = (length + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t num_pages = aligned_len / PAGE_SIZE;
+
+    int slot = -1;
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (current_process->mmap_regions[i].length == 0) { slot = i; break; }
+    }
+    if (slot < 0)
+        return (uint64_t)-1;   // некуда записать новый регион
+
+    uint64_t base = current_process->next_mmap_addr;
+    uint64_t pml4_phys = current_process->page_table;
+
+    uint64_t page_flags = PAGE_PRESENT | PAGE_USER;
+    if (prot & PROT_WRITE) page_flags |= PAGE_WRITE;
+    if (!(prot & PROT_EXEC)) page_flags |= PAGE_NX;
+
+    uint64_t mapped;
+    for (mapped = 0; mapped < num_pages; mapped++) {
+        uint64_t phys = pmm_alloc_page();
+        if (!phys) break;
+
+        uint64_t virt = base + mapped * PAGE_SIZE;
+        if (map_page_in_pml4(pml4_phys, virt, phys, page_flags) != 0) {
+            pmm_free_page(phys);
+            break;
+        }
+
+        // Анонимная память обязана приходить обнулённой (POSIX-семантика,
+        // на неё будет полагаться malloc() будущей libc).
+        memset((void*)virt, 0, PAGE_SIZE);
+    }
+
+    if (mapped < num_pages) {
+        // Не хватило физической памяти на часть запроса — откатываем то,
+        // что уже успели замаппить (unmap_page() сама же освобождает и
+        // физическую страницу), а не оставляем недостроенный регион.
+        for (uint64_t i = 0; i < mapped; i++) {
+            unmap_page(base + i * PAGE_SIZE);
+        }
+        return (uint64_t)-1;
+    }
+
+    current_process->next_mmap_addr += aligned_len;
+    current_process->mmap_regions[slot].addr = base;
+    current_process->mmap_regions[slot].length = aligned_len;
+
+    return base;
 }
 
-// SYS_MUNMAP (10): addr, length
-static uint64_t sys_munmap(uint64_t addr, uint64_t length, 
+// SYS_MUNMAP (10): addr, length — должны ТОЧНО совпадать с ранее
+// возвращённым mmap()-регионом целиком (частичный/поддиапазонный unmap, как
+// у настоящего munmap(), в этой версии не поддерживается).
+static uint64_t sys_munmap(uint64_t addr, uint64_t length,
                            uint64_t unused1, uint64_t unused2, uint64_t unused3) {
-    (void)addr;
-    (void)length;
     (void)unused1;
     (void)unused2;
     (void)unused3;
-    
-    // Заглушка
-    return 0;
+
+    if (!current_process || length == 0)
+        return (uint64_t)-1;
+
+    uint64_t aligned_len = (length + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        mmap_region_t *r = &current_process->mmap_regions[i];
+        if (r->length != 0 && r->addr == addr && r->length == aligned_len) {
+            uint64_t num_pages = aligned_len / PAGE_SIZE;
+            for (uint64_t p = 0; p < num_pages; p++) {
+                unmap_page(addr + p * PAGE_SIZE);   // освобождает и физ. страницу
+            }
+            r->addr = 0;
+            r->length = 0;
+            return 0;
+        }
+    }
+    return (uint64_t)-1;   // точного совпадения не нашлось
 }
 
 // SYS_EXEC (11): filename_ptr, argv_ptr, envp_ptr

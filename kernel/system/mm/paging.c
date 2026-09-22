@@ -36,6 +36,21 @@ uint64_t get_current_pml4(void) {
 // ЗАПИСИ (значения parent[index]) остаются физическими адресами, как и
 // положено записям таблиц страниц — конвертация в указатель нужна только
 // для того, чтобы что-то прочитать/записать ПО этому адресу.
+// x86-64 берёт U/S-бит по ВСЕМ уровням трансляции сразу (PML4E/PDPTE/PDE/
+// PTE) — если хоть один уровень supervisor-only, весь адрес считается
+// supervisor-only независимо от того, что стоит у листового PTE. Раньше
+// здесь создавались промежуточные таблицы только с PAGE_PRESENT|PAGE_WRITE,
+// без PAGE_USER — реальное разрешение (в т.ч. запрет) всё равно всегда
+// проверяется по ФЛАГАМ ЛИСТОВОГО PTE (их явно передаёт вызывающий), так
+// что разрешительные промежуточные записи ничего лишнего не открывают, а
+// вот их отсутствие ломает ЛЮБОЙ ring3-доступ к памяти, для которой эти
+// таблицы создаются впервые. Ровно то же самое уже сделано (и явно
+// прокомментировано) в отдельной "ИСПРАВЛЕННОЙ" map_page_in_space() в
+// elf.c — тот фикс просто не попал сюда, в общую версию, которой пользуются
+// map_page()/map_page_in_pml4() (в т.ч. allocate_user_stack() и sys_mmap()).
+// Баг был скрыт всю сессию: ни один тест до sys_mmap не читал/писал
+// пользовательские данные из ring3 напрямую (только исполнял код ELF,
+// который маппится ЧЕРЕЗ map_page_in_space() — там уже было верно).
 static pt_entry_t* get_or_create_table(pt_entry_t *parent, uint64_t index, int create) {
     if (!(parent[index] & PAGE_PRESENT)) {
         if (!create) return NULL;
@@ -43,13 +58,14 @@ static pt_entry_t* get_or_create_table(pt_entry_t *parent, uint64_t index, int c
         uint64_t phys = pmm_alloc_page();
         if (!phys) return NULL;
 
-        parent[index] = paddr_to_entry(phys, PAGE_PRESENT | PAGE_WRITE);
+        parent[index] = paddr_to_entry(phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
 
         pt_entry_t *table = (pt_entry_t*)phys_to_virt(phys);
         for (int i = 0; i < 512; i++) table[i] = 0;
 
         return table;
     } else {
+        parent[index] |= PAGE_USER;
         return (pt_entry_t*)phys_to_virt(parent[index] & 0x000FFFFFFFFFF000ULL);
     }
 }

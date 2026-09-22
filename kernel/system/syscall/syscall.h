@@ -41,6 +41,16 @@
 #define PROT_WRITE  2
 #define PROT_EXEC   4
 
+// Флаги flags для sys_mmap (значения как в Linux — незачем изобретать свои,
+// пригодится для совместимости с будущей libc). sys_mmap требует
+// MAP_ANONYMOUS (файловый mmap не поддерживается) и отвергает MAP_FIXED
+// (свой адрес вызывающего в этой версии не учитывается вообще — молча
+// игнорировать было бы хуже отказа, вызывающий решил бы, что адрес учли).
+#define MAP_SHARED     0x01
+#define MAP_PRIVATE    0x02
+#define MAP_FIXED      0x10
+#define MAP_ANONYMOUS  0x20
+
 // Прототипы
 void syscall_init(void);
 // frame_ptr — указатель на кадр регистров, сохранённый syscall_entry.S на

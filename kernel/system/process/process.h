@@ -11,6 +11,16 @@
 #define USER_STACK_AREA_START 0x0000700000000000ULL
 #define USER_STACK_SIZE       (16 * 1024)  // 16KB
 
+// Область под mmap(). Один и тот же виртуальный адрес для ВСЕХ процессов
+// (в отличие от USER_STACK_AREA_START, который сдвигается на pid) — не
+// нужно: у каждого процесса своя приватная таблица страниц, так что
+// виртуальные адреса разных процессов никогда физически не пересекаются.
+// Индекс PML4 = 0x600000000000 / 2^39 = 192 — внутри диапазона 0..255,
+// который process_fork()/clone_address_space_deep() уже копирует целиком,
+// и подальше от кода ELF (0x400000+) и от USER_STACK_AREA_START (индекс 224).
+#define MMAP_AREA_START   0x0000600000000000ULL
+#define MAX_MMAP_REGIONS  32
+
 // Значение process_t.wait_target_pid, означающее "жду ЛЮБОГО своего
 // ребёнка" (аналог waitpid(-1, ...)). 0 означает "не жду ничего" — реальные
 // PID никогда не достигают этого значения.
@@ -46,6 +56,12 @@ typedef struct __attribute__((packed)) {
     uint64_t cr3;
 } process_context_t;
 
+// Один регион, выделенный sys_mmap(). length==0 — слот свободен.
+typedef struct {
+    uint64_t addr;
+    uint64_t length;
+} mmap_region_t;
+
 typedef struct process {
     uint32_t pid;
     uint32_t ppid;          // 0 = нет родителя (например, до fork()/wait())
@@ -61,6 +77,13 @@ typedef struct process {
     uint64_t ring0_stack_pages;
     uint64_t page_table;
     fd_table_t fd_table;    // собственная таблица дескрипторов процесса
+    // Регионы sys_mmap()/sys_munmap() и bump-указатель на следующий
+    // свободный адрес под MMAP_AREA_START — см. process_create()/
+    // process_init() (инициализация), process_fork() (копируется вместе с
+    // физически продублированными страницами) и process_commit_exec()
+    // (сбрасывается — exec() заменяет всё адресное пространство целиком).
+    mmap_region_t mmap_regions[MAX_MMAP_REGIONS];
+    uint64_t next_mmap_addr;
     // Помечает процесс, который в данный момент "исполняет роль" шелла —
     // изначально сам шелл, и остаётся истинным даже после exec() (тот
     // меняет образ процесса НА МЕСТЕ, PID/process_t не меняются). См.
