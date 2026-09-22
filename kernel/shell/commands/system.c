@@ -189,10 +189,13 @@ void command_kill(const char *args)
         const char *sig_arg = args + 1;
         int len = token_length(sig_arg);
 
-        if (token_equals(sig_arg, "KILL")) sig = SIGKILL;
-        else if (token_equals(sig_arg, "TERM")) sig = SIGTERM;
-        else if (token_equals(sig_arg, "STOP")) sig = SIGSTOP;
-        else if (token_equals(sig_arg, "CONT")) sig = SIGCONT;
+        // execute_command() лоуеркейсит всю строку команды до разбора, так
+        // что sig_arg сюда всегда приходит нижним регистром (даже если
+        // пользователь набрал "kill -KILL 3") — сравниваем с ним же.
+        if (token_equals(sig_arg, "kill")) sig = SIGKILL;
+        else if (token_equals(sig_arg, "term")) sig = SIGTERM;
+        else if (token_equals(sig_arg, "stop")) sig = SIGSTOP;
+        else if (token_equals(sig_arg, "cont")) sig = SIGCONT;
         else {
             int n = atoi(sig_arg);
             if (n <= 0) {

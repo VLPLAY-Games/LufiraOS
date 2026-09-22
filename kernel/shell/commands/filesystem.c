@@ -12,10 +12,20 @@
 
 #define LS_COLOR_DIR  COLOR_LIGHT_BLUE
 #define LS_COLOR_FILE COLOR_WHITE
+#define LS_COLOR_EXEC COLOR_LIGHT_GREEN
 
 extern lufirafs_t lufirafs;
 extern char cwd_path[256];
 extern uint32_t cwd_inode;
+
+// Все имена в LufiraFS уже приводятся к нижнему регистру ещё на входе в
+// шелл (execute_command() лоуеркейсит всю строку до разбора команды),
+// поэтому сравнивать суффикс регистронезависимо не нужно.
+static int is_executable_name(const char *name) {
+    int len = 0;
+    while (name[len]) len++;
+    return len > 4 && strcmp(name + len - 4, ".elf") == 0;
+}
 
 // ls, cd, pwd, mkdir, rm, touch, cat
 void command_ls(const char* flags) {
@@ -59,18 +69,21 @@ void command_ls(const char* flags) {
         return;
     }
 
+    // Раньше в конце цвет жёстко сбрасывался на LOG_COLOR_INFO, затирая то,
+    // что пользователь выставил командой fg. Запоминаем реальный текущий
+    // цвет и возвращаемся именно к нему.
+    ConsoleColor saved_fg = current_colors.fg_index;
+
     printf("\n");
     lufirafs_dirent_t entry;
     int count = 0;
     while (lufirafs_readdir(&dir, &entry) == 0) {
-        if (strcmp(entry.name, ".") == 0 || strcmp(entry.name, "..") == 0)
-            continue;
-
         lufirafs_inode_t inode;
         lufirafs_read_inode(&lufirafs, entry.inode, &inode);
         int is_dir = (inode.mode == LUFIRAFS_MODE_DIR);
+        int is_exec = !is_dir && is_executable_name(entry.name);
 
-        set_foreground_color(is_dir ? LS_COLOR_DIR : LS_COLOR_FILE);
+        set_foreground_color(is_dir ? LS_COLOR_DIR : (is_exec ? LS_COLOR_EXEC : LS_COLOR_FILE));
 
         if (long_fmt) {
             printf("%c %u ", is_dir ? 'd' : '-', inode.size);
@@ -80,7 +93,7 @@ void command_ls(const char* flags) {
             if (++count % 4 == 0) printf("\n");
         }
     }
-    set_foreground_color(LOG_COLOR_INFO);
+    set_foreground_color(saved_fg);
     if (!long_fmt && count % 4 != 0) printf("\n");
 }
 

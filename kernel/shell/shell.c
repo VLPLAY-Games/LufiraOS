@@ -161,7 +161,10 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "version") == 0) {
         command_version();
     } else if (strcmp(cmd_lower, "history") == 0) {
-        // ...
+        printf("\n");
+        for (int i = 0; i < history_count; i++) {
+            printf("%d  %s\n", i + 1, command_history[i]);
+        }
     } else if (strcmp(cmd_lower, "colors") == 0) {
         command_colors();
     } else if (strcmp(cmd_lower, "reset") == 0) {
