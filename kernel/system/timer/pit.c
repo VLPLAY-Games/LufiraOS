@@ -58,8 +58,19 @@ void pit_wait_ms(uint32_t ms) {
     }
 }
 
+// Квант времени на процесс перед вынужденным переключением (5 тиков по
+// 10 мс = 50 мс). Вытесняем ТОЛЬКО когда прерванный код реально исполнялся
+// в ring3 (frame->cs == 0x33) — то есть настоящий пользовательский код
+// процесса, а не код ядра (обработчики syscall/IRQ, ещё не полностью
+// реентерабельный путь клавиатура/USB-в-таймере из input.c, hlt-цикл
+// idle). Это не срез функциональности: ядерный код и так короткий и сам
+// уступает в нужных местах, а вытеснять его на произвольном месте — это
+// именно тот риск, ради обхода которого выбран этот гейт.
+#define PREEMPT_TIMESLICE_TICKS 5
+static uint32_t preempt_countdown = PREEMPT_TIMESLICE_TICKS;
+
 // Обработчик прерывания таймера
-void timer_irq_handler(void) {
+void timer_irq_handler(interrupt_frame_t *frame) {
     pit_ticks++;
 
     process_t *p = process_list;
@@ -81,4 +92,21 @@ void timer_irq_handler(void) {
     update_cursor();
 
     usb_poll();
+
+    // idle_process никогда не заходит сюда: он всегда исполняется в ring0
+    // (свой hlt-цикл, никогда не переходит в ring3), так что cs==0x33 уже
+    // само по себе его исключает — отдельная проверка "!= idle_process" не
+    // нужна.
+    if (frame->cs == 0x33 && current_process) {
+        if (--preempt_countdown == 0) {
+            preempt_countdown = PREEMPT_TIMESLICE_TICKS;
+            // EOI на этот IRQ уже отправлен централизованно в самом начале
+            // irq_handler() (kernel/system/cpu/irq.c) — schedule() отсюда
+            // может не вернуться очень долго (или вообще, пока не вернут
+            // управление сюда снова уже ДРУГИМ таймерным тиком), так что
+            // делать это позже здесь было бы поздно и потребовало бы
+            // отдельного ручного EOI, как раньше в elf.c.
+            schedule();
+        }
+    }
 }

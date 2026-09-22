@@ -97,7 +97,7 @@ static void print_page_fault_details(uint64_t error_code) {
 void FORCE_ALIGN_ARG_POINTER isr_common_handler(interrupt_frame_t* frame) {
     // Если это аппаратное прерывание (векторы 32-47)
     if (frame->vector >= 32 && frame->vector <= 47) {
-        irq_handler(frame->vector);
+        irq_handler(frame->vector, frame);
         return;
     }
 

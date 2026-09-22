@@ -70,6 +70,16 @@ typedef struct process {
     // так что вместо него пересоздаётся новый — иначе система осталась бы
     // вообще без интерактивного приглашения.
     int is_shell;
+    // 1 до первой активации процесса, затем всегда 0. switch_to_process()
+    // использует это, чтобы направить САМЫЙ первый запуск через
+    // context_enter_ring3() (настоящий ring0->ring3 переход через iretq)
+    // вместо обычного context_switch() (jmp, без смены CS/CPL) — иначе
+    // новый процесс выполнял бы свои первые инструкции с привилегиями
+    // ядра вплоть до первого возврата из syscall. Все последующие
+    // переключения (в т.ч. процесса, вытесненного планировщиком прямо из
+    // ring3) всегда идут через context_switch() — это уже не "холодный
+    // старт", а возобновление прерванного вызова.
+    int first_run;
     struct process *next;
 } process_t;
 
@@ -135,7 +145,9 @@ uint64_t process_fork(uint64_t frame_ptr);
 
 extern uint64_t kernel_cr3;
 
-extern void context_switch(process_context_t *old_context, 
+extern void context_switch(process_context_t *old_context,
+                          process_context_t *new_context);
+extern void context_enter_ring3(process_context_t *old_context,
                           process_context_t *new_context);
 
 extern process_t *current_process;

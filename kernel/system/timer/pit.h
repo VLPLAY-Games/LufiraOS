@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lib/types.h"
+#include "system/cpu/interrupts.h"
 
 // Частота PIT (базовая)
 #define PIT_BASE_FREQUENCY 1193180
@@ -25,7 +26,7 @@
 void pit_init(void);
 void pit_set_frequency(uint32_t hz);
 uint64_t pit_get_ticks(void);
-void timer_irq_handler(void);
+void timer_irq_handler(interrupt_frame_t *frame);
 
 // Блокирующая (через hlt) задержка на ms миллисекунд, откалиброванная по
 // реальным тикам PIT. Требует, чтобы прерывания уже были разрешены.

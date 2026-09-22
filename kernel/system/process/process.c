@@ -293,7 +293,12 @@ void process_init(void) {
     idle_process->ring0_stack = 0;
     idle_process->ring0_stack_pages = 0;
     idle_process->is_shell = 0;
-    
+    // idle не создаётся через process_create() (kmalloc'ится напрямую), так
+    // что это поле надо выставить явно: idle живёт целиком в ring0 в своём
+    // hlt-цикле и не должен НИКОГДА идти через context_enter_ring3() (у него
+    // ring0_stack=0 — там просто некуда строить iretq-кадр для ring3).
+    idle_process->first_run = 0;
+
     const char *name = "idle";
     for (int i = 0; i < 31 && name[i]; i++) idle_process->name[i] = name[i];
     idle_process->name[31] = '\0';
@@ -372,6 +377,16 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     proc->wait_target_pid = 0;
     proc->state = PROCESS_READY;
     proc->is_shell = 0;
+    // first_run=1 (→ context_enter_ring3(), настоящий вход в ring3) только
+    // когда entry==NULL — это значит, что вызывающий (elf_exec_internal()
+    // в elf.c, process_fork() ниже) сам допишет ctx.rip на РЕАЛЬНЫЙ
+    // пользовательский ELF-адрес позже. Когда entry передан НАПРЯМУЮ
+    // (kernel.c:process_create("shell", shell_task),
+    // process_respawn_shell() ниже) — это ядерная функция, а не
+    // пользовательский код: такой процесс должен остаться в ring0 через
+    // обычный context_switch(), как и раньше, иначе ring3-инструкция
+    // попытается выполнить код ядра без PAGE_USER и упадёт в page fault.
+    proc->first_run = (entry == NULL);
 
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
     proc->name[31] = '\0';
@@ -905,8 +920,19 @@ void switch_to_process(process_t *next) {
 
     current_process = next;
     current_kernel_rsp = next->ring0_stack;
-    
-    context_switch(prev_context, &next->context);
+
+    // Самая первая активация процесса идёт через настоящий ring0->ring3
+    // переход (iretq) — см. process_t.first_run в process.h — а не через
+    // обычный context_switch() (jmp, CS/CPL не меняются). Все последующие
+    // резюме (включая процесс, вытесненный планировщиком прямо из ring3)
+    // всегда используют context_switch(): к тому моменту это уже не
+    // "холодный старт", а возобновление прерванного вызова.
+    if (next->first_run) {
+        next->first_run = 0;
+        context_enter_ring3(prev_context, &next->context);
+    } else {
+        context_switch(prev_context, &next->context);
+    }
 }
 
 static const char *process_state_name(process_state_t state)

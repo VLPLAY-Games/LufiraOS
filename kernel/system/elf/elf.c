@@ -13,10 +13,6 @@
 #define PAGE_PS     0x80    // Page size (2MB / 1GB)
 #endif
 
-static inline void outb(uint16_t port, uint8_t val) {
-    asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
-}
-
 int elf_validate(const elf64_header_t *header) {
     if (header->magic != ELF_MAGIC) {
         printf("[ELF] Invalid magic: 0x%x\n", header->magic);
@@ -548,13 +544,12 @@ static int elf_exec_internal(const void *elf_data,
     asm volatile("cli");
 
     // Отсюда мы прыгаем в новый процесс сырым context_switch() и можем не
-    // вернуться в этот стек вызовов ещё очень долго — обычный send_eoi() в
-    // irq_handler() после штатного возврата не выполнится вовсе. Команда
-    // шелла может быть вызвана и из timer_irq_handler() (USB HID опрашивается
-    // оттуда же) — "потерянный" EOI таймера вешает весь планировщик намертво.
-    // Шлём EOI на оба PIC вручную и безусловно, какой бы IRQ ни привёл сюда.
-    outb(0xA0, 0x20);
-    outb(0x20, 0x20);
+    // вернуться в этот стек вызовов ещё очень долго. Раньше здесь стоял
+    // ручной EOI на случай, если это выполняется внутри timer_irq_handler()
+    // (через USB HID) — теперь EOI шлётся централизованно в самом начале
+    // irq_handler() (kernel/system/cpu/irq.c), до вызова любого конкретного
+    // обработчика, так что к этому моменту он уже отправлен независимо от
+    // того, вернёмся мы сюда или нет.
 
     // Цель для Ctrl+C (см. shell_handle_ctrl_c() в shell.c). runbg сюда не
     // попадает вовсе (см. ранний return в background-ветке выше) — фоновые
@@ -657,12 +652,11 @@ int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
            proc->pid, name, (uint64_t)entry);
     klog("[ELF] PID %u exec'd '%s'", proc->pid, name);
 
-    // Отсюда мы уже не вернёмся по этому стеку вызовов, а "exec" может быть
-    // вызван и из timer_irq_handler() (см. комментарий выше) — штатный
-    // send_eoi() не выполнится. Подтверждаем вручную на обоих PIC, иначе
-    // соответствующий IRQ считается "в обслуживании" навсегда.
-    outb(0xA0, 0x20);
-    outb(0x20, 0x20);
+    // Отсюда мы уже не вернёмся по этому стеку вызовов (exec может быть
+    // вызван и из timer_irq_handler(), см. комментарий выше) — EOI на этот
+    // случай теперь шлётся централизованно в начале irq_handler(), до
+    // вызова любого обработчика, так что отдельный ручной EOI здесь больше
+    // не нужен (и был бы вторым/лишним).
 
     // Цель для Ctrl+C (см. shell_handle_ctrl_c() в shell.c) — exec меняет
     // образ proc "на месте", PID остаётся тем же.
@@ -670,9 +664,12 @@ int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
 
     // Прыгаем в новый образ процесса и не возвращаемся: старый контекст
     // (стек вызовов exec/do_exec/shell/...) сохранять некуда и незачем —
-    // это и есть "замена", а не создание нового процесса.
+    // это и есть "замена", а не создание нового процесса. exec() — это
+    // всегда "первая инструкция новой программы", поэтому, в отличие от
+    // обычных переключений планировщика, здесь безусловно нужен настоящий
+    // ring0->ring3 переход (context_enter_ring3()), а не context_switch().
     process_context_t discard;
-    context_switch(&discard, ctx);
+    context_enter_ring3(&discard, ctx);
 
     __builtin_unreachable();
 }
