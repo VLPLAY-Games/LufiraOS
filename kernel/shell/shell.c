@@ -240,6 +240,24 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "exec") == 0) {
         if (*args == '\0') printf("\nUsage: exec <filename>\n");
         else command_exec(args);
+    } else if (strcmp(cmd_lower, "whoami") == 0) {
+        command_whoami();
+    } else if (strcmp(cmd_lower, "chmod") == 0) {
+        if (*args == '\0') printf("\nUsage: chmod <mode> <path>\n");
+        else command_chmod(args);
+    } else if (strcmp(cmd_lower, "chown") == 0) {
+        // Сырой input_buffer — имя пользователя регистрозависимо (см. users.c).
+        if (input_buffer_index <= 6) printf("\nUsage: chown <user>[:group] <path>\n");
+        else command_chown(input_buffer + 6);
+    } else if (strcmp(cmd_lower, "useradd") == 0) {
+        if (input_buffer_index <= 8) printf("\nUsage: useradd <username> <password> [group]\n");
+        else command_useradd(input_buffer + 8);
+    } else if (strcmp(cmd_lower, "groupadd") == 0) {
+        if (input_buffer_index <= 9) printf("\nUsage: groupadd <groupname>\n");
+        else command_groupadd(input_buffer + 9);
+    } else if (strcmp(cmd_lower, "su") == 0) {
+        if (input_buffer_index <= 3) printf("\nUsage: su <username> [password]\n");
+        else command_su(input_buffer + 3);
     } else {
         printf("\nUnknown command: %s\n", input_buffer);
         printf("Type 'help' for available commands.\n");

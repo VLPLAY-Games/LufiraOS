@@ -90,6 +90,22 @@ int lufirafs_write_inode(lufirafs_t *fs, uint32_t ino, const lufirafs_inode_t *i
     return 0;
 }
 
+int lufirafs_check_access(const lufirafs_inode_t *inode, uint32_t uid, uint32_t gid,
+                           int want_read, int want_write, int want_exec) {
+    if (!inode) return 0;
+    if (uid == 0) return 1; // root обходит любые проверки прав
+
+    uint32_t bits;
+    if (inode->uid == uid) bits = (inode->perm >> 6) & 07u;
+    else if (inode->gid == gid) bits = (inode->perm >> 3) & 07u;
+    else bits = inode->perm & 07u;
+
+    if (want_read && !(bits & 04u)) return 0;
+    if (want_write && !(bits & 02u)) return 0;
+    if (want_exec && !(bits & 01u)) return 0;
+    return 1;
+}
+
 static uint32_t alloc_inode(lufirafs_t *fs) {
     for (uint32_t ino = 1; ino <= fs->sb.inode_count; ino++) {
         lufirafs_inode_t tmp;
@@ -391,7 +407,8 @@ int lufirafs_get_path(lufirafs_t *fs, uint32_t ino, char *out, uint32_t out_size
 
 // ===== Создание / удаление =====
 
-int lufirafs_create(lufirafs_t *fs, uint32_t parent_ino, const char *name, uint32_t mode, uint32_t *out_ino) {
+int lufirafs_create(lufirafs_t *fs, uint32_t parent_ino, const char *name, uint32_t mode,
+                     uint32_t uid, uint32_t gid, uint32_t perm, uint32_t *out_ino) {
     if (!fs || !name || !*name || !out_ino) return -1;
 
     uint32_t existing;
@@ -413,6 +430,9 @@ int lufirafs_create(lufirafs_t *fs, uint32_t parent_ino, const char *name, uint3
     memset(&inode, 0, sizeof(inode));
     inode.mode = mode;
     inode.links_count = (mode == LUFIRAFS_MODE_DIR) ? 2 : 1;
+    inode.uid = uid;
+    inode.gid = gid;
+    inode.perm = perm;
     lufirafs_write_inode(fs, ino, &inode);
 
     if (mode == LUFIRAFS_MODE_DIR) {

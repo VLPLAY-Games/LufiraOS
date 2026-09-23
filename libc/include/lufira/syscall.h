@@ -35,6 +35,10 @@
 #define SYS_SLEEP    16
 #define SYS_KILL     17
 #define SYS_PIPE     18
+#define SYS_CHMOD    19
+#define SYS_CHOWN    20
+#define SYS_GETUID   21
+#define SYS_GETGID   22
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -60,7 +64,9 @@
 #define MAP_ANONYMOUS  0x20
 
 // Коды ошибок — ровно то подмножество, которое ядро реально возвращает.
+#define EPERM    1
 #define ENOENT   2
+#define EACCES   13
 #define EFAULT   14
 #define ENOTDIR  20
 #define EINVAL   22
@@ -134,4 +140,16 @@ static inline long sys_kill(long pid, int sig) {
 }
 static inline long sys_pipe(int fds[2]) {
     return __syscall5(SYS_PIPE, (long)fds, 0, 0, 0, 0);
+}
+static inline long sys_chmod(const char *path, int mode) {
+    return __syscall5(SYS_CHMOD, (long)path, mode, 0, 0, 0);
+}
+static inline long sys_chown(const char *path, int uid, int gid) {
+    return __syscall5(SYS_CHOWN, (long)path, uid, gid, 0, 0);
+}
+static inline long sys_getuid(void) {
+    return __syscall5(SYS_GETUID, 0, 0, 0, 0, 0);
+}
+static inline long sys_getgid(void) {
+    return __syscall5(SYS_GETGID, 0, 0, 0, 0, 0);
 }

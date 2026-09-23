@@ -71,7 +71,8 @@ void klog_init(void) {
     if (lufirafs_resolve_parent(&lufirafs, LUFIRAFS_ROOT_INODE, KLOG_PATH, &parent, name) != 0) return;
 
     uint32_t out_ino;
-    lufirafs_create(&lufirafs, parent, name, LUFIRAFS_MODE_FILE, &out_ino);
+    lufirafs_create(&lufirafs, parent, name, LUFIRAFS_MODE_FILE,
+                     0, 0, LUFIRAFS_DEFAULT_FILE_PERM, &out_ino);
 }
 
 void klog(const char *format, ...) {

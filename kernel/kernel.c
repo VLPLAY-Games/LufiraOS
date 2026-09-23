@@ -24,6 +24,7 @@
 #include "fs/vfs/vfs.h"
 #include "system/devmode/devmode.h"
 #include "system/klog/klog.h"
+#include "system/users/users.h"
 #include "log.h"
 
 
@@ -161,6 +162,7 @@ void _start(BootInfo* bi) {
             LOG_DONE_OK("LufiraFS mounted");
             devmode_init();
             klog_init();
+            users_init();
             klog("[BOOT] LufiraOS booting, devmode=%u", devmode_is_enabled());
         } else {
             LOG_DONE_FAIL("LufiraFS mount failed");

@@ -14,6 +14,7 @@
 #include "lib/stddef.h"
 #include "lib/string.h"
 #include "system/devmode/devmode.h"
+#include "system/process/process.h"
 
 extern lufirafs_t lufirafs;
 
@@ -230,8 +231,11 @@ static int lufirafs_inode_create(inode_t *dir, const char *name, file_type_t typ
     if (!priv->is_dir) return -1;
 
     uint32_t mode = (type == FT_DIRECTORY) ? LUFIRAFS_MODE_DIR : LUFIRAFS_MODE_FILE;
+    uint32_t perm = (type == FT_DIRECTORY) ? LUFIRAFS_DEFAULT_DIR_PERM : LUFIRAFS_DEFAULT_FILE_PERM;
+    uint32_t uid = current_process ? current_process->uid : 0;
+    uint32_t gid = current_process ? current_process->gid : 0;
     uint32_t out_ino;
-    int res = lufirafs_create(&lufirafs, priv->ino, name, mode, &out_ino);
+    int res = lufirafs_create(&lufirafs, priv->ino, name, mode, uid, gid, perm, &out_ino);
     if (res == 0) lufirafs_sync(&lufirafs);
     return res;
 }
@@ -256,7 +260,10 @@ int vfs_lufirafs_create(const char *path) {
     if (lufirafs_resolve_parent(&lufirafs, lufirafs.sb.root_inode, path, &parent, name) != 0) return -1;
 
     uint32_t out_ino;
-    int res = lufirafs_create(&lufirafs, parent, name, LUFIRAFS_MODE_FILE, &out_ino);
+    uint32_t uid = current_process ? current_process->uid : 0;
+    uint32_t gid = current_process ? current_process->gid : 0;
+    int res = lufirafs_create(&lufirafs, parent, name, LUFIRAFS_MODE_FILE,
+                               uid, gid, LUFIRAFS_DEFAULT_FILE_PERM, &out_ino);
     if (res == 0) lufirafs_sync(&lufirafs);
     return (res == 0) ? 0 : -2;
 }
@@ -270,7 +277,10 @@ int vfs_lufirafs_mkdir(const char *path) {
     if (lufirafs_resolve_parent(&lufirafs, lufirafs.sb.root_inode, path, &parent, name) != 0) return -1;
 
     uint32_t out_ino;
-    int res = lufirafs_create(&lufirafs, parent, name, LUFIRAFS_MODE_DIR, &out_ino);
+    uint32_t uid = current_process ? current_process->uid : 0;
+    uint32_t gid = current_process ? current_process->gid : 0;
+    int res = lufirafs_create(&lufirafs, parent, name, LUFIRAFS_MODE_DIR,
+                               uid, gid, LUFIRAFS_DEFAULT_DIR_PERM, &out_ino);
     if (res == 0) lufirafs_sync(&lufirafs);
     return res;
 }

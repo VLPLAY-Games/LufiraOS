@@ -307,6 +307,11 @@ void process_init(void) {
     idle_process->cwd_inode = LUFIRAFS_ROOT_INODE;
     idle_process->cwd_path[0] = '/';
     idle_process->cwd_path[1] = '\0';
+    // idle — точка отсчёта identity для всей системы (первый shell
+    // наследует от него через process_create()), так что он обязан быть
+    // root, а не мусором из kmalloc().
+    idle_process->uid = 0;
+    idle_process->gid = 0;
 
     const char *name = "idle";
     for (int i = 0; i < 31 && name[i]; i++) idle_process->name[i] = name[i];
@@ -401,6 +406,11 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     proc->cwd_inode = LUFIRAFS_ROOT_INODE;
     proc->cwd_path[0] = '/';
     proc->cwd_path[1] = '\0';
+    // В отличие от cwd (всегда сбрасывается на корень), identity
+    // НАСЛЕДУЕТСЯ от текущего процесса — иначе run/runbg/exec стартовали бы
+    // новый процесс всегда как root независимо от того, кто его запустил.
+    proc->uid = current_process ? current_process->uid : 0;
+    proc->gid = current_process ? current_process->gid : 0;
 
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
     proc->name[31] = '\0';
@@ -725,6 +735,10 @@ int process_commit_exec(process_t *proc,
     // cwd (proc->cwd_path/cwd_inode) НЕ сбрасывается здесь — в отличие от
     // mmap-регионов, exec() не должен менять текущий каталог процесса
     // (POSIX execve() тоже сохраняет cwd).
+
+    // uid/gid тоже сознательно НЕ трогаются — POSIX execve() сохраняет
+    // identity процесса, кроме случая setuid-бита на исполняемом файле,
+    // которого в этой минимальной реализации нет вообще (см. process.h).
 
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
     proc->name[31] = '\0';
@@ -1214,6 +1228,11 @@ uint64_t process_fork(uint64_t frame_ptr) {
     // POSIX: ребёнок наследует cwd родителя 1:1.
     child->cwd_inode = parent->cwd_inode;
     strcpy(child->cwd_path, parent->cwd_path);
+
+    // POSIX: ребёнок наследует identity родителя 1:1 (нет setuid-бита в
+    // этой реализации, так что тут просто копия, без exec-time пересчёта).
+    child->uid = parent->uid;
+    child->gid = parent->gid;
 
     // Контекст ребёнка продолжает выполнение СРАЗУ ПОСЛЕ инструкции
     // syscall в родителе — тот же rip/rflags и те же callee-saved регистры

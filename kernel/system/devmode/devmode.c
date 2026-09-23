@@ -89,7 +89,8 @@ int devmode_set(int enabled) {
 
     if (enabled && !exists) {
         uint32_t out_ino;
-        if (lufirafs_create(&lufirafs, parent, name, LUFIRAFS_MODE_FILE, &out_ino) != 0)
+        if (lufirafs_create(&lufirafs, parent, name, LUFIRAFS_MODE_FILE,
+                             0, 0, LUFIRAFS_DEFAULT_FILE_PERM, &out_ino) != 0)
             return -1;
     } else if (!enabled && exists) {
         if (lufirafs_unlink(&lufirafs, parent, name) != 0)

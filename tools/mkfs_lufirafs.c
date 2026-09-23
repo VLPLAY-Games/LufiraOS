@@ -183,6 +183,9 @@ static uint32_t ensure_dir_path(const char *path) {
         memset(&inode, 0, sizeof(inode));
         inode.mode = LUFIRAFS_MODE_DIR;
         inode.links_count = 2;
+        inode.uid = 0;
+        inode.gid = 0;
+        inode.perm = LUFIRAFS_DEFAULT_DIR_PERM;
         write_inode(new_ino, &inode);
         add_dirent(new_ino, ".", new_ino);
         add_dirent(new_ino, "..", cur);
@@ -241,6 +244,9 @@ static void cmd_format(void) {
     memset(&root_inode, 0, sizeof(root_inode));
     root_inode.mode = LUFIRAFS_MODE_DIR;
     root_inode.links_count = 2;
+    root_inode.uid = 0;
+    root_inode.gid = 0;
+    root_inode.perm = LUFIRAFS_DEFAULT_DIR_PERM;
     write_inode(root, &root_inode);
 
     // free_inodes должен учитывать root ДО его аллокации в обычном смысле —
@@ -285,6 +291,9 @@ static void cmd_put(const char *host_file, const char *dest_path) {
         memset(&inode, 0, sizeof(inode));
         inode.mode = LUFIRAFS_MODE_FILE;
         inode.links_count = 1;
+        inode.uid = 0;
+        inode.gid = 0;
+        inode.perm = LUFIRAFS_DEFAULT_FILE_PERM;
         write_inode(file_ino, &inode);
         add_dirent(parent, name, file_ino);
     }

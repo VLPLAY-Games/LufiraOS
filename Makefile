@@ -108,6 +108,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/shell/commands/colors.c \
     $(KERNEL_DIR)/shell/commands/filesystem.c \
 	$(KERNEL_DIR)/shell/commands/sound.c \
+	$(KERNEL_DIR)/shell/commands/users.c \
     $(KERNEL_DIR)/system/cpu/gdt.c \
     $(KERNEL_DIR)/system/cpu/idt.c \
     $(KERNEL_DIR)/system/cpu/irq.c \
@@ -122,6 +123,7 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/system/elf/elf.c \
 	$(KERNEL_DIR)/system/devmode/devmode.c \
 	$(KERNEL_DIR)/system/klog/klog.c \
+	$(KERNEL_DIR)/system/users/users.c \
 	$(KERNEL_DIR)/fs/vfs/vfs.c \
 	$(KERNEL_DIR)/fs/lufirafs/lufirafs.c \
 	$(KERNEL_DIR)/fs/lufirafs/lufirafs_vfs.c
@@ -214,9 +216,12 @@ $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin $(BUILD_
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /test
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /system
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /logs
+	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /etc
 	echo "Hello from LufiraOS!" > $(BUILD_DIR)/readme.txt
 	$(BUILD_DIR)/mkfs_lufirafs put $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(BUILD_DIR)/readme.txt /readme.txt
 	rm -f $(BUILD_DIR)/readme.txt
+	$(BUILD_DIR)/mkfs_lufirafs put $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) tools/seed/passwd /etc/passwd
+	$(BUILD_DIR)/mkfs_lufirafs put $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) tools/seed/group /etc/group
 	sync
 	@printf "$(BOLD)$(BGREEN)═══ Disk image created: $(BWHITE)$@$(RESET)\n\n"
 

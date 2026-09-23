@@ -8,6 +8,7 @@
 #include "system/mm/heap.h"
 #include "system/devmode/devmode.h"
 #include "system/klog/klog.h"
+#include "system/users/users.h"
 #include "lib/string.h"
 
 #define LS_COLOR_DIR  COLOR_LIGHT_BLUE
@@ -17,6 +18,21 @@
 extern lufirafs_t lufirafs;
 // cwd_path/cwd_inode теперь макросы поверх current_process->... (shell.h),
 // а не отдельные extern-переменные.
+
+// Общая проверка прав для команд шелла (эти команды бьют в lufirafs_*
+// напрямую, минуя VFS/syscall.c — см. комментарий в lufirafs_vfs.c). При
+// отказе сама печатает "<cmd>: permission denied: <name>".
+static int check_perm(uint32_t ino, int want_read, int want_write, int want_exec,
+                       const char *cmd, const char *name) {
+    lufirafs_inode_t inode;
+    if (lufirafs_read_inode(&lufirafs, ino, &inode) != 0) return 0;
+    if (!lufirafs_check_access(&inode, current_process->uid, current_process->gid,
+                                want_read, want_write, want_exec)) {
+        printf("\n%s: permission denied: %s\n", cmd, name);
+        return 0;
+    }
+    return 1;
+}
 
 // Все имена в LufiraFS уже приводятся к нижнему регистру ещё на входе в
 // шелл (execute_command() лоуеркейсит всю строку до разбора команды),
@@ -86,7 +102,28 @@ void command_ls(const char* flags) {
         set_foreground_color(is_dir ? LS_COLOR_DIR : (is_exec ? LS_COLOR_EXEC : LS_COLOR_FILE));
 
         if (long_fmt) {
-            printf("%c %u ", is_dir ? 'd' : '-', inode.size);
+            char perm_str[11];
+            perm_str[0] = is_dir ? 'd' : '-';
+            perm_str[1] = (inode.perm & 0400) ? 'r' : '-';
+            perm_str[2] = (inode.perm & 0200) ? 'w' : '-';
+            perm_str[3] = (inode.perm & 0100) ? 'x' : '-';
+            perm_str[4] = (inode.perm & 0040) ? 'r' : '-';
+            perm_str[5] = (inode.perm & 0020) ? 'w' : '-';
+            perm_str[6] = (inode.perm & 0010) ? 'x' : '-';
+            perm_str[7] = (inode.perm & 0004) ? 'r' : '-';
+            perm_str[8] = (inode.perm & 0002) ? 'w' : '-';
+            perm_str[9] = (inode.perm & 0001) ? 'x' : '-';
+            perm_str[10] = '\0';
+
+            user_entry_t u;
+            group_entry_t g;
+            int have_user = (users_lookup_by_uid(inode.uid, &u) == 0);
+            int have_group = (groups_lookup_by_gid(inode.gid, &g) == 0);
+
+            printf("%s ", perm_str);
+            if (have_user) printf("%s ", u.username); else printf("%u ", inode.uid);
+            if (have_group) printf("%s ", g.groupname); else printf("%u ", inode.gid);
+            printf("%u ", inode.size);
             printf("%s\n", entry.name);
         } else {
             printf("%s  ", entry.name);
@@ -127,9 +164,12 @@ void command_cd(const char* path) {
 
 void command_mkdir(const char* name) {
     if (!name || !*name) return;
+    if (!check_perm(cwd_inode, 0, 1, 1, "mkdir", name)) return;
 
     uint32_t out_ino;
-    int res = lufirafs_create(&lufirafs, cwd_inode, name, LUFIRAFS_MODE_DIR, &out_ino);
+    int res = lufirafs_create(&lufirafs, cwd_inode, name, LUFIRAFS_MODE_DIR,
+                               current_process->uid, current_process->gid,
+                               LUFIRAFS_DEFAULT_DIR_PERM, &out_ino);
     switch (res) {
         case 0:
             lufirafs_sync(&lufirafs);
@@ -155,6 +195,10 @@ void command_rm(const char* name) {
         printf("\nUsage: rm <name> or rm *\n");
         return;
     }
+    // Прав на конкретный удаляемый файл не проверяем (нет sticky bit) —
+    // классическое до-sticky-bit поведение Unix: достаточно прав на запись
+    // в родительский каталог.
+    if (!check_perm(cwd_inode, 0, 1, 1, "rm", name)) return;
 
     if (strcmp(name, "*") == 0) {
         lufirafs_dir_t dir;
@@ -228,8 +272,12 @@ void command_touch(const char* name) {
         printf("\nUsage: touch <filename>\n");
         return;
     }
+    if (!check_perm(cwd_inode, 0, 1, 1, "touch", name)) return;
+
     uint32_t out_ino;
-    int res = lufirafs_create(&lufirafs, cwd_inode, name, LUFIRAFS_MODE_FILE, &out_ino);
+    int res = lufirafs_create(&lufirafs, cwd_inode, name, LUFIRAFS_MODE_FILE,
+                               current_process->uid, current_process->gid,
+                               LUFIRAFS_DEFAULT_FILE_PERM, &out_ino);
     switch (res) {
         case 0:
             lufirafs_sync(&lufirafs);
@@ -261,6 +309,7 @@ void command_cat(const char* filename) {
         printf("\nFile not found: %s\n", filename);
         return;
     }
+    if (!check_perm(ino, 1, 0, 0, "cat", filename)) return;
 
     lufirafs_inode_t inode;
     lufirafs_read_inode(&lufirafs, ino, &inode);
@@ -295,6 +344,7 @@ void command_run(const char *filename) {
         printf("\nFile not found: %s\n", filename);
         return;
     }
+    if (!check_perm(ino, 0, 0, 1, "run", filename)) return;
 
     lufirafs_inode_t inode;
     lufirafs_read_inode(&lufirafs, ino, &inode);
@@ -399,8 +449,13 @@ void command_write(const char *filename) {
     uint32_t ino;
     int exists = (lufirafs_lookup(&lufirafs, cwd_inode, filename, &ino) == 0);
 
-    if (!exists) {
-        if (lufirafs_create(&lufirafs, cwd_inode, filename, LUFIRAFS_MODE_FILE, &ino) != 0) {
+    if (exists) {
+        if (!check_perm(ino, 0, 1, 0, "write", filename)) return;
+    } else {
+        if (!check_perm(cwd_inode, 0, 1, 1, "write", filename)) return;
+        if (lufirafs_create(&lufirafs, cwd_inode, filename, LUFIRAFS_MODE_FILE,
+                             current_process->uid, current_process->gid,
+                             LUFIRAFS_DEFAULT_FILE_PERM, &ino) != 0) {
             printf("\nError creating file!\n");
             return;
         }
@@ -458,6 +513,7 @@ void command_cp(const char *args) {
         printf("\ncp: source file not found: %s\n", src_name);
         return;
     }
+    if (!check_perm(src_ino, 1, 0, 0, "cp", src_name)) return;
 
     lufirafs_inode_t src_inode;
     lufirafs_read_inode(&lufirafs, src_ino, &src_inode);
@@ -489,12 +545,16 @@ void command_cp(const char *args) {
 
     uint32_t dst_ino;
     if (lufirafs_lookup(&lufirafs, dst_parent, dst_leaf, &dst_ino) != 0) {
-        if (lufirafs_create(&lufirafs, dst_parent, dst_leaf, LUFIRAFS_MODE_FILE, &dst_ino) != 0) {
+        if (!check_perm(dst_parent, 0, 1, 1, "cp", dst_name)) { kfree(buf); return; }
+        if (lufirafs_create(&lufirafs, dst_parent, dst_leaf, LUFIRAFS_MODE_FILE,
+                             current_process->uid, current_process->gid,
+                             LUFIRAFS_DEFAULT_FILE_PERM, &dst_ino) != 0) {
             printf("\ncp: error creating destination file\n");
             kfree(buf);
             return;
         }
     } else {
+        if (!check_perm(dst_ino, 0, 1, 0, "cp", dst_name)) { kfree(buf); return; }
         lufirafs_truncate(&lufirafs, dst_ino, 0);
     }
 
@@ -563,6 +623,10 @@ void command_mv(const char *args) {
         printf("\nmv: source file not found: %s\n", src_name);
         return;
     }
+    // mv читает src целиком и потом unlink'ает его из родителя — нужны и
+    // read на сам файл, и write+exec на его родительский каталог.
+    if (!check_perm(src_ino, 1, 0, 0, "mv", src_name)) return;
+    if (!check_perm(src_parent, 0, 1, 1, "mv", src_name)) return;
 
     lufirafs_inode_t src_inode;
     lufirafs_read_inode(&lufirafs, src_ino, &src_inode);
@@ -590,12 +654,16 @@ void command_mv(const char *args) {
 
     uint32_t dst_ino;
     if (lufirafs_lookup(&lufirafs, dst_parent, dst_leaf, &dst_ino) != 0) {
-        if (lufirafs_create(&lufirafs, dst_parent, dst_leaf, LUFIRAFS_MODE_FILE, &dst_ino) != 0) {
+        if (!check_perm(dst_parent, 0, 1, 1, "mv", dst_name)) { kfree(buf); return; }
+        if (lufirafs_create(&lufirafs, dst_parent, dst_leaf, LUFIRAFS_MODE_FILE,
+                             current_process->uid, current_process->gid,
+                             LUFIRAFS_DEFAULT_FILE_PERM, &dst_ino) != 0) {
             printf("\nmv: error creating destination file\n");
             kfree(buf);
             return;
         }
     } else {
+        if (!check_perm(dst_ino, 0, 1, 0, "mv", dst_name)) { kfree(buf); return; }
         lufirafs_truncate(&lufirafs, dst_ino, 0);
     }
     lufirafs_write(&lufirafs, dst_ino, 0, buf, src_inode.size);
@@ -693,10 +761,15 @@ void command_edit(const char *args) {
 
     uint32_t ino;
     if (lufirafs_lookup(&lufirafs, cwd_inode, fname, &ino) != 0) {
-        if (lufirafs_create(&lufirafs, cwd_inode, fname, LUFIRAFS_MODE_FILE, &ino) != 0) {
+        if (!check_perm(cwd_inode, 0, 1, 1, "edit", fname)) return;
+        if (lufirafs_create(&lufirafs, cwd_inode, fname, LUFIRAFS_MODE_FILE,
+                             current_process->uid, current_process->gid,
+                             LUFIRAFS_DEFAULT_FILE_PERM, &ino) != 0) {
             printf("\nError creating file\n");
             return;
         }
+    } else {
+        if (!check_perm(ino, 0, 1, 0, "edit", fname)) return;
     }
 
     int tlen = 0;

@@ -51,3 +51,11 @@ void command_wait(const char* args);
 void command_beep(void);
 void command_mixer(const char* args);
 void command_music(void);
+
+// Пользователи/группы
+void command_whoami(void);
+void command_chmod(const char* args);
+void command_chown(const char* args);
+void command_useradd(const char* args);
+void command_groupadd(const char* args);
+void command_su(const char* args);

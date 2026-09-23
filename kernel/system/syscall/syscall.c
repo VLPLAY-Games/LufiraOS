@@ -21,6 +21,20 @@ extern lufirafs_t lufirafs;
 int do_exec(const char *filename) {
     if (!filename || !*filename) return -1;
 
+    // Проверка бита исполнения — VFS-пути всегда разрешаются от корня (см.
+    // комментарий вверху lufirafs_vfs.c), поэтому резолвим так же, а не
+    // через cwd_inode (в отличие от sys_chmod/sys_chown ниже).
+    if (current_process) {
+        uint32_t ino;
+        if (lufirafs_lookup(&lufirafs, lufirafs.sb.root_inode, filename, &ino) == 0) {
+            lufirafs_inode_t inode;
+            if (lufirafs_read_inode(&lufirafs, ino, &inode) == 0 &&
+                !lufirafs_check_access(&inode, current_process->uid, current_process->gid, 0, 0, 1)) {
+                return -1;
+            }
+        }
+    }
+
     int fd = vfs_open(filename, O_RDONLY);
     if (fd < 0) {
         printf("[EXEC] Failed to open %s\n", filename);
@@ -167,7 +181,36 @@ static uint64_t sys_open(uint64_t filename_ptr, uint64_t flags, uint64_t mode,
     if (validate_user_string(current_process->page_table, filename_ptr, USER_STRING_MAX) < 0)
         return (uint64_t)-EFAULT;
 
-    return (uint64_t)vfs_open((const char *)filename_ptr, (int)flags);
+    const char *filename = (const char *)filename_ptr;
+
+    // Проверка прав — VFS всегда резолвит пути от корня (см. комментарий
+    // вверху lufirafs_vfs.c), поэтому резолвим так же здесь, отдельно от
+    // самого vfs_open() (который своей проверки не делает вообще).
+    uint64_t accmode = flags & 0x3;
+    int want_read = (accmode != O_WRONLY);
+    int want_write = (accmode != O_RDONLY);
+
+    uint32_t ino;
+    if (lufirafs_lookup(&lufirafs, lufirafs.sb.root_inode, filename, &ino) == 0) {
+        lufirafs_inode_t inode;
+        if (lufirafs_read_inode(&lufirafs, ino, &inode) == 0 &&
+            !lufirafs_check_access(&inode, current_process->uid, current_process->gid,
+                                    want_read, want_write, 0)) {
+            return (uint64_t)-EACCES;
+        }
+    } else if (flags & O_CREAT) {
+        uint32_t parent;
+        char leaf[LUFIRAFS_MAX_NAME + 1];
+        if (lufirafs_resolve_parent(&lufirafs, lufirafs.sb.root_inode, filename, &parent, leaf) == 0) {
+            lufirafs_inode_t pinode;
+            if (lufirafs_read_inode(&lufirafs, parent, &pinode) == 0 &&
+                !lufirafs_check_access(&pinode, current_process->uid, current_process->gid, 0, 1, 1)) {
+                return (uint64_t)-EACCES;
+            }
+        }
+    }
+
+    return (uint64_t)vfs_open(filename, (int)flags);
 }
 
 // SYS_CLOSE (7): fd
@@ -463,6 +506,71 @@ static uint64_t sys_pipe(uint64_t fds_ptr,
     return 0;
 }
 
+// SYS_CHMOD (19): path, mode (напр. 0644) — как sys_chdir, резолвит path
+// относительно current_process->cwd_inode. Владелец файла или root.
+static uint64_t sys_chmod(uint64_t path_ptr, uint64_t mode, uint64_t unused1,
+                          uint64_t unused2, uint64_t unused3) {
+    (void)unused1; (void)unused2; (void)unused3;
+
+    if (!current_process) return (uint64_t)-EFAULT;
+    int64_t slen = validate_user_string(current_process->page_table, path_ptr, USER_STRING_MAX);
+    if (slen < 0) return (uint64_t)-EFAULT;
+    if (slen == 0) return (uint64_t)-EINVAL;
+    const char *path = (const char *)path_ptr;
+
+    uint32_t ino;
+    if (lufirafs_lookup(&lufirafs, current_process->cwd_inode, path, &ino) != 0)
+        return (uint64_t)-ENOENT;
+
+    lufirafs_inode_t inode;
+    if (lufirafs_read_inode(&lufirafs, ino, &inode) != 0) return (uint64_t)-ENOENT;
+    if (current_process->uid != 0 && current_process->uid != inode.uid)
+        return (uint64_t)-EPERM;
+
+    inode.perm = (uint32_t)mode & 0777u;
+    lufirafs_write_inode(&lufirafs, ino, &inode);
+    lufirafs_sync(&lufirafs);
+    return 0;
+}
+
+// SYS_CHOWN (20): path, uid, gid — только root (без POSIX-нюанса "owner
+// может сменить группу на свою собственную").
+static uint64_t sys_chown(uint64_t path_ptr, uint64_t new_uid, uint64_t new_gid,
+                          uint64_t unused1, uint64_t unused2) {
+    (void)unused1; (void)unused2;
+
+    if (!current_process) return (uint64_t)-EFAULT;
+    int64_t slen = validate_user_string(current_process->page_table, path_ptr, USER_STRING_MAX);
+    if (slen < 0) return (uint64_t)-EFAULT;
+    if (slen == 0) return (uint64_t)-EINVAL;
+    if (current_process->uid != 0) return (uint64_t)-EPERM;
+    const char *path = (const char *)path_ptr;
+
+    uint32_t ino;
+    if (lufirafs_lookup(&lufirafs, current_process->cwd_inode, path, &ino) != 0)
+        return (uint64_t)-ENOENT;
+
+    lufirafs_inode_t inode;
+    if (lufirafs_read_inode(&lufirafs, ino, &inode) != 0) return (uint64_t)-ENOENT;
+    inode.uid = (uint32_t)new_uid;
+    inode.gid = (uint32_t)new_gid;
+    lufirafs_write_inode(&lufirafs, ino, &inode);
+    lufirafs_sync(&lufirafs);
+    return 0;
+}
+
+// SYS_GETUID (21) / SYS_GETGID (22) — без аргументов.
+static uint64_t sys_getuid(uint64_t u1, uint64_t u2, uint64_t u3, uint64_t u4, uint64_t u5) {
+    (void)u1; (void)u2; (void)u3; (void)u4; (void)u5;
+    if (!current_process) return (uint64_t)-EFAULT;
+    return current_process->uid;
+}
+static uint64_t sys_getgid(uint64_t u1, uint64_t u2, uint64_t u3, uint64_t u4, uint64_t u5) {
+    (void)u1; (void)u2; (void)u3; (void)u4; (void)u5;
+    if (!current_process) return (uint64_t)-EFAULT;
+    return current_process->gid;
+}
+
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
 
 static syscall_fn_t syscall_table[256] = {
@@ -485,6 +593,10 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_SLEEP]   = sys_sleep,
     [SYS_KILL]    = sys_kill,
     [SYS_PIPE]    = sys_pipe,
+    [SYS_CHMOD]   = sys_chmod,
+    [SYS_CHOWN]   = sys_chown,
+    [SYS_GETUID]  = sys_getuid,
+    [SYS_GETGID]  = sys_getgid,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========

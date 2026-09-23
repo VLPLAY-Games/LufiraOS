@@ -54,9 +54,19 @@ int lufirafs_resolve_parent(lufirafs_t *fs, uint32_t start_inode, const char *pa
 int lufirafs_get_path(lufirafs_t *fs, uint32_t ino, char *out, uint32_t out_size);
 
 // mode — LUFIRAFS_MODE_FILE или LUFIRAFS_MODE_DIR. Для директорий сразу
-// создаёт "." и "..". Ошибки: -1 неверные параметры/уже существует,
-// -2 нет свободного inode, -3 не удалось добавить запись в каталог.
-int lufirafs_create(lufirafs_t *fs, uint32_t parent_ino, const char *name, uint32_t mode, uint32_t *out_ino);
+// создаёт "." и "..". uid/gid/perm — владелец и права создаваемого inode
+// (обычно current_process->uid/gid и LUFIRAFS_DEFAULT_FILE_PERM/DIR_PERM).
+// Ошибки: -1 неверные параметры/уже существует, -2 нет свободного inode,
+// -3 не удалось добавить запись в каталог.
+int lufirafs_create(lufirafs_t *fs, uint32_t parent_ino, const char *name, uint32_t mode,
+                     uint32_t uid, uint32_t gid, uint32_t perm, uint32_t *out_ino);
+
+// Проверка прав доступа в классическом Unix-стиле: root (uid==0) проходит
+// всегда; иначе берутся owner/group/other биты в зависимости от того, чей
+// uid/gid у inode. want_read/want_write/want_exec — 1, если требуется.
+// Возвращает 1 = доступ разрешён, 0 = запрещён.
+int lufirafs_check_access(const lufirafs_inode_t *inode, uint32_t uid, uint32_t gid,
+                           int want_read, int want_write, int want_exec);
 
 // Удаляет файл ИЛИ ПУСТУЮ директорию. -1 не найден/неверные параметры,
 // -2 директория не пуста, -3 попытка удалить корень.

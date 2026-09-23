@@ -22,6 +22,10 @@
 #define SYS_SLEEP    16
 #define SYS_KILL     17
 #define SYS_PIPE     18
+#define SYS_CHMOD    19
+#define SYS_CHOWN    20
+#define SYS_GETUID   21
+#define SYS_GETGID   22
 
 // Флаги для sys_open
 #define O_RDONLY    0
@@ -57,9 +61,11 @@
 // (uint64_t)-1 везде в этом файле. Только то, что реально различают новые
 // проверки user-указателей и sys_getcwd()/sys_chdir() — остальные
 // (VFS-уровня) сбои пока остаются простым -1, см. syscall.c.
+#define EPERM    1
 #define ENOENT   2
-#define ENOTDIR  20
+#define EACCES   13
 #define EFAULT   14
+#define ENOTDIR  20
 #define EINVAL   22
 #define ERANGE   34
 

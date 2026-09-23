@@ -30,9 +30,9 @@
 #define LUFIRAFS_ESP_SIZE     (4u * 1024u * 1024u)
 
 #define LUFIRAFS_MAGIC        0x31534C4Fu   // "OLS1" по байтам little-endian
-#define LUFIRAFS_VERSION      1u
+#define LUFIRAFS_VERSION      2u            // v2: inode incl. uid/gid/perm
 #define LUFIRAFS_BLOCK_SIZE   4096u
-#define LUFIRAFS_INODE_SIZE   64u
+#define LUFIRAFS_INODE_SIZE   76u
 #define LUFIRAFS_DIRENT_SIZE  64u
 #define LUFIRAFS_MAX_NAME     59            // + завершающий '\0' в 60-м байте
 #define LUFIRAFS_DIRECT_BLOCKS 12
@@ -66,14 +66,21 @@ typedef struct {
     uint8_t  reserved[LUFIRAFS_BLOCK_SIZE - 52];
 } __attribute__((packed)) lufirafs_superblock_t;
 
-// mode + size + links_count + direct[12] + indirect = 4+4+4+48+4 = 64 байта.
+// mode + size + links_count + direct[12] + indirect + uid + gid + perm
+// = 4+4+4+48+4+4+4+4 = 76 байт.
 typedef struct {
     uint32_t mode;      // LUFIRAFS_MODE_*
     uint32_t size;       // байт (для директорий — тоже байт занятых данных)
     uint32_t links_count; // >=1 пока живой; 0 = свободен
     uint32_t direct[LUFIRAFS_DIRECT_BLOCKS];
     uint32_t indirect;    // 0 = нет косвенного блока
+    uint32_t uid;         // владелец (0 = root)
+    uint32_t gid;         // группа-владелец
+    uint32_t perm;        // классические 9 бит rwxrwxrwx (напр. 0644/0755)
 } __attribute__((packed)) lufirafs_inode_t;
+
+#define LUFIRAFS_DEFAULT_FILE_PERM 0644u
+#define LUFIRAFS_DEFAULT_DIR_PERM  0755u
 
 // inode==0 — свободный/удалённый слот записи каталога.
 typedef struct {
