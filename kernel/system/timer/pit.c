@@ -1,7 +1,7 @@
 #include "pit.h"
 #include "drivers/console/console.h"
 #include "system/process/process.h"
-#include "drivers/usb/uhci.h"
+#include "drivers/usb/xhci.h"
 #include "system/devmode/devmode.h"
 
 // Порты I/O

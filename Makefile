@@ -100,7 +100,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/drivers/mouse/mouse.c \
     $(KERNEL_DIR)/drivers/disk/disk.c \
 	$(KERNEL_DIR)/drivers/sound/ac97.c \
-	$(KERNEL_DIR)/drivers/usb/uhci.c \
+	$(KERNEL_DIR)/drivers/usb/xhci.c \
 	$(KERNEL_DIR)/drivers/usb/usb_hid.c \
 	$(KERNEL_DIR)/drivers/input/input.c \
     $(KERNEL_DIR)/shell/shell.c \
@@ -243,7 +243,7 @@ run: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs
 		-machine pcspk-audiodev=audio \
 		-audiodev driver=alsa,id=audio \
 		-device AC97,audiodev=audio \
-		-device piix3-usb-uhci \
+		-device qemu-xhci \
 		-device usb-kbd \
 		-device usb-mouse \
 		-serial stdio
@@ -256,7 +256,7 @@ debug: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs
 		-bios /usr/share/ovmf/OVMF.fd \
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
 		-m 256M -net none -serial stdio -no-reboot -no-shutdown \
-		-device piix3-usb-uhci -device usb-kbd -device usb-mouse \
+		-device qemu-xhci -device usb-kbd -device usb-mouse \
 		-d cpu_reset,guest_errors -D $(BUILD_DIR)/qemu_debug.log
 
 monitor: $(BUILD_DIR)/disk.img
@@ -264,7 +264,7 @@ monitor: $(BUILD_DIR)/disk.img
 		-bios /usr/share/ovmf/OVMF.fd \
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
 		-m 256M -net none -serial stdio \
-		-device piix3-usb-uhci -device usb-kbd -device usb-mouse \
+		-device qemu-xhci -device usb-kbd -device usb-mouse \
 		-monitor telnet:127.0.0.1:4444,server,nowait \
 		-no-reboot -no-shutdown
 

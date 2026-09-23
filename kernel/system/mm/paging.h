@@ -37,6 +37,14 @@ static inline void* phys_to_virt(uint64_t phys) {
     return (void*)(KERNEL_PHYSMAP_BASE + phys);
 }
 
+// PML4-индекс 320 — свободный (256=physmap выше, 272=kernel stacks в
+// process.h, 288=kernel heap в heap.h) канонический диапазон, зарезервированный
+// под ЯВНОЕ отображение MMIO физических адресов устройств (PCI BAR'ов и
+// т.п.), которые НЕ являются RAM и поэтому НЕ покрываются physmap'ом (тот
+// отображает только RAM, отчитанную UEFI). Первый потребитель — xHCI-драйвер
+// (см. drivers/usb/xhci.c, map_mmio()).
+#define KERNEL_MMIO_BASE 0xFFFFA00000000000ULL
+
 // Инициализация страничной адресации
 void paging_init(BootInfo* bi);
 
