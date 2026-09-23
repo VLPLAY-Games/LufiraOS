@@ -3,6 +3,7 @@
 #include "drivers/console/console.h"
 #include "drivers/keyboard/keyboard.h"
 #include "system/process/process.h"
+#include "system/users/users.h"
 
 #define HISTORY_SIZE 20
 
@@ -179,8 +180,8 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "pwd") == 0) {
         printf("\n%s\n", cwd_path);
     } else if (strcmp(cmd_lower, "cd") == 0) {
-        if (*args == '\0') printf("\nUsage: cd <directory>\n");
-        else command_cd(args);
+        // Без аргумента — домашний каталог (см. command_cd()), а не ошибка.
+        command_cd(*args ? args : NULL);
     } else if (strcmp(cmd_lower, "ls") == 0) {
         command_ls(args);
     } else if (strcmp(cmd_lower, "mkdir") == 0) {
@@ -258,6 +259,16 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "su") == 0) {
         if (input_buffer_index <= 3) printf("\nUsage: su <username> [password]\n");
         else command_su(input_buffer + 3);
+    } else if (strcmp(cmd_lower, "usbinfo") == 0) {
+        command_usbinfo();
+    } else if (strcmp(cmd_lower, "usbread") == 0) {
+        if (*args == '\0') printf("\nUsage: usbread <device> <lba>\n");
+        else command_usbread(args);
+    } else if (strcmp(cmd_lower, "usbwrite") == 0) {
+        // Сырой input_buffer — текст, который пишется на диск, регистрозависим.
+        // "usbwrite " = 9 символов включая пробел.
+        if (input_buffer_index <= 9) printf("\nUsage: usbwrite <device> <lba> <text>\n");
+        else command_usbwrite(input_buffer + 9);
     } else {
         printf("\nUnknown command: %s\n", input_buffer);
         printf("Type 'help' for available commands.\n");
@@ -270,21 +281,48 @@ void execute_command(void) {
 void show_prompt(void) {
     printf("\n");
 
-    // "[lufiraos@kernel]" всегда рисуем cyan, но остальную часть строки —
+    // "[user@lufiraos]" всегда рисуем cyan, но остальную часть строки —
     // ТЕКУЩИМ цветом текста, а не жёстко белым: раньше это затирало цвет,
     // который пользователь настроил командой fg (bg при этом не трогалась,
     // поэтому казалось, что fg "не работает", а bg работает).
     ConsoleColor saved_fg_index = current_colors.fg_index;
     uint32_t saved_fg_color = current_color;
 
+    user_entry_t prompt_user;
+    int have_user = (users_lookup_by_uid(current_process->uid, &prompt_user) == 0);
+
     set_foreground_color(COLOR_LIGHT_CYAN);
-    printf("[lufiraos@kernel]");
+    printf("[%s@lufiraos]", have_user ? prompt_user.username : "?");
 
     current_colors.fg_index = saved_fg_index;
     current_colors.fg_color = saved_fg_color;
     current_color = saved_fg_color;
 
-    printf(" %s $ ", cwd_path);
+    // Домашний каталог показываем как "~" (и "~/остаток"), как в
+    // большинстве Unix-шеллов — кроме root'а, чей home == "/": там "~" было
+    // бы неотличимо от корня и только запутывало бы.
+    const char *display_path = cwd_path;
+    char tilde_buf[256];
+    if (have_user && prompt_user.home[0] == '/' && prompt_user.home[1] != '\0') {
+        int home_len = 0;
+        while (prompt_user.home[home_len]) home_len++;
+        if (prompt_user.home[home_len - 1] == '/') home_len--;
+
+        int match = 1;
+        for (int i = 0; i < home_len; i++) {
+            if (cwd_path[i] != prompt_user.home[i]) { match = 0; break; }
+        }
+        if (match && (cwd_path[home_len] == '\0' || cwd_path[home_len] == '/')) {
+            int pos = 0;
+            tilde_buf[pos++] = '~';
+            int i = home_len;
+            while (cwd_path[i] && pos < (int)sizeof(tilde_buf) - 1) tilde_buf[pos++] = cwd_path[i++];
+            tilde_buf[pos] = '\0';
+            display_path = tilde_buf;
+        }
+    }
+
+    printf(" %s $ ", display_path);
     command_start_x = current_x;
     command_start_y = current_y;
     cursor_position_in_line = 0;
@@ -300,8 +338,11 @@ void shell_handle_tab(void) {
         "echo", "history", "status", "trap",
         "color", "colors", "fg", "bg", "reset",
         "pwd", "cd", "ls", "mkdir", "rm", "touch", "cat",
+        "cp", "mv", "rename", "edit",
         "run", "runbg", "exec", "write", "beep", "mixer", "music",
-        "kill", "wait", "df", "du", "devmode",
+        "kill", "wait", "ps", "df", "du", "devmode",
+        "whoami", "chmod", "chown", "useradd", "groupadd", "su",
+        "usbinfo", "usbread", "usbwrite",
         NULL
     };
     

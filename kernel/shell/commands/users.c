@@ -160,6 +160,48 @@ void command_chown(const char *args) {
     printf("\nchown: updated %s\n", path);
 }
 
+// Создаёт /home (если его ещё нет — общий родитель для всех домашних
+// каталогов) и /home/<username> внутри него, владелец — сам новый
+// пользователь (perm 0700 — приватный каталог, как в большинстве
+// дистрибутивов по умолчанию). При любой неудаче тихо откатывается на "/"
+// (совместимо со старым поведением — обычным ограниченным на 0755-корне
+// новый пользователь просто ничего не сможет создавать, но хотя бы
+// залогинится, а не останется вовсе без домашнего каталога).
+static void ensure_home_dir(uint32_t uid, uint32_t gid, const char *username,
+                             char *out_home, int out_home_size)
+{
+    uint32_t home_root_ino;
+    if (lufirafs_lookup(&lufirafs, lufirafs.sb.root_inode, "/home", &home_root_ino) != 0) {
+        if (lufirafs_create(&lufirafs, lufirafs.sb.root_inode, "home", LUFIRAFS_MODE_DIR,
+                             0, 0, LUFIRAFS_DEFAULT_DIR_PERM, &home_root_ino) != 0)
+        {
+            if (out_home_size > 1) { out_home[0] = '/'; out_home[1] = '\0'; }
+            else if (out_home_size == 1) { out_home[0] = '\0'; }
+            return;
+        }
+        lufirafs_sync(&lufirafs);
+    }
+
+    uint32_t user_home_ino;
+    if (lufirafs_lookup(&lufirafs, home_root_ino, username, &user_home_ino) != 0) {
+        if (lufirafs_create(&lufirafs, home_root_ino, username, LUFIRAFS_MODE_DIR,
+                             uid, gid, 0700, &user_home_ino) != 0)
+        {
+            if (out_home_size > 1) { out_home[0] = '/'; out_home[1] = '\0'; }
+            else if (out_home_size == 1) { out_home[0] = '\0'; }
+            return;
+        }
+        lufirafs_sync(&lufirafs);
+    }
+
+    int pos = 0;
+    const char *prefix = "/home/";
+    while (prefix[pos] && pos < out_home_size - 1) { out_home[pos] = prefix[pos]; pos++; }
+    int i = 0;
+    while (username[i] && pos < out_home_size - 1) { out_home[pos++] = username[i++]; }
+    out_home[pos] = '\0';
+}
+
 // useradd <username> <password> [groupname] — без groupname создаёт новую
 // группу с именем пользователя (как реальный Linux useradd по умолчанию).
 void command_useradd(const char *args) {
@@ -200,12 +242,16 @@ void command_useradd(const char *args) {
     }
 
     uint32_t uid = users_next_free_uid();
-    if (users_add(username, uid, gid, password, "/") != 0) {
+
+    char home[64];
+    ensure_home_dir(uid, gid, username, home, sizeof(home));
+
+    if (users_add(username, uid, gid, password, home) != 0) {
         printf("\nuseradd: failed to add user\n");
         return;
     }
 
-    printf("\nuseradd: created user '%s' (uid=%u gid=%u)\n", username, uid, gid);
+    printf("\nuseradd: created user '%s' (uid=%u gid=%u home=%s)\n", username, uid, gid, home);
 }
 
 // groupadd <groupname>

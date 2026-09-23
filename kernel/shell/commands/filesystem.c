@@ -135,6 +135,13 @@ void command_ls(const char* flags) {
 }
 
 void command_cd(const char* path) {
+    // Без аргумента — переход в домашний каталог текущего пользователя
+    // (как cd/"cd ~" в настоящих shell'ах). u — локальная копия на стеке,
+    // так что u.home остаётся валидным на весь остаток этого вызова.
+    user_entry_t u;
+    if ((!path || !*path) && users_lookup_by_uid(current_process->uid, &u) == 0 && u.home[0]) {
+        path = u.home;
+    }
     if (!path || !*path) return;
 
     uint32_t new_inode;

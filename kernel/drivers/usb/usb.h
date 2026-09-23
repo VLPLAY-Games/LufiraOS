@@ -66,6 +66,51 @@
 #define USB_HID_PROTOCOL_KEYBOARD 0x01
 #define USB_HID_PROTOCOL_MOUSE    0x02
 
+#define USB_CLASS_MSD            0x08 // Mass Storage
+#define USB_MSD_SUBCLASS_SCSI    0x06 // SCSI transparent command set
+#define USB_MSD_PROTOCOL_BOT     0x50 // Bulk-Only Transport
+
+/* =========================================================
+ * USB Mass Storage — Bulk-Only Transport (CBW/CSW) поверх пары bulk
+ * endpoint'ов; сами SCSI-команды (opcode'ы) HCD-независимы так же, как и
+ * остальной этот заголовок.
+ * ========================================================= */
+
+#define USB_BOT_CBW_SIGNATURE 0x43425355u // "USBC"
+#define USB_BOT_CSW_SIGNATURE 0x53425355u // "USBS"
+
+#define USB_BOT_FLAG_DATA_IN  0x80
+#define USB_BOT_FLAG_DATA_OUT 0x00
+
+#define USB_BOT_STATUS_OK          0
+#define USB_BOT_STATUS_FAIL        1
+#define USB_BOT_STATUS_PHASE_ERROR 2
+
+typedef struct __attribute__((packed)) {
+    uint32_t dCBWSignature;
+    uint32_t dCBWTag;
+    uint32_t dCBWDataTransferLength;
+    uint8_t  bmCBWFlags;   // бит 7: 1 = Data-In, 0 = Data-Out
+    uint8_t  bCBWLUN;      // биты 0-3
+    uint8_t  bCBWCBLength; // биты 0-4 — длина CBWCB
+    uint8_t  CBWCB[16];
+} usb_bot_cbw_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t dCSWSignature;
+    uint32_t dCSWTag;
+    uint32_t dCSWDataResidue;
+    uint8_t  bCSWStatus; // USB_BOT_STATUS_*
+} usb_bot_csw_t;
+
+/* SCSI command opcodes — только то, что нужно для базового блочного
+ * чтения/записи (без файловой системы поверх, см. план). */
+#define SCSI_CMD_TEST_UNIT_READY 0x00
+#define SCSI_CMD_INQUIRY         0x12
+#define SCSI_CMD_READ_CAPACITY10 0x25
+#define SCSI_CMD_READ10          0x28
+#define SCSI_CMD_WRITE10         0x2A
+
 /* =========================================================
  * Setup-пакет control-передачи (8 байт, как того требует спецификация)
  * ========================================================= */

@@ -52,7 +52,19 @@ void command_help(void) {
     printf(" music - Play sample music to check sound\n");
     printf(" mixer <volume> - Change sound volume\n");
     printf(" exec <file> - Replace current process with ELF program\n");
+    printf(" ps - List running processes\n");
     printf(" devmode [on|off] - Show/toggle developer mode (verbose driver output)\n");
+    printf("\nUsers & permissions:\n");
+    printf(" whoami - Show current user/group\n");
+    printf(" chmod <mode> <path> - Change file permissions (octal, e.g. 644)\n");
+    printf(" chown <user>[:group] <path> - Change file owner (root only)\n");
+    printf(" useradd <user> <password> [group] - Create a new user\n");
+    printf(" groupadd <group> - Create a new group\n");
+    printf(" su <user> [password] - Switch user\n");
+    printf("\nUSB mass storage:\n");
+    printf(" usbinfo - List detected USB storage devices\n");
+    printf(" usbread <device> <lba> - Read one block, show hex dump\n");
+    printf(" usbwrite <device> <lba> <text> - Write text into one block\n");
 }
 
 // devmode [on|off] — без аргументов показывает текущее состояние.

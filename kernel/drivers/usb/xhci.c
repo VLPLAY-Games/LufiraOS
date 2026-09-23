@@ -275,7 +275,9 @@ static inline uint32_t *xhci_ctx_at(void *base, int index) {
 #define EP_DW1_CERR_SHIFT       1
 #define EP_DW1_TYPE_SHIFT       3
 #define EP_DW1_MAXPACKET_SHIFT  16
+#define EP_TYPE_BULK_OUT      2
 #define EP_TYPE_CONTROL       4
+#define EP_TYPE_BULK_IN       6
 #define EP_TYPE_INTERRUPT_IN  7
 
 #define ICC_DW1_ADD_FLAG(dci) (1u << (dci)) // dci==0 означает Slot Context (A0)
@@ -336,11 +338,17 @@ static uint16_t xhci_default_ep0_max_packet(uint8_t speed) {
 
 #define XHCI_MAX_SLOTS_SUPPORTED 8 // пишется в CONFIG.MaxSlotsEn
 #define XHCI_MAX_HID_DEVICES     8
+#define XHCI_MAX_MSD_DEVICES     4
 #define XHCI_DMA_DATA_MAX        512 // с запасом под конфигурацию с HID/endpoint-дескрипторами
+
+#define XHCI_DEV_CLASS_NONE 0
+#define XHCI_DEV_CLASS_HID  1
+#define XHCI_DEV_CLASS_MSD  2
 
 typedef struct {
     int      in_use;
     uint8_t  slot_id, port_id, speed;
+    int      device_class; // XHCI_DEV_CLASS_*
 
     uint64_t device_ctx_phys; void *device_ctx_virt;
     uint64_t input_ctx_phys;  void *input_ctx_virt;
@@ -348,13 +356,15 @@ typedef struct {
     uint16_t    ep0_max_packet;
     xhci_ring_t ep0_ring;
 
-    // Область действия этой фазы: не больше одного interrupt IN
-    // HID-endpoint'а на слот. Будущая фаза USB Mass Storage обобщила бы это
-    // до массива xhci_ring_t[32] по DCI — остальное менять не пришлось бы.
+    // HID: не больше одного interrupt IN endpoint'а на слот.
     int         hid_ep_dci;
     xhci_ring_t hid_ep_ring;
     uint64_t    hid_report_buf_phys; void *hid_report_buf_virt;
     uint8_t     hid_report_expected_len, hid_protocol;
+
+    // Mass Storage: пара bulk-endpoint'ов (IN + OUT) для Bulk-Only Transport.
+    int         msd_bulk_in_dci, msd_bulk_out_dci;
+    xhci_ring_t msd_bulk_in_ring, msd_bulk_out_ring;
 } xhci_slot_t;
 
 static void *xhci_cap_base = NULL;
@@ -381,6 +391,17 @@ static uint8_t *xhci_dma_scratch_virt = NULL;
 static xhci_slot_t xhci_slots[XHCI_MAX_SLOTS_SUPPORTED];
 static xhci_hid_device_t xhci_hid_devices[XHCI_MAX_HID_DEVICES];
 static int xhci_hid_device_count = 0;
+
+typedef struct {
+    int      in_use;
+    uint8_t  slot_id;
+    uint32_t max_lba;
+    uint32_t block_size;
+} xhci_msd_device_t;
+
+static xhci_msd_device_t xhci_msd_devices[XHCI_MAX_MSD_DEVICES];
+static int xhci_msd_device_count_var = 0;
+static uint32_t xhci_msd_next_tag = 1;
 
 // true, когда хотя бы одно HID-устройство вооружено и usb_poll() должно
 // реально что-то опрашивать.
@@ -551,24 +572,65 @@ static void xhci_write_erdp(void) {
     reg_write64(xhci_ir0_base, XHCI_IR_ERDP, ptr);
 }
 
-// Один общий Event Ring и один Interrupter обслуживают два непересекающихся
-// во времени сценария: (а) синхронное ожидание конкретного события во время
-// энумерации в xhci_init() (want_ptr != 0, с таймаутом), и (б) опрос
-// usb_poll() (want_ptr == 0, без блокировки) уже после того, как
-// энумерация полностью завершилась и xhci_ready выставлен. Это безопасно
-// именно из-за такого порядка, а не за счёт какой-либо блокировки.
-// Каждое просмотренное событие — совпавшее или нет — потребляется (курсор
-// продвигается, ERDP записывается обратно), так что вызывающий никогда не
-// блокирует кольцо ради чужого события.
+// Декодирует один завершённый interrupt IN HID-отчёт и НЕМЕДЛЕННО
+// перевооружает конвейер (та же логика, что раньше жила только в
+// usb_poll()). Вынесено в общий хелпер по важной причине: Event Ring один
+// на все endpoint'ы разом, и синхронное ожидание MSD/control-передачи
+// (xhci_wait_for_event с ненулевым want_ptr) неизбежно попутно вычитывает
+// из очереди и чужие события — например, ровно те же interrupt IN отчёты
+// клавиатуры/мыши, которые иначе обслуживал бы только usb_poll(). Если
+// такое событие просто отбросить (как раньше), клавиатура/мышь навсегда
+// остаётся без перевооружённого TD — их endpoint "молчит" до перезагрузки.
+// Обслуживая HID-событие ПРЯМО ТУТ, независимо от того, кто именно сейчас
+// дренирует кольцо, конвейер клавиатуры/мыши никогда не голодает.
+static void xhci_service_hid_event(uint8_t slot_id, uint32_t status) {
+    xhci_slot_t *slot = xhci_slot_for_id(slot_id);
+    if (!slot || !slot->hid_ep_dci) return; // не HID-событие (например, MSD) — не наше дело
+
+    uint8_t cc = (uint8_t)((status >> TRB_COMPLETION_CODE_SHIFT) & 0xFFu);
+    if (cc == TRB_COMPLETION_SUCCESS) {
+        if (slot->hid_protocol == USB_HID_PROTOCOL_KEYBOARD) {
+            usb_hid_keyboard_report((const uint8_t *)slot->hid_report_buf_virt);
+        } else {
+            usb_hid_mouse_report((const uint8_t *)slot->hid_report_buf_virt,
+                                  slot->hid_report_expected_len);
+        }
+    }
+
+    xhci_ring_enqueue(&slot->hid_ep_ring, slot->hid_report_buf_phys,
+                       slot->hid_report_expected_len,
+                       TRB_CONTROL_TYPE_SET(TRB_TYPE_NORMAL) | TRB_CONTROL_IOC);
+    xhci_ring_doorbell(slot->slot_id, (uint8_t)slot->hid_ep_dci);
+}
+
+// Один общий Event Ring и один Interrupter обслуживают все запросы —
+// синхронное ожидание конкретного события (энумерация, control- и
+// bulk-передачи, want_ptr != 0, с таймаутом) и опрос usb_poll()
+// (want_ptr == 0, без блокировки). Это НЕ два непересекающихся во времени
+// сценария (в отличие от изначального предположения на этапе проектирования
+// только HID) — после того, как появляется Mass Storage, синхронные
+// MSD-передачи выполняются уже ПОСЛЕ того, как клавиатура/мышь используют
+// usb_poll() каждый тик, и обе стороны неизбежно дренируют один и тот же
+// Event Ring. Поэтому каждое просмотренное, но НЕ совпавшее событие не
+// просто отбрасывается — если это HID Transfer Event, оно тут же
+// обслуживается через xhci_service_hid_event(), чтобы клавиатура/мышь
+// никогда не оставались без перевооружённого TD.
+//
+// Жёсткий предел итераций внутреннего цикла (в размер кольца) — защита:
+// каким бы ни был точный источник, зависание всей системы (usb_poll()
+// вызывается из обработчика таймера с запрещёнными прерываниями — если
+// здесь зависнуть, останавливаются вообще все тики, включая те, на которых
+// держится pit_wait_ms() у любого другого ожидающего кода) недопустимо ни
+// при каких обстоятельствах, даже если реальная причина не в этой функции.
 static int xhci_wait_for_event(uint32_t want_type, uint64_t want_ptr,
                                 uint32_t *out_status, uint8_t *out_slot_id,
                                 int timeout_ms)
 {
     for (int elapsed = 0; elapsed <= timeout_ms; elapsed++) {
-        while (1) {
+        for (int guard = 0; guard < XHCI_RING_TRB_CAPACITY; guard++) {
             xhci_trb_t *ev = &xhci_event_ring.trbs[xhci_event_ring.dequeue_index];
             if ((ev->control & TRB_CONTROL_CYCLE) != (xhci_event_ring.cycle_state & TRB_CONTROL_CYCLE))
-                break; // новых событий нет
+                goto no_new_event; // новых событий нет
 
             uint32_t type = (uint32_t)TRB_CONTROL_TYPE_GET(ev->control);
             uint32_t status = ev->status;
@@ -587,8 +649,15 @@ static int xhci_wait_for_event(uint32_t want_type, uint64_t want_ptr,
                 if (out_slot_id) *out_slot_id = slot_id;
                 return 0;
             }
-            DLOG("[XHCI] ignored event type=%u status=%08X\n", type, status);
+
+            if (type == TRB_TYPE_TRANSFER_EVENT) {
+                xhci_service_hid_event(slot_id, status); // не-HID событие тихо игнорируется внутри
+            } else {
+                DLOG("[XHCI] ignored event type=%u status=%08X\n", type, status);
+            }
         }
+        printf("[XHCI] WARNING: event ring guard limit hit, giving up this wait\n");
+      no_new_event:
         if (want_ptr == 0) return -1; // usb_poll(): "сейчас ничего нет" — не ошибка
         pit_wait_ms(1);
     }
@@ -796,6 +865,205 @@ static int xhci_configure_hid_endpoint(xhci_slot_t *slot, uint8_t ep_addr,
 }
 
 /* ======================================================================== */
+/* USB Mass Storage — Configure Endpoint для пары bulk IN/OUT               */
+/* ======================================================================== */
+
+// В отличие от HID (один endpoint на Configure Endpoint Command), тут сразу
+// добавляем ОБА bulk-endpoint'а одной командой — Input Control Context
+// прекрасно это поддерживает (просто два выставленных Add-бита), и это
+// избавляет от необходимости слать команду дважды.
+static int xhci_configure_msd_endpoints(xhci_slot_t *slot, uint8_t in_ep, uint16_t in_mp,
+                                         uint8_t out_ep, uint16_t out_mp)
+{
+    int in_dci = (int)(in_ep & 0x0Fu) * 2 + 1;  // IN
+    int out_dci = (int)(out_ep & 0x0Fu) * 2;    // OUT
+    if (in_dci < 2 || in_dci > 31 || out_dci < 2 || out_dci > 31 || in_dci == out_dci)
+        return -1;
+
+    if (xhci_ring_init(&slot->msd_bulk_in_ring, 0) != 0) return -1;
+    if (xhci_ring_init(&slot->msd_bulk_out_ring, 0) != 0) return -1;
+
+    int max_dci = (in_dci > out_dci) ? in_dci : out_dci;
+
+    memset(slot->input_ctx_virt, 0, PAGE_SIZE);
+    uint32_t *icc = xhci_ctx_at(slot->input_ctx_virt, 0);
+    icc[1] = ICC_DW1_ADD_FLAG(0) | ICC_DW1_ADD_FLAG((uint32_t)in_dci) | ICC_DW1_ADD_FLAG((uint32_t)out_dci);
+
+    uint32_t *slot_ctx = xhci_ctx_at(slot->input_ctx_virt, 1);
+    xhci_fill_slot_ctx(slot_ctx, slot->speed, slot->port_id, (uint8_t)max_dci);
+
+    uint32_t *in_ctx = xhci_ctx_at(slot->input_ctx_virt, 1 + in_dci);
+    xhci_fill_ep_ctx(in_ctx, EP_TYPE_BULK_IN, in_mp ? in_mp : 512, 0, slot->msd_bulk_in_ring.phys, 1);
+
+    uint32_t *out_ctx = xhci_ctx_at(slot->input_ctx_virt, 1 + out_dci);
+    xhci_fill_ep_ctx(out_ctx, EP_TYPE_BULK_OUT, out_mp ? out_mp : 512, 0, slot->msd_bulk_out_ring.phys, 1);
+
+    xhci_trb_t *cmd = xhci_ring_enqueue(&xhci_cmd_ring, slot->input_ctx_phys, 0,
+        TRB_CONTROL_TYPE_SET(TRB_TYPE_CONFIGURE_ENDPOINT_CMD)
+        | ((uint32_t)slot->slot_id << TRB_CONTROL_SLOT_SHIFT));
+    xhci_ring_doorbell(0, 0);
+
+    uint8_t got_slot;
+    if (xhci_wait_command_completion(cmd, &got_slot, 500) != 0) return -1;
+
+    slot->msd_bulk_in_dci = in_dci;
+    slot->msd_bulk_out_dci = out_dci;
+    return 0;
+}
+
+/* ======================================================================== */
+/* USB Mass Storage — Bulk-Only Transport (CBW/данные/CSW) + SCSI           */
+/* ======================================================================== */
+
+// Одна bulk-передача — одно Normal TRB (IOC=1), синхронное ожидание её
+// Transfer Event. Весь MSD-протокол в этой версии строго
+// последовательный (одна операция целиком, прежде чем начинать
+// следующую) — как и control-передачи энумерации, этого достаточно и не
+// требует параллельного планирования нескольких TRB в очереди.
+static int xhci_bulk_transfer(xhci_slot_t *slot, xhci_ring_t *ring, uint8_t dci,
+                               uint64_t buf_phys, uint32_t len)
+{
+    xhci_trb_t *trb = xhci_ring_enqueue(ring, buf_phys, len,
+        TRB_CONTROL_TYPE_SET(TRB_TYPE_NORMAL) | TRB_CONTROL_IOC);
+    uint64_t trb_phys = xhci_trb_phys(ring, trb);
+
+    printf("[XHCI] MSD DEBUG: enqueued TRB phys=0x%lx, ringing doorbell slot=%u dci=%u\n",
+           trb_phys, slot->slot_id, dci);
+    xhci_ring_doorbell(slot->slot_id, dci);
+
+    uint32_t status; uint8_t got_slot;
+    // DEBUG: таймаут временно уменьшен (100 "тиков" ~= 1 реальная секунда,
+    // см. pit_wait_ms()) для быстрой итерации при диагностике зависания —
+    // вернуть обратно после того, как найдена причина.
+    if (xhci_wait_for_event(TRB_TYPE_TRANSFER_EVENT, trb_phys, &status, &got_slot, 100) != 0) {
+        printf("[XHCI] MSD bulk transfer timed out (slot=%u dci=%u)\n", slot->slot_id, dci);
+        return -1;
+    }
+    printf("[XHCI] MSD DEBUG: got event, status=%08X\n", status);
+    uint8_t cc = (uint8_t)((status >> TRB_COMPLETION_CODE_SHIFT) & 0xFFu);
+    if (cc != TRB_COMPLETION_SUCCESS) {
+        printf("[XHCI] MSD bulk transfer error cc=%u (slot=%u dci=%u)\n", cc, slot->slot_id, dci);
+        return -1;
+    }
+    return 0;
+}
+
+// Полный цикл Bulk-Only Transport: CBW (bulk OUT) -> опциональная стадия
+// данных (bulk IN либо OUT, смотря по direction_in) -> CSW (bulk IN).
+// Переиспользует общий xhci_dma_scratch последовательно для всех трёх
+// стадий (к моменту каждого следующего memcpy предыдущая передача уже
+// полностью завершена и подтверждена контроллером) — отдельный буфер под
+// каждую стадию не нужен, ровно как и в control-передачах энумерации.
+static int xhci_msd_command(xhci_slot_t *slot, const uint8_t *cdb, uint8_t cdb_len,
+                             void *data_buf, uint32_t data_len, int direction_in)
+{
+    if (data_len > PAGE_SIZE) {
+        printf("[XHCI] MSD: data_len %u too large\n", data_len);
+        return -1;
+    }
+
+    uint32_t tag = xhci_msd_next_tag++;
+
+    usb_bot_cbw_t *cbw = (usb_bot_cbw_t *)xhci_dma_scratch_virt;
+    memset(cbw, 0, sizeof(*cbw));
+    cbw->dCBWSignature = USB_BOT_CBW_SIGNATURE;
+    cbw->dCBWTag = tag;
+    cbw->dCBWDataTransferLength = data_len;
+    cbw->bmCBWFlags = direction_in ? USB_BOT_FLAG_DATA_IN : USB_BOT_FLAG_DATA_OUT;
+    cbw->bCBWLUN = 0;
+    cbw->bCBWCBLength = cdb_len;
+    memcpy(cbw->CBWCB, cdb, cdb_len);
+
+    printf("[XHCI] MSD DEBUG: sending CBW (dci=%u tag=%u)\n", slot->msd_bulk_out_dci, tag);
+    if (xhci_bulk_transfer(slot, &slot->msd_bulk_out_ring, (uint8_t)slot->msd_bulk_out_dci,
+                            xhci_dma_scratch_phys, sizeof(*cbw)) != 0)
+        return -1;
+    printf("[XHCI] MSD DEBUG: CBW sent OK\n");
+
+    if (data_len > 0) {
+        if (!direction_in && data_buf) memcpy(xhci_dma_scratch_virt, data_buf, data_len);
+
+        xhci_ring_t *data_ring = direction_in ? &slot->msd_bulk_in_ring : &slot->msd_bulk_out_ring;
+        uint8_t data_dci = direction_in ? (uint8_t)slot->msd_bulk_in_dci : (uint8_t)slot->msd_bulk_out_dci;
+        printf("[XHCI] MSD DEBUG: data stage dci=%u len=%u dir_in=%d\n", data_dci, data_len, direction_in);
+        if (xhci_bulk_transfer(slot, data_ring, data_dci, xhci_dma_scratch_phys, data_len) != 0)
+            return -1;
+        printf("[XHCI] MSD DEBUG: data stage OK\n");
+
+        if (direction_in && data_buf) memcpy(data_buf, xhci_dma_scratch_virt, data_len);
+    }
+
+    printf("[XHCI] MSD DEBUG: reading CSW (dci=%u)\n", slot->msd_bulk_in_dci);
+    usb_bot_csw_t *csw = (usb_bot_csw_t *)xhci_dma_scratch_virt;
+    if (xhci_bulk_transfer(slot, &slot->msd_bulk_in_ring, (uint8_t)slot->msd_bulk_in_dci,
+                            xhci_dma_scratch_phys, sizeof(*csw)) != 0)
+        return -1;
+    printf("[XHCI] MSD DEBUG: CSW received OK\n");
+
+    if (csw->dCSWSignature != USB_BOT_CSW_SIGNATURE || csw->dCSWTag != tag) {
+        printf("[XHCI] MSD: bad CSW signature/tag\n");
+        return -1;
+    }
+    if (csw->bCSWStatus != USB_BOT_STATUS_OK) {
+        printf("[XHCI] MSD: command failed, CSW status=%u\n", csw->bCSWStatus);
+        return -1;
+    }
+    return 0;
+}
+
+static int xhci_msd_test_unit_ready(xhci_slot_t *slot) {
+    uint8_t cdb[6] = {SCSI_CMD_TEST_UNIT_READY, 0, 0, 0, 0, 0};
+    return xhci_msd_command(slot, cdb, sizeof(cdb), NULL, 0, 0);
+}
+
+static int xhci_msd_read_capacity(xhci_slot_t *slot, uint32_t *out_max_lba, uint32_t *out_block_size) {
+    uint8_t cdb[10] = {SCSI_CMD_READ_CAPACITY10, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint8_t resp[8];
+    if (xhci_msd_command(slot, cdb, sizeof(cdb), resp, sizeof(resp), 1) != 0) return -1;
+    *out_max_lba = ((uint32_t)resp[0] << 24) | ((uint32_t)resp[1] << 16)
+                 | ((uint32_t)resp[2] << 8) | resp[3];
+    *out_block_size = ((uint32_t)resp[4] << 24) | ((uint32_t)resp[5] << 16)
+                     | ((uint32_t)resp[6] << 8) | resp[7];
+    return 0;
+}
+
+// Вызывается сразу после конфигурации bulk-endpoint'ов. TEST UNIT READY
+// нарочно не проверяем на ошибку — многие флешки отвечают NOT READY на
+// самую первую команду сразу после Configure Endpoint (обычное дело,
+// не признак поломки), а READ CAPACITY чуть погодя уже проходит нормально.
+static int xhci_msd_init(xhci_slot_t *slot) {
+    xhci_msd_test_unit_ready(slot);
+
+    uint32_t max_lba, block_size;
+    if (xhci_msd_read_capacity(slot, &max_lba, &block_size) != 0) {
+        printf("[XHCI] Port %u: READ CAPACITY failed\n", slot->port_id);
+        return -1;
+    }
+
+    if (xhci_msd_device_count_var >= XHCI_MAX_MSD_DEVICES) {
+        printf("[XHCI] Port %u: too many Mass Storage devices, ignoring\n", slot->port_id);
+        return -1;
+    }
+
+    xhci_msd_device_t *d = &xhci_msd_devices[xhci_msd_device_count_var++];
+    d->in_use = 1;
+    d->slot_id = slot->slot_id;
+    d->max_lba = max_lba;
+    d->block_size = block_size;
+
+    DLOG("[XHCI] Port %u: Mass Storage ready (slot=%u blocks=%u block_size=%u)\n",
+         slot->port_id, slot->slot_id, max_lba + 1, block_size);
+    klog("[XHCI] Port %u: Mass Storage ready (slot=%u)", slot->port_id, slot->slot_id);
+    return 0;
+}
+
+static xhci_slot_t *xhci_msd_slot_for_index(int index) {
+    if (index < 0 || index >= xhci_msd_device_count_var || !xhci_msd_devices[index].in_use)
+        return NULL;
+    return xhci_slot_for_id(xhci_msd_devices[index].slot_id);
+}
+
+/* ======================================================================== */
 /* Энумерация устройства на порту                                          */
 /* ======================================================================== */
 
@@ -910,16 +1178,20 @@ static void xhci_enumerate_device(uint8_t port, uint8_t speed) {
         return;
     }
 
-    // 9. Ищем первый boot-протокольный HID-интерфейс (клавиатура/мышь) и
-    // его interrupt IN endpoint — тот же алгоритм, что был в прежнем
-    // UHCI-драйвере (uhci.c, ныне удалён), без изменений.
-    int found_hid = 0;
-    int in_target_interface = 0;
+    // 9. Ищем первый подходящий интерфейс — либо boot-протокольный HID
+    // (клавиатура/мышь, тот же алгоритм, что был в прежнем UHCI-драйвере),
+    // либо Mass Storage (Bulk-Only Transport). Для одного устройства в
+    // этой версии драйвера они взаимоисключающие.
+    int found_hid = 0, found_msd = 0;
+    int in_hid_interface = 0, in_msd_interface = 0;
     uint8_t hid_interface_num = 0;
     uint8_t hid_protocol = 0;
     uint8_t hid_ep_addr = 0;
     uint16_t hid_max_packet = 0;
     uint8_t hid_interval_raw = 0;
+
+    uint8_t msd_in_ep = 0, msd_out_ep = 0;
+    uint16_t msd_in_max_packet = 0, msd_out_max_packet = 0;
 
     uint16_t off = 0;
     while ((uint16_t)(off + 2) <= total_len) {
@@ -933,31 +1205,45 @@ static void xhci_enumerate_device(uint8_t port, uint8_t speed) {
             const usb_interface_descriptor_t *iface =
                 (const usb_interface_descriptor_t *)&config_buf[off];
 
-            in_target_interface =
-                !found_hid &&
+            in_hid_interface =
+                !found_hid && !found_msd &&
                 iface->bInterfaceClass == USB_CLASS_HID &&
                 iface->bInterfaceSubClass == USB_HID_SUBCLASS_BOOT &&
                 (iface->bInterfaceProtocol == USB_HID_PROTOCOL_KEYBOARD ||
                  iface->bInterfaceProtocol == USB_HID_PROTOCOL_MOUSE);
-
-            if (in_target_interface) {
+            if (in_hid_interface) {
                 hid_interface_num = iface->bInterfaceNumber;
                 hid_protocol = iface->bInterfaceProtocol;
             }
-        } else if (desc_type == USB_DESC_ENDPOINT && in_target_interface && !found_hid &&
+
+            in_msd_interface =
+                !found_hid && !found_msd &&
+                iface->bInterfaceClass == USB_CLASS_MSD &&
+                iface->bInterfaceSubClass == USB_MSD_SUBCLASS_SCSI &&
+                iface->bInterfaceProtocol == USB_MSD_PROTOCOL_BOT;
+        } else if (desc_type == USB_DESC_ENDPOINT &&
                    (uint16_t)(off + sizeof(usb_endpoint_descriptor_t)) <= total_len)
         {
             const usb_endpoint_descriptor_t *ep =
                 (const usb_endpoint_descriptor_t *)&config_buf[off];
 
             int is_in_ep = (ep->bEndpointAddress & 0x80) != 0;
-            int is_interrupt_ep = (ep->bmAttributes & 0x03) == 0x03;
+            int ep_type = ep->bmAttributes & 0x03;
 
-            if (is_in_ep && is_interrupt_ep) {
+            if (in_hid_interface && !found_hid && is_in_ep && ep_type == 0x03) {
                 hid_ep_addr = ep->bEndpointAddress & 0x0F;
                 hid_max_packet = ep->wMaxPacketSize;
                 hid_interval_raw = ep->bInterval;
                 found_hid = 1;
+            } else if (in_msd_interface && !found_msd && ep_type == 0x02) {
+                if (is_in_ep) {
+                    msd_in_ep = ep->bEndpointAddress & 0x0F;
+                    msd_in_max_packet = ep->wMaxPacketSize;
+                } else {
+                    msd_out_ep = ep->bEndpointAddress & 0x0F;
+                    msd_out_max_packet = ep->wMaxPacketSize;
+                }
+                if (msd_in_ep && msd_out_ep) found_msd = 1;
             }
         }
 
@@ -970,55 +1256,69 @@ static void xhci_enumerate_device(uint8_t port, uint8_t speed) {
         return;
     }
 
-    if (!found_hid) {
-        DLOG("[XHCI] Port %u: no boot-protocol HID interface found\n", port);
-        return;
+    if (found_hid) {
+        if (xhci_set_protocol_boot(slot, hid_interface_num) != 0) {
+            printf("[XHCI] Port %u: SET_PROTOCOL(boot) failed\n", port);
+        }
+
+        // 11. Configure Endpoint Command для найденного interrupt IN endpoint'а.
+        if (xhci_configure_hid_endpoint(slot, hid_ep_addr,
+                                         hid_max_packet ? hid_max_packet : 8,
+                                         hid_interval_raw) != 0)
+        {
+            printf("[XHCI] Port %u: Configure Endpoint failed\n", port);
+            return;
+        }
+
+        // 12. Буфер отчёта и первая interrupt IN передача.
+        uint64_t report_phys = pmm_alloc_page();
+        if (!report_phys) { printf("[XHCI] Port %u: out of memory (HID report buffer)\n", port); return; }
+        slot->device_class = XHCI_DEV_CLASS_HID;
+        slot->hid_report_buf_phys = report_phys;
+        slot->hid_report_buf_virt = phys_to_virt(report_phys);
+        memset(slot->hid_report_buf_virt, 0, PAGE_SIZE);
+        slot->hid_report_expected_len = 8;
+        slot->hid_protocol = hid_protocol;
+
+        xhci_ring_enqueue(&slot->hid_ep_ring, report_phys, slot->hid_report_expected_len,
+                           TRB_CONTROL_TYPE_SET(TRB_TYPE_NORMAL) | TRB_CONTROL_IOC);
+        xhci_ring_doorbell(slot_id, (uint8_t)slot->hid_ep_dci);
+
+        if (xhci_hid_device_count < XHCI_MAX_HID_DEVICES) {
+            xhci_hid_device_t *out = &xhci_hid_devices[xhci_hid_device_count++];
+            out->valid = 1;
+            out->address = usb_addr;
+            out->protocol = hid_protocol;
+            out->ep_addr = hid_ep_addr;
+            out->max_packet = hid_max_packet;
+            out->interval = hid_interval_raw;
+            out->low_speed = (speed == XHCI_SPEED_LOW);
+        }
+
+        xhci_ready = 1;
+
+        DLOG("[XHCI] Port %u: HID %s ready (slot=%u ep=%u max_packet=%u interval=%ums)\n",
+             port, hid_protocol == USB_HID_PROTOCOL_KEYBOARD ? "keyboard" : "mouse",
+             slot_id, hid_ep_addr, hid_max_packet, hid_interval_raw);
+        klog("[XHCI] Port %u: HID %s ready (slot=%u)", port,
+             hid_protocol == USB_HID_PROTOCOL_KEYBOARD ? "keyboard" : "mouse", slot_id);
+    } else if (found_msd) {
+        if (xhci_configure_msd_endpoints(slot, msd_in_ep, msd_in_max_packet,
+                                          msd_out_ep, msd_out_max_packet) != 0)
+        {
+            printf("[XHCI] Port %u: Configure Endpoint (MSD) failed\n", port);
+            return;
+        }
+
+        slot->device_class = XHCI_DEV_CLASS_MSD;
+
+        if (xhci_msd_init(slot) != 0) {
+            printf("[XHCI] Port %u: Mass Storage init failed\n", port);
+            return;
+        }
+    } else {
+        DLOG("[XHCI] Port %u: no supported interface (HID/MSD) found\n", port);
     }
-
-    if (xhci_set_protocol_boot(slot, hid_interface_num) != 0) {
-        printf("[XHCI] Port %u: SET_PROTOCOL(boot) failed\n", port);
-    }
-
-    // 11. Configure Endpoint Command для найденного interrupt IN endpoint'а.
-    if (xhci_configure_hid_endpoint(slot, hid_ep_addr,
-                                     hid_max_packet ? hid_max_packet : 8,
-                                     hid_interval_raw) != 0)
-    {
-        printf("[XHCI] Port %u: Configure Endpoint failed\n", port);
-        return;
-    }
-
-    // 12. Буфер отчёта и первая interrupt IN передача.
-    uint64_t report_phys = pmm_alloc_page();
-    if (!report_phys) { printf("[XHCI] Port %u: out of memory (HID report buffer)\n", port); return; }
-    slot->hid_report_buf_phys = report_phys;
-    slot->hid_report_buf_virt = phys_to_virt(report_phys);
-    memset(slot->hid_report_buf_virt, 0, PAGE_SIZE);
-    slot->hid_report_expected_len = 8;
-    slot->hid_protocol = hid_protocol;
-
-    xhci_ring_enqueue(&slot->hid_ep_ring, report_phys, slot->hid_report_expected_len,
-                       TRB_CONTROL_TYPE_SET(TRB_TYPE_NORMAL) | TRB_CONTROL_IOC);
-    xhci_ring_doorbell(slot_id, (uint8_t)slot->hid_ep_dci);
-
-    if (xhci_hid_device_count < XHCI_MAX_HID_DEVICES) {
-        xhci_hid_device_t *out = &xhci_hid_devices[xhci_hid_device_count++];
-        out->valid = 1;
-        out->address = usb_addr;
-        out->protocol = hid_protocol;
-        out->ep_addr = hid_ep_addr;
-        out->max_packet = hid_max_packet;
-        out->interval = hid_interval_raw;
-        out->low_speed = (speed == XHCI_SPEED_LOW);
-    }
-
-    xhci_ready = 1;
-
-    DLOG("[XHCI] Port %u: HID %s ready (slot=%u ep=%u max_packet=%u interval=%ums)\n",
-         port, hid_protocol == USB_HID_PROTOCOL_KEYBOARD ? "keyboard" : "mouse",
-         slot_id, hid_ep_addr, hid_max_packet, hid_interval_raw);
-    klog("[XHCI] Port %u: HID %s ready (slot=%u)", port,
-         hid_protocol == USB_HID_PROTOCOL_KEYBOARD ? "keyboard" : "mouse", slot_id);
 }
 
 /* ======================================================================== */
@@ -1110,34 +1410,66 @@ const xhci_hid_device_t *xhci_get_hid_device(int index) {
     return &xhci_hid_devices[index];
 }
 
+int xhci_msd_device_count(void) {
+    return xhci_msd_device_count_var;
+}
+
+int xhci_msd_get_info(int index, uint32_t *out_max_lba, uint32_t *out_block_size) {
+    if (index < 0 || index >= xhci_msd_device_count_var || !xhci_msd_devices[index].in_use)
+        return -1;
+    if (out_max_lba) *out_max_lba = xhci_msd_devices[index].max_lba;
+    if (out_block_size) *out_block_size = xhci_msd_devices[index].block_size;
+    return 0;
+}
+
+int xhci_msd_read_block(int index, uint32_t lba, void *buf, uint32_t block_size) {
+    xhci_slot_t *slot = xhci_msd_slot_for_index(index);
+    if (!slot || block_size == 0 || block_size > PAGE_SIZE) return -1;
+
+    uint8_t cdb[10];
+    memset(cdb, 0, sizeof(cdb));
+    cdb[0] = SCSI_CMD_READ10;
+    cdb[2] = (uint8_t)(lba >> 24);
+    cdb[3] = (uint8_t)(lba >> 16);
+    cdb[4] = (uint8_t)(lba >> 8);
+    cdb[5] = (uint8_t)lba;
+    cdb[8] = 1; // transfer length = 1 блок
+
+    return xhci_msd_command(slot, cdb, sizeof(cdb), buf, block_size, 1);
+}
+
+int xhci_msd_write_block(int index, uint32_t lba, const void *buf, uint32_t block_size) {
+    xhci_slot_t *slot = xhci_msd_slot_for_index(index);
+    if (!slot || block_size == 0 || block_size > PAGE_SIZE) return -1;
+
+    uint8_t cdb[10];
+    memset(cdb, 0, sizeof(cdb));
+    cdb[0] = SCSI_CMD_WRITE10;
+    cdb[2] = (uint8_t)(lba >> 24);
+    cdb[3] = (uint8_t)(lba >> 16);
+    cdb[4] = (uint8_t)(lba >> 8);
+    cdb[5] = (uint8_t)lba;
+    cdb[8] = 1;
+
+    return xhci_msd_command(slot, cdb, sizeof(cdb), (void *)buf, block_size, 0);
+}
+
 #define XHCI_POLL_MAX_EVENTS_PER_TICK 8
 
 void usb_poll(void) {
     if (!xhci_ready) return;
 
+    // want_ptr=0 (любой Transfer Event) означает, что xhci_wait_for_event()
+    // возвращает управление на КАЖДОМ событии, не заходя в свою ветку
+    // "чужое — обслужить и продолжать драться дальше" (та ветка нужна
+    // только когда кто-то ждёт конкретное ДРУГОЕ событие, например MSD
+    // control-передача) — поэтому обслуживание тут делает сам usb_poll(),
+    // тем же общим хелпером xhci_service_hid_event().
     for (int i = 0; i < XHCI_POLL_MAX_EVENTS_PER_TICK; i++) {
         uint32_t status; uint8_t slot_id;
         if (xhci_wait_for_event(TRB_TYPE_TRANSFER_EVENT, 0, &status, &slot_id, 0) != 0)
             break; // сейчас ничего не готово
 
-        xhci_slot_t *slot = xhci_slot_for_id(slot_id);
-        if (!slot || !slot->hid_ep_dci) continue; // чужое/несвязанное событие, уже потреблено
-
-        uint8_t cc = (uint8_t)((status >> TRB_COMPLETION_CODE_SHIFT) & 0xFFu);
-        if (cc == TRB_COMPLETION_SUCCESS) {
-            if (slot->hid_protocol == USB_HID_PROTOCOL_KEYBOARD) {
-                usb_hid_keyboard_report((const uint8_t *)slot->hid_report_buf_virt);
-            } else {
-                usb_hid_mouse_report((const uint8_t *)slot->hid_report_buf_virt,
-                                      slot->hid_report_expected_len);
-            }
-        }
-
-        // Перевооружаем конвейер независимо от успеха/ошибки — та же
-        // философия, что и у прежнего uhci_poll_periodic().
-        xhci_ring_enqueue(&slot->hid_ep_ring, slot->hid_report_buf_phys,
-                           slot->hid_report_expected_len,
-                           TRB_CONTROL_TYPE_SET(TRB_TYPE_NORMAL) | TRB_CONTROL_IOC);
-        xhci_ring_doorbell(slot->slot_id, (uint8_t)slot->hid_ep_dci);
+        xhci_service_hid_event(slot_id, status); // не-HID (например, MSD) событие тихо игнорируется внутри
     }
 }

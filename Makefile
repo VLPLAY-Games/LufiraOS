@@ -109,6 +109,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/shell/commands/filesystem.c \
 	$(KERNEL_DIR)/shell/commands/sound.c \
 	$(KERNEL_DIR)/shell/commands/users.c \
+	$(KERNEL_DIR)/shell/commands/usb.c \
     $(KERNEL_DIR)/system/cpu/gdt.c \
     $(KERNEL_DIR)/system/cpu/idt.c \
     $(KERNEL_DIR)/system/cpu/irq.c \
@@ -248,7 +249,13 @@ run: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs
 		-device usb-mouse \
 		-serial stdio
 
-debug: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs
+# Пустой образ виртуальной USB-флешки для тестирования Mass Storage
+# (kernel/drivers/usb/xhci.c) — обычный сырой блочный файл без файловой
+# системы, драйвер работает только на уровне блоков (см. план).
+$(BUILD_DIR)/usbstick.img:
+	dd if=/dev/zero of=$@ bs=1024 count=8192 status=none
+
+debug: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs $(BUILD_DIR)/usbstick.img
 	echo "1" > $(BUILD_DIR)/devmode.flag
 	$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(BUILD_DIR)/devmode.flag /system/devmode.flag
 	rm -f $(BUILD_DIR)/devmode.flag
@@ -256,15 +263,19 @@ debug: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs
 		-bios /usr/share/ovmf/OVMF.fd \
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
 		-m 256M -net none -serial stdio -no-reboot -no-shutdown \
-		-device qemu-xhci -device usb-kbd -device usb-mouse \
+		-device qemu-xhci,id=xhci -device usb-kbd -device usb-mouse \
+		-drive if=none,id=usbstick,file=$(BUILD_DIR)/usbstick.img,format=raw \
+		-device usb-storage,bus=xhci.0,drive=usbstick \
 		-d cpu_reset,guest_errors -D $(BUILD_DIR)/qemu_debug.log
 
-monitor: $(BUILD_DIR)/disk.img
+monitor: $(BUILD_DIR)/disk.img $(BUILD_DIR)/usbstick.img
 	qemu-system-x86_64 \
 		-bios /usr/share/ovmf/OVMF.fd \
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
 		-m 256M -net none -serial stdio \
-		-device qemu-xhci -device usb-kbd -device usb-mouse \
+		-device qemu-xhci,id=xhci -device usb-kbd -device usb-mouse \
+		-drive if=none,id=usbstick,file=$(BUILD_DIR)/usbstick.img,format=raw \
+		-device usb-storage,bus=xhci.0,drive=usbstick \
 		-monitor telnet:127.0.0.1:4444,server,nowait \
 		-no-reboot -no-shutdown
 

@@ -59,3 +59,8 @@ void command_chown(const char* args);
 void command_useradd(const char* args);
 void command_groupadd(const char* args);
 void command_su(const char* args);
+
+// USB Mass Storage
+void command_usbinfo(void);
+void command_usbread(const char* args);
+void command_usbwrite(const char* args);

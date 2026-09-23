@@ -48,3 +48,12 @@ void usb_poll(void);
 // Возвращает index-е найденное (в порядке обнаружения) HID-устройство,
 // либо NULL, если такого нет.
 const xhci_hid_device_t *xhci_get_hid_device(int index);
+
+// USB Mass Storage (Bulk-Only Transport + SCSI READ10/WRITE10) — только
+// блочное чтение/запись, без монтирования файловой системы (см. план:
+// VFS сегодня не поддерживает второй ФС вообще). block_size — настоящий
+// размер блока устройства (обычно 512), см. xhci_msd_get_info().
+int xhci_msd_device_count(void);
+int xhci_msd_get_info(int index, uint32_t *out_max_lba, uint32_t *out_block_size);
+int xhci_msd_read_block(int index, uint32_t lba, void *buf, uint32_t block_size);
+int xhci_msd_write_block(int index, uint32_t lba, const void *buf, uint32_t block_size);
