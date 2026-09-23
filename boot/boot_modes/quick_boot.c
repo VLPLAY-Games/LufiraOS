@@ -68,7 +68,7 @@ VOID QuickBoot(BootInfo *bi, EFI_HANDLE ImageHandle, BOOLEAN keepLogo, BOOLEAN a
     BOOLEAN fatError = FALSE;
     
     if (BlockIo && BlockIo->Media) {
-        LoadFATImage(BlockIo, bi, FALSE);
+        LoadFATImage(BlockIo, bi, FALSE, animateSpinner, &spinIdx, statusRow, spinnerRow, cols);
         if (bi->FATImageBase == 0) {
             fatError = TRUE;
             if (bi->FATImageSize == 0) {

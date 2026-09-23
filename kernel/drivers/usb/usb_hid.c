@@ -1,6 +1,7 @@
 #include "usb_hid.h"
 #include "drivers/input/input.h"
 #include "drivers/keyboard/keyboard.h"
+#include "system/timer/pit.h"
 
 // Usage ID стрелок в таблице "Keyboard/Keypad" HID (стандартные для любой
 // boot-протокольной клавиатуры).
@@ -52,16 +53,29 @@ static const int hid_keycode_ascii_shift[0x39] = {
     [0x38] = '?',
 };
 
-// Usage-коды из ПРЕДЫДУЩЕГО отчёта — нужны только для того, чтобы отличить
-// "клавиша только что нажата" от "клавиша всё ещё удерживается" (иначе при
-// удержании событие сыпалось бы на каждый опрос, ~каждые 10мс).
-static uint8_t last_keys[6];
+#define HID_REPEAT_INITIAL_DELAY_TICKS 50  // ~500мс до начала автоповтора
+#define HID_REPEAT_RATE_TICKS           5  // ~50мс между повторами после начала
 
-static int hid_usage_was_pressed(uint8_t usage) {
+// До 6 одновременно отслеживаемых клавиш — ровно как в самом boot-отчёте.
+// Раньше здесь был просто last_keys[6], и usage, уже бывший в ПРЕДЫДУЩЕМ
+// отчёте, молча пропускался НАВСЕГДА, пока не отпущен — из-за этого
+// удержание клавиши печатало символ ровно один раз и не повторялось (в
+// отличие от PS/2, где аппаратный typematic сам шлёт повторные make-коды).
+// Теперь вместо блокировки — настоящий программный typematic: начальная
+// задержка, затем повтор с фиксированным интервалом, пока usage остаётся в
+// отчёте.
+typedef struct {
+    uint8_t  usage;   // 0 = слот свободен
+    uint64_t next_repeat_tick;
+} hid_repeat_slot_t;
+
+static hid_repeat_slot_t repeat_slots[6];
+
+static int hid_find_slot(uint8_t usage) {
     for (int i = 0; i < 6; i++) {
-        if (last_keys[i] == usage) return 1;
+        if (repeat_slots[i].usage == usage) return i;
     }
-    return 0;
+    return -1;
 }
 
 // Ctrl проверяется ОТДЕЛЬНО от обычного ASCII-декода (а не как в
@@ -99,18 +113,49 @@ void usb_hid_keyboard_report(const uint8_t report[8]) {
     // boot-отчёт содержит ТЕКУЩЕЕ состояние модификаторов, а не события).
     keyboard_set_ctrl_state(ctrl);
 
+    uint64_t now = pit_get_ticks();
+
     for (int i = 0; i < 6; i++) {
         uint8_t usage = keys[i];
         if (usage <= 1) continue; // 0 = нет клавиши, 1 = rollover error
-        if (hid_usage_was_pressed(usage)) continue; // уже было нажато, не новое событие
 
-        int key = hid_decode_usage(usage, shift, ctrl);
-        if (key != 0) {
-            input_keyboard_event(key);
+        int slot = hid_find_slot(usage);
+        int fire = 0;
+
+        if (slot < 0) {
+            // Новое нажатие — ищем свободный слот под отслеживание удержания
+            // (если все 6 заняты — клавиша просто не будет повторяться,
+            // что не хуже прежнего поведения).
+            fire = 1;
+            for (int j = 0; j < 6; j++) {
+                if (repeat_slots[j].usage == 0) { slot = j; break; }
+            }
+            if (slot >= 0) {
+                repeat_slots[slot].usage = usage;
+                repeat_slots[slot].next_repeat_tick = now + HID_REPEAT_INITIAL_DELAY_TICKS;
+            }
+        } else if (now >= repeat_slots[slot].next_repeat_tick) {
+            fire = 1;
+            repeat_slots[slot].next_repeat_tick = now + HID_REPEAT_RATE_TICKS;
+        }
+
+        if (fire) {
+            int key = hid_decode_usage(usage, shift, ctrl);
+            if (key != 0) {
+                input_keyboard_event(key);
+            }
         }
     }
 
-    for (int i = 0; i < 6; i++) last_keys[i] = keys[i];
+    // Освобождаем слоты клавиш, которых больше нет в текущем отчёте (отпущены).
+    for (int j = 0; j < 6; j++) {
+        if (repeat_slots[j].usage == 0) continue;
+        int still_pressed = 0;
+        for (int i = 0; i < 6; i++) {
+            if (keys[i] == repeat_slots[j].usage) { still_pressed = 1; break; }
+        }
+        if (!still_pressed) repeat_slots[j].usage = 0;
+    }
 }
 
 void usb_hid_mouse_report(const uint8_t *report, int len) {

@@ -88,13 +88,22 @@ static void draw_shell_watermark(void) {
 }
 
 static void shell_task(void) {
-    draw_shell_watermark();
-    printf("\n\n\n");
-    set_foreground_color(LOG_COLOR_HEADER);
-    printf("================================================\n");
-    printf(" Type 'help' for available commands\n");
-    printf("================================================\n\n");
-    set_foreground_color(LOG_COLOR_INFO);
+    // shell_is_respawn=1 значит: это не первая загрузка, а пересоздание
+    // после того, как exec подменил собой предыдущий процесс "shell", и та
+    // программа затем завершилась (см. respawn_shell_if_needed() в
+    // process.c). В этом случае вступительный баннер не печатаем — иначе
+    // это слишком явно выглядело бы как перезагрузка системы.
+    if (shell_is_respawn) {
+        shell_is_respawn = 0;
+    } else {
+        draw_shell_watermark();
+        printf("\n\n\n");
+        set_foreground_color(LOG_COLOR_HEADER);
+        printf("================================================\n");
+        printf(" Type 'help' for available commands\n");
+        printf("================================================\n\n");
+        set_foreground_color(LOG_COLOR_INFO);
+    }
 
     show_prompt();
     draw_cursor();

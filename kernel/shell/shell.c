@@ -21,6 +21,9 @@ static int history_current = 0;
 // см. shell_handle_enter()/shell_run_pending_command().
 static volatile int shell_command_pending = 0;
 
+// см. подробный комментарий у объявления в shell.h.
+volatile int shell_ctrl_c_pending = 0;
+
 void add_to_history(const char* command) {
     if (command[0] == '\0') return;
     if (history_count > 0 && strcmp(command_history[history_count - 1], command) == 0) return;

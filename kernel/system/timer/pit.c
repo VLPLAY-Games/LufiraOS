@@ -4,6 +4,7 @@
 #include "drivers/usb/xhci.h"
 #include "net/net.h"
 #include "system/devmode/devmode.h"
+#include "shell/shell.h"
 
 // Порты I/O
 static inline void outb(uint16_t port, uint8_t val) {
@@ -94,6 +95,18 @@ void timer_irq_handler(interrupt_frame_t *frame) {
 
     usb_poll();
     net_poll();
+
+    // Только ЗДЕСЬ, после того как usb_poll()/net_poll() уже полностью
+    // отработали — см. подробный комментарий у shell_ctrl_c_pending в
+    // shell.h: shell_handle_ctrl_c() может увести управление насовсем через
+    // реальное переключение контекста (если убиваемый foreground-процесс —
+    // это current_process, обычный случай), и звать её раньше, прямо
+    // изнутри разбора USB HID-отчёта, означало бы бросить недовооружённым
+    // endpoint клавиатуры навсегда.
+    if (shell_ctrl_c_pending) {
+        shell_ctrl_c_pending = 0;
+        shell_handle_ctrl_c();
+    }
 
     // idle_process никогда не заходит сюда: он всегда исполняется в ring0
     // (свой hlt-цикл, никогда не переходит в ring3), так что cs==0x33 уже

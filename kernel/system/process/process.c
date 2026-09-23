@@ -18,6 +18,7 @@
 process_t *process_list = NULL;
 process_t *current_process = NULL;
 volatile uint32_t foreground_pid = 0;
+volatile int shell_is_respawn = 0;
 static void (*shell_entry_fn)(void) = NULL;
 
 void process_set_shell_entry(void (*entry)(void)) {
@@ -34,8 +35,10 @@ static void respawn_shell_if_needed(process_t *dying) {
         return;
 
     process_t *respawned = process_create("shell", shell_entry_fn);
-    if (respawned)
+    if (respawned) {
         respawned->is_shell = 1;
+        shell_is_respawn = 1;
+    }
 }
 uint64_t current_kernel_rsp = 0; // Глобальная переменная для asm
 static uint32_t next_pid = 1;

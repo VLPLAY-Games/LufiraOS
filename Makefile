@@ -39,6 +39,10 @@ DISK_TOTAL_SIZE := 16777216
 LUFIRAFS_ESP_SIZE := 4194304
 LUFIRAFS_REGION_SIZE := $(shell echo $$(($(DISK_TOTAL_SIZE) - $(LUFIRAFS_ESP_SIZE))))
 
+# Все тестовые ELF-бинарники (test/*.elf, test/c/*.elf) — грузятся в /tests
+# на образе ТОЛЬКО в debug-сборке (см. цель debug), обычный run их не видит.
+TEST_ELF_FILES := $(shell find test -name '*.elf' 2>/dev/null)
+
 REQUIRED_TOOLS := gcc ld objcopy nm truncate dd mkfs.fat mmd mcopy qemu-system-x86_64
 $(foreach tool,$(REQUIRED_TOOLS),\
     $(if $(shell which $(tool) 2>/dev/null),,\
@@ -242,9 +246,6 @@ check-disk: $(BUILD_DIR)/disk.img
 	@printf "\n"
 
 run: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs
-	$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) test/hello.elf /hello.elf
-	$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) test/fork_test.elf /fork.elf
-	$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) test/pipe_test.elf /pipe.elf
 	@printf "\n$(BOLD)$(BMAGENTA)═══ Starting QEMU ═══$(RESET)\n\n"
 	qemu-system-x86_64 \
 		-bios /usr/share/ovmf/OVMF.fd \
@@ -269,6 +270,9 @@ debug: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs $(BUILD_DIR)/usbstick.im
 	echo "1" > $(BUILD_DIR)/devmode.flag
 	$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(BUILD_DIR)/devmode.flag /system/devmode.flag
 	rm -f $(BUILD_DIR)/devmode.flag
+	@printf "  $(BBLUE)▸$(RESET) Staging test binaries into /tests...\n"
+	$(BUILD_DIR)/mkfs_lufirafs mkdir $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /tests
+	$(foreach f,$(TEST_ELF_FILES),$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(f) /tests/$(notdir $(f));)
 	qemu-system-x86_64 \
 		-bios /usr/share/ovmf/OVMF.fd \
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \

@@ -43,7 +43,7 @@ VOID SafeBoot(BootInfo *bi, EFI_HANDLE ImageHandle) {
     GetBlockIO(LoadedImage, &BlockIo);
     
     if (BlockIo && BlockIo->Media) {
-        LoadFATImage(BlockIo, bi, FALSE);
+        LoadFATImage(BlockIo, bi, FALSE, FALSE, NULL, 0, 0, 0);
     } else {
         bi->FATImageBase = 0;
         bi->FATImageSize = 0;

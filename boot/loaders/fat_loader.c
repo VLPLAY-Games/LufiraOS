@@ -1,7 +1,10 @@
 #include "fat_loader.h"
 #include "ui/utils.h"
 
-VOID LoadFATImage(EFI_BLOCK_IO_PROTOCOL *BlockIo, BootInfo *bi, BOOLEAN showProgress) {
+VOID LoadFATImage(EFI_BLOCK_IO_PROTOCOL *BlockIo, BootInfo *bi, BOOLEAN showProgress,
+                   BOOLEAN animateSpinner, UINTN *spinIdx, UINTN statusRow, UINTN spinnerRow, UINTN cols) {
+    CHAR16 spin[] = L"|/-\\";
+
     if (!BlockIo || !BlockIo->Media) {
         bi->FATImageBase = 0;
         bi->FATImageSize = 0;
@@ -33,6 +36,16 @@ VOID LoadFATImage(EFI_BLOCK_IO_PROTOCOL *BlockIo, BootInfo *bi, BOOLEAN showProg
             if (EFI_ERROR(status)) break;
             if (showProgress) {
                 Print(L".");
+            }
+            if (animateSpinner) {
+                *spinIdx = (*spinIdx + 1) % 4;
+                uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, statusRow);
+                SetColor(COLOR_BLACK, COLOR_BLACK);
+                for (UINTN _i = 0; _i < cols; _i++) Print(L" ");
+                PrintCentered(L"Loading FAT image...", statusRow, COLOR_NEON_CYAN);
+                uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, cols / 2, spinnerRow);
+                SetColor(COLOR_NEON_CYAN, COLOR_BLACK);
+                Print(L"%c", spin[*spinIdx]);
             }
             uefi_call_wrapper(gBS->Stall, 1, 5000);
         }
