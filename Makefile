@@ -55,6 +55,8 @@ $(shell mkdir -p $(BUILD_DIR) \
     $(BUILD_DIR)/kernel/drivers/disk \
 	$(BUILD_DIR)/kernel/drivers/usb \
 	$(BUILD_DIR)/kernel/drivers/input \
+	$(BUILD_DIR)/kernel/drivers/net \
+	$(BUILD_DIR)/kernel/net \
     $(BUILD_DIR)/kernel/shell \
 	$(BUILD_DIR)/kernel/shell/commands \
     $(BUILD_DIR)/kernel/system/cpu \
@@ -103,6 +105,13 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/drivers/usb/xhci.c \
 	$(KERNEL_DIR)/drivers/usb/usb_hid.c \
 	$(KERNEL_DIR)/drivers/input/input.c \
+	$(KERNEL_DIR)/drivers/net/rtl8139.c \
+	$(KERNEL_DIR)/net/net.c \
+	$(KERNEL_DIR)/net/eth.c \
+	$(KERNEL_DIR)/net/arp.c \
+	$(KERNEL_DIR)/net/ip.c \
+	$(KERNEL_DIR)/net/icmp.c \
+	$(KERNEL_DIR)/net/tcp.c \
     $(KERNEL_DIR)/shell/shell.c \
     $(KERNEL_DIR)/shell/commands/system.c \
     $(KERNEL_DIR)/shell/commands/colors.c \
@@ -110,6 +119,7 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/shell/commands/sound.c \
 	$(KERNEL_DIR)/shell/commands/users.c \
 	$(KERNEL_DIR)/shell/commands/usb.c \
+	$(KERNEL_DIR)/shell/commands/net.c \
     $(KERNEL_DIR)/system/cpu/gdt.c \
     $(KERNEL_DIR)/system/cpu/idt.c \
     $(KERNEL_DIR)/system/cpu/irq.c \
@@ -240,7 +250,7 @@ run: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs
 		-bios /usr/share/ovmf/OVMF.fd \
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
 		-m 128M \
-		-net none \
+		-netdev user,id=net0 -device rtl8139,netdev=net0 \
 		-machine pcspk-audiodev=audio \
 		-audiodev driver=alsa,id=audio \
 		-device AC97,audiodev=audio \
@@ -262,7 +272,7 @@ debug: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs $(BUILD_DIR)/usbstick.im
 	qemu-system-x86_64 \
 		-bios /usr/share/ovmf/OVMF.fd \
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
-		-m 256M -net none -serial stdio -no-reboot -no-shutdown \
+		-m 256M -netdev user,id=net0 -device rtl8139,netdev=net0 -serial stdio -no-reboot -no-shutdown \
 		-device qemu-xhci,id=xhci -device usb-kbd -device usb-mouse \
 		-drive if=none,id=usbstick,file=$(BUILD_DIR)/usbstick.img,format=raw \
 		-device usb-storage,bus=xhci.0,drive=usbstick \
@@ -272,7 +282,7 @@ monitor: $(BUILD_DIR)/disk.img $(BUILD_DIR)/usbstick.img
 	qemu-system-x86_64 \
 		-bios /usr/share/ovmf/OVMF.fd \
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
-		-m 256M -net none -serial stdio \
+		-m 256M -netdev user,id=net0 -device rtl8139,netdev=net0 -serial stdio \
 		-device qemu-xhci,id=xhci -device usb-kbd -device usb-mouse \
 		-drive if=none,id=usbstick,file=$(BUILD_DIR)/usbstick.img,format=raw \
 		-device usb-storage,bus=xhci.0,drive=usbstick \

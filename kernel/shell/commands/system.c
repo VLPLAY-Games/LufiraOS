@@ -65,6 +65,10 @@ void command_help(void) {
     printf(" usbinfo - List detected USB storage devices\n");
     printf(" usbread <device> <lba> - Read one block, show hex dump\n");
     printf(" usbwrite <device> <lba> <text> - Write text into one block\n");
+    printf("\nNetwork:\n");
+    printf(" ifconfig [ip] [netmask] [gateway] - Show/set network configuration\n");
+    printf(" ping <ip> [count] - Send ICMP echo requests\n");
+    printf(" wget <ip> <path> [file] - Download a file over HTTP (IP only, no DNS)\n");
 }
 
 // devmode [on|off] — без аргументов показывает текущее состояние.

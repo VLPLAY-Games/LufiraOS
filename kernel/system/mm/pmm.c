@@ -253,6 +253,40 @@ uint64_t pmm_alloc_page(void) {
     return 0;
 }
 
+// Линейный поиск count подряд идущих свободных бит начиная с самого начала
+// битмапа (а не next_free_page, как в pmm_alloc_page()) — эта функция
+// вызывается редко (один раз при инициализации устройства), а не на горячем
+// пути, так что простота поиска важнее его скорости. При успехе выставляет
+// все count бит одним проходом; при неудаче не трогает битмап вообще.
+uint64_t pmm_alloc_contiguous_pages(uint32_t count) {
+    if (count == 0) return 0;
+
+    uint64_t flags = pmm_lock();
+
+    uint64_t run_start = 0;
+    uint64_t run_len = 0;
+
+    for (uint64_t i = 0; i < total_pages; i++) {
+        if (!bitmap_test(i)) {
+            if (run_len == 0) run_start = i;
+            run_len++;
+            if (run_len == count) {
+                for (uint64_t p = run_start; p < run_start + count; p++) {
+                    bitmap_set(p);
+                }
+                used_pages += count;
+                pmm_unlock(flags);
+                return run_start * PAGE_SIZE;
+            }
+        } else {
+            run_len = 0;
+        }
+    }
+
+    pmm_unlock(flags);
+    return 0;
+}
+
 void pmm_free_page(uint64_t phys) {
     uint64_t page = phys / PAGE_SIZE;
     if (page >= total_pages) return;

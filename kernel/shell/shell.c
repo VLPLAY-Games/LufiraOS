@@ -18,6 +18,9 @@ static int history_count = 0;
 static int history_index = -1;
 static int history_current = 0;
 
+// см. shell_handle_enter()/shell_run_pending_command().
+static volatile int shell_command_pending = 0;
+
 void add_to_history(const char* command) {
     if (command[0] == '\0') return;
     if (history_count > 0 && strcmp(command_history[history_count - 1], command) == 0) return;
@@ -73,17 +76,39 @@ void shell_handle_backspace(void) {
     current_line[current_line_length] = '\0';
     shell_refresh_input_line();
 }
+// Enter приходит сюда СИНХРОННО изнутри прерывания — либо напрямую с PS/2
+// IRQ1, либо (для USB HID) из timer_irq_handler() (см. input.c) — оба пути
+// ISR, где IF=0 (cli на входе). Раньше отсюда сразу звался execute_command(),
+// и любая команда, которая внутри блокирующе ждёт тиков PIT
+// (pit_wait_ms() — например, новые сетевые ping/wget, ARP/TCP-таймауты),
+// намертво зависала: таймерное прерывание, от которого зависит pit_ticks,
+// не может сработать, пока сам обработчик прерывания (в котором мы уже
+// находимся) не вернётся. Подозреваем, что это же и есть настоящая причина
+// куда более раннего, так и не найденного зависания usbread/usbwrite (см.
+// план) — тот же класс бага, просто не опознанный тогда. Поэтому теперь
+// здесь только сохраняем ввод и взводим флаг — сама команда выполняется
+// из shell_task() (kernel.c) сразу после hlt, ДО следующего cli, то есть
+// уже с настоящими работающими прерываниями, не изнутри ISR.
 void shell_handle_enter(void) {
     for (uint32_t i = 0; i < current_line_length; i++) input_buffer[i] = current_line[i];
     input_buffer[current_line_length] = '\0';
     input_buffer_index = current_line_length;
     if (current_line_length > 0) add_to_history(input_buffer);
-    
+
+    put_char('\n');
+    shell_command_pending = 1;
+}
+
+// Вызывается из shell_task() (kernel.c) вне контекста прерывания — см.
+// комментарий у shell_handle_enter().
+void shell_run_pending_command(void) {
+    if (!shell_command_pending) return;
+    shell_command_pending = 0;
+
     char cmd_lower[INPUT_BUFFER_SIZE];
     for (uint32_t i = 0; i < input_buffer_index; i++) cmd_lower[i] = to_lower(input_buffer[i]);
     cmd_lower[input_buffer_index] = '\0';
-    
-    put_char('\n');
+
     execute_command();
 
     if (strcmp(cmd_lower, "clear") != 0) {
@@ -269,6 +294,16 @@ void execute_command(void) {
         // "usbwrite " = 9 символов включая пробел.
         if (input_buffer_index <= 9) printf("\nUsage: usbwrite <device> <lba> <text>\n");
         else command_usbwrite(input_buffer + 9);
+    } else if (strcmp(cmd_lower, "ifconfig") == 0) {
+        command_ifconfig(args);
+    } else if (strcmp(cmd_lower, "ping") == 0) {
+        if (*args == '\0') printf("\nUsage: ping <ip> [count]\n");
+        else command_ping(args);
+    } else if (strcmp(cmd_lower, "wget") == 0) {
+        // Сырой input_buffer — путь и имя файла регистрозависимы.
+        // "wget " = 5 символов включая пробел.
+        if (input_buffer_index <= 5) printf("\nUsage: wget <ip> <path> [output-filename]\n");
+        else command_wget(input_buffer + 5);
     } else {
         printf("\nUnknown command: %s\n", input_buffer);
         printf("Type 'help' for available commands.\n");
@@ -343,6 +378,7 @@ void shell_handle_tab(void) {
         "kill", "wait", "ps", "df", "du", "devmode",
         "whoami", "chmod", "chown", "useradd", "groupadd", "su",
         "usbinfo", "usbread", "usbwrite",
+        "ifconfig", "ping", "wget",
         NULL
     };
     

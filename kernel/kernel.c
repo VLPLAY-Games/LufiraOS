@@ -11,6 +11,7 @@
 #include "drivers/console/console.h"
 #include "drivers/sound/ac97.h"
 #include "drivers/usb/xhci.h"
+#include "net/net.h"
 #include "shell/shell.h"
 #include "system/cpu/gdt.h"
 #include "system/cpu/idt.h"
@@ -101,6 +102,15 @@ static void shell_task(void) {
     while (1) {
         asm volatile("sti");
         asm volatile("hlt");
+        // Выполняем команду, взведённую shell_handle_enter() (если Enter
+        // был нажат за это ожидание), ПОКА прерывания ещё разрешены — см.
+        // подробный комментарий у shell_handle_enter()/
+        // shell_run_pending_command() в shell.c: команда может блокирующе
+        // ждать тиков PIT (pit_wait_ms() — сетевые ping/wget и т.п.), а это
+        // требует, чтобы таймерное прерывание могло сработать, что
+        // невозможно, если исполнять её прямо изнутри обработчика
+        // прерывания (как было раньше).
+        shell_run_pending_command();
         asm volatile("cli");     // Запретить прерывания перед schedule
         schedule();              // Передать управление другим процессам
     }
@@ -226,6 +236,10 @@ void _start(BootInfo* bi) {
     // Требует, чтобы прерывания таймера уже тикали (pit_wait_ms() внутри
     // сброса UHCI-контроллера), поэтому вызывается только после sti/irq_enable.
     xhci_init();
+
+    // net_init() (RTL8139 + статическая настройка IP) — по той же причине,
+    // что и xhci_init(), требует уже тикающих таймерных прерываний.
+    net_init();
 
     if (devmode_is_enabled()) {
         printf("\n");

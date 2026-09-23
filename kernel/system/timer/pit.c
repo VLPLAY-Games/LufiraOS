@@ -2,6 +2,7 @@
 #include "drivers/console/console.h"
 #include "system/process/process.h"
 #include "drivers/usb/xhci.h"
+#include "net/net.h"
 #include "system/devmode/devmode.h"
 
 // Порты I/O
@@ -92,6 +93,7 @@ void timer_irq_handler(interrupt_frame_t *frame) {
     update_cursor();
 
     usb_poll();
+    net_poll();
 
     // idle_process никогда не заходит сюда: он всегда исполняется в ring0
     // (свой hlt-цикл, никогда не переходит в ring3), так что cs==0x33 уже

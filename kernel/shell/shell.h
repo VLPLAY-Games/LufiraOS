@@ -13,6 +13,7 @@ void execute_command(void);
 void shell_handle_char(char c);
 void shell_handle_backspace(void);
 void shell_handle_enter(void);
+void shell_run_pending_command(void);
 void shell_handle_left_arrow(void);
 void shell_handle_right_arrow(void);
 void shell_handle_up_arrow(void);

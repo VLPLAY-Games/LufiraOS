@@ -64,3 +64,8 @@ void command_su(const char* args);
 void command_usbinfo(void);
 void command_usbread(const char* args);
 void command_usbwrite(const char* args);
+
+// Сеть
+void command_ifconfig(const char* args);
+void command_ping(const char* args);
+void command_wget(const char* args);
