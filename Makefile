@@ -228,7 +228,6 @@ $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin $(BUILD_
 	@printf "  $(BBLUE)▸$(RESET) Formatting LufiraFS region...\n"
 	$(BUILD_DIR)/mkfs_lufirafs format $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE)
 	@printf "  $(BBLUE)▸$(RESET) Populating initial files...\n"
-	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /test
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /system
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /logs
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /etc
