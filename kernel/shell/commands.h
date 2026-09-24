@@ -73,6 +73,8 @@ void command_su(const char* args);
 void command_usbinfo(void);
 void command_usbread(const char* args);
 void command_usbwrite(const char* args);
+void command_mount(const char* args);
+void command_unmount(void);
 
 // Сеть
 void command_ifconfig(const char* args);

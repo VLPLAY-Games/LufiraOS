@@ -244,6 +244,24 @@ static xhci_trb_t *xhci_ring_enqueue(xhci_ring_t *ring, uint64_t parameter,
     ring->enqueue_index++;
     if (ring->enqueue_index >= XHCI_RING_USABLE_TRBS) {
         ring->enqueue_index = 0;
+        // Постоянный Link TRB был инициализирован с Cycle=1 один раз в
+        // xhci_ring_init() и с тех пор никогда не обновлялся — на первом
+        // обороте кольца это ещё случайно совпадало с ring->cycle_state
+        // (тоже 1), но начиная со ВТОРОГО оборота (cycle_state уже 0)
+        // контроллер видел на месте Link TRB "старый" Cycle-бит,
+        // расценивал его как непроизведённый (T=1 не помогает — Toggle
+        // Cycle указывает, что делать ПОСЛЕ перехода по Link TRB, а не
+        // разрешает саму валидность самого Link TRB) и просто зависал на
+        // границе круга, не переходя обратно в начало кольца. Именно
+        // это (а не только короткий таймаут) было настоящей причиной
+        // регулярных сбоев mount на больших объёмах чтения — сбой
+        // стабильно происходил в районе кратных ~255 передач через одно
+        // и то же кольцо. Исправление: обновлять Cycle-бит Link TRB
+        // каждый раз при заворачивании кольца, синхронно с
+        // ring->cycle_state.
+        xhci_trb_t *link = &ring->trbs[XHCI_RING_USABLE_TRBS];
+        link->control = TRB_CONTROL_TYPE_SET(TRB_TYPE_LINK) | TRB_CONTROL_TC
+            | ((uint32_t)ring->cycle_state & TRB_CONTROL_CYCLE);
         ring->cycle_state ^= 1;
     }
     return trb;
@@ -622,9 +640,24 @@ static void xhci_service_hid_event(uint8_t slot_id, uint32_t status) {
 // здесь зависнуть, останавливаются вообще все тики, включая те, на которых
 // держится pit_wait_ms() у любого другого ожидающего кода) недопустимо ни
 // при каких обстоятельствах, даже если реальная причина не в этой функции.
-static int xhci_wait_for_event(uint32_t want_type, uint64_t want_ptr,
-                                uint32_t *out_status, uint8_t *out_slot_id,
-                                int timeout_ms)
+// Счётчик активных синхронных ожиданий (want_ptr != 0 — конкретное
+// событие: control-передача энумерации, MSD bulk-передача). Пока он > 0,
+// usb_poll() (вызывается из обработчика таймера — см. pit.c) не трогает
+// Event Ring вообще: сама xhci_wait_for_event_impl() уже дренирует кольцо
+// и обслуживает попутные HID-события через xhci_service_hid_event() (см.
+// комментарий выше). Без этой защиты периодический usb_poll() мог
+// перехватить (want_ptr=0 — "любое" Transfer Event) как раз то событие,
+// которое ждёт синхронный вызов — тот таймаутил, хотя контроллер уже
+// реально ответил. Найдено и подтверждено этой же сессией: именно эта
+// гонка (а не только короткий таймаут и не только баг Cycle-бита Link
+// TRB, исправленный выше в xhci_ring_enqueue) — причина того, что mount
+// иногда падал уже на самом первом блоке без какой-либо связи с числом
+// уже выполненных передач.
+static volatile int xhci_sync_wait_depth = 0;
+
+static int xhci_wait_for_event_impl(uint32_t want_type, uint64_t want_ptr,
+                                     uint32_t *out_status, uint8_t *out_slot_id,
+                                     int timeout_ms)
 {
     for (int elapsed = 0; elapsed <= timeout_ms; elapsed++) {
         for (int guard = 0; guard < XHCI_RING_TRB_CAPACITY; guard++) {
@@ -662,6 +695,16 @@ static int xhci_wait_for_event(uint32_t want_type, uint64_t want_ptr,
         pit_wait_ms(1);
     }
     return -1;
+}
+
+static int xhci_wait_for_event(uint32_t want_type, uint64_t want_ptr,
+                                uint32_t *out_status, uint8_t *out_slot_id,
+                                int timeout_ms)
+{
+    if (want_ptr != 0) xhci_sync_wait_depth++;
+    int rc = xhci_wait_for_event_impl(want_type, want_ptr, out_status, out_slot_id, timeout_ms);
+    if (want_ptr != 0) xhci_sync_wait_depth--;
+    return rc;
 }
 
 static int xhci_wait_command_completion(xhci_trb_t *cmd_trb, uint8_t *out_slot_id, int timeout_ms) {
@@ -927,19 +970,22 @@ static int xhci_bulk_transfer(xhci_slot_t *slot, xhci_ring_t *ring, uint8_t dci,
         TRB_CONTROL_TYPE_SET(TRB_TYPE_NORMAL) | TRB_CONTROL_IOC);
     uint64_t trb_phys = xhci_trb_phys(ring, trb);
 
-    printf("[XHCI] MSD DEBUG: enqueued TRB phys=0x%lx, ringing doorbell slot=%u dci=%u\n",
+    DLOG("[XHCI] MSD DEBUG: enqueued TRB phys=0x%lx, ringing doorbell slot=%u dci=%u\n",
            trb_phys, slot->slot_id, dci);
     xhci_ring_doorbell(slot->slot_id, dci);
 
     uint32_t status; uint8_t got_slot;
-    // DEBUG: таймаут временно уменьшен (100 "тиков" ~= 1 реальная секунда,
-    // см. pit_wait_ms()) для быстрой итерации при диагностике зависания —
-    // вернуть обратно после того, как найдена причина.
-    if (xhci_wait_for_event(TRB_TYPE_TRANSFER_EVENT, trb_phys, &status, &got_slot, 100) != 0) {
+    // Таймаут одной bulk-передачи. Раньше здесь стояло 100мс "для быстрой
+    // итерации при диагностике" — в 5 раз короче, чем таймаут control-передач
+    // (500мс) — и это было основной причиной нестабильности mount/unmount
+    // (пере)читывающих сотни/тысячи секторов подряд: под нагрузкой
+    // контроллер иногда не укладывался в 100мс на одну bulk-передачу.
+    // Приведено к тому же порядку, что и control-передачи.
+    if (xhci_wait_for_event(TRB_TYPE_TRANSFER_EVENT, trb_phys, &status, &got_slot, 1000) != 0) {
         printf("[XHCI] MSD bulk transfer timed out (slot=%u dci=%u)\n", slot->slot_id, dci);
         return -1;
     }
-    printf("[XHCI] MSD DEBUG: got event, status=%08X\n", status);
+    DLOG("[XHCI] MSD DEBUG: got event, status=%08X\n", status);
     uint8_t cc = (uint8_t)((status >> TRB_COMPLETION_CODE_SHIFT) & 0xFFu);
     if (cc != TRB_COMPLETION_SUCCESS) {
         printf("[XHCI] MSD bulk transfer error cc=%u (slot=%u dci=%u)\n", cc, slot->slot_id, dci);
@@ -974,31 +1020,31 @@ static int xhci_msd_command(xhci_slot_t *slot, const uint8_t *cdb, uint8_t cdb_l
     cbw->bCBWCBLength = cdb_len;
     memcpy(cbw->CBWCB, cdb, cdb_len);
 
-    printf("[XHCI] MSD DEBUG: sending CBW (dci=%u tag=%u)\n", slot->msd_bulk_out_dci, tag);
+    DLOG("[XHCI] MSD DEBUG: sending CBW (dci=%u tag=%u)\n", slot->msd_bulk_out_dci, tag);
     if (xhci_bulk_transfer(slot, &slot->msd_bulk_out_ring, (uint8_t)slot->msd_bulk_out_dci,
                             xhci_dma_scratch_phys, sizeof(*cbw)) != 0)
         return -1;
-    printf("[XHCI] MSD DEBUG: CBW sent OK\n");
+    DLOG("[XHCI] MSD DEBUG: CBW sent OK\n");
 
     if (data_len > 0) {
         if (!direction_in && data_buf) memcpy(xhci_dma_scratch_virt, data_buf, data_len);
 
         xhci_ring_t *data_ring = direction_in ? &slot->msd_bulk_in_ring : &slot->msd_bulk_out_ring;
         uint8_t data_dci = direction_in ? (uint8_t)slot->msd_bulk_in_dci : (uint8_t)slot->msd_bulk_out_dci;
-        printf("[XHCI] MSD DEBUG: data stage dci=%u len=%u dir_in=%d\n", data_dci, data_len, direction_in);
+        DLOG("[XHCI] MSD DEBUG: data stage dci=%u len=%u dir_in=%d\n", data_dci, data_len, direction_in);
         if (xhci_bulk_transfer(slot, data_ring, data_dci, xhci_dma_scratch_phys, data_len) != 0)
             return -1;
-        printf("[XHCI] MSD DEBUG: data stage OK\n");
+        DLOG("[XHCI] MSD DEBUG: data stage OK\n");
 
         if (direction_in && data_buf) memcpy(data_buf, xhci_dma_scratch_virt, data_len);
     }
 
-    printf("[XHCI] MSD DEBUG: reading CSW (dci=%u)\n", slot->msd_bulk_in_dci);
+    DLOG("[XHCI] MSD DEBUG: reading CSW (dci=%u)\n", slot->msd_bulk_in_dci);
     usb_bot_csw_t *csw = (usb_bot_csw_t *)xhci_dma_scratch_virt;
     if (xhci_bulk_transfer(slot, &slot->msd_bulk_in_ring, (uint8_t)slot->msd_bulk_in_dci,
                             xhci_dma_scratch_phys, sizeof(*csw)) != 0)
         return -1;
-    printf("[XHCI] MSD DEBUG: CSW received OK\n");
+    DLOG("[XHCI] MSD DEBUG: CSW received OK\n");
 
     if (csw->dCSWSignature != USB_BOT_CSW_SIGNATURE || csw->dCSWTag != tag) {
         printf("[XHCI] MSD: bad CSW signature/tag\n");
@@ -1458,6 +1504,10 @@ int xhci_msd_write_block(int index, uint32_t lba, const void *buf, uint32_t bloc
 
 void usb_poll(void) {
     if (!xhci_ready) return;
+    // Синхронное ожидание (control/bulk-передача) уже само дренирует Event
+    // Ring и обслуживает попутные HID-события — не лезем сюда, чтобы не
+    // перехватить событие, которого ждут они (см. xhci_sync_wait_depth).
+    if (xhci_sync_wait_depth > 0) return;
 
     // want_ptr=0 (любой Transfer Event) означает, что xhci_wait_for_event()
     // возвращает управление на КАЖДОМ событии, не заходя в свою ветку

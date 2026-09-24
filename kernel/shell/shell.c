@@ -297,6 +297,11 @@ void execute_command(void) {
         // "usbwrite " = 9 символов включая пробел.
         if (input_buffer_index <= 9) printf("\nUsage: usbwrite <device> <lba> <text>\n");
         else command_usbwrite(input_buffer + 9);
+    } else if (strcmp(cmd_lower, "mount") == 0) {
+        if (*args == '\0') printf("\nUsage: mount <usb-device-index>\n");
+        else command_mount(args);
+    } else if (strcmp(cmd_lower, "unmount") == 0) {
+        command_unmount();
     } else if (strcmp(cmd_lower, "ifconfig") == 0) {
         command_ifconfig(args);
     } else if (strcmp(cmd_lower, "ping") == 0) {
@@ -380,7 +385,7 @@ void shell_handle_tab(void) {
         "run", "runbg", "exec", "write", "beep", "mixer", "music",
         "kill", "wait", "ps", "df", "du", "devmode",
         "whoami", "chmod", "chown", "useradd", "groupadd", "su",
-        "usbinfo", "usbread", "usbwrite",
+        "usbinfo", "usbread", "usbwrite", "mount", "unmount",
         "ifconfig", "ping", "wget",
         NULL
     };

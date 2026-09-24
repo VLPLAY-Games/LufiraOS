@@ -123,6 +123,7 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/shell/commands/sound.c \
 	$(KERNEL_DIR)/shell/commands/users.c \
 	$(KERNEL_DIR)/shell/commands/usb.c \
+	$(KERNEL_DIR)/shell/commands/mount.c \
 	$(KERNEL_DIR)/shell/commands/net.c \
     $(KERNEL_DIR)/system/cpu/gdt.c \
     $(KERNEL_DIR)/system/cpu/idt.c \
@@ -141,7 +142,8 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/system/users/users.c \
 	$(KERNEL_DIR)/fs/vfs/vfs.c \
 	$(KERNEL_DIR)/fs/lufirafs/lufirafs.c \
-	$(KERNEL_DIR)/fs/lufirafs/lufirafs_vfs.c
+	$(KERNEL_DIR)/fs/lufirafs/lufirafs_vfs.c \
+	$(KERNEL_DIR)/fs/fat/fat.c
 
 KERNEL_ASM_SOURCES := \
     $(KERNEL_DIR)/system/cpu/interrupts.S \

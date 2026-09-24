@@ -65,6 +65,8 @@ void command_help(void) {
     printf(" usbinfo - List detected USB storage devices\n");
     printf(" usbread <device> <lba> - Read one block, show hex dump\n");
     printf(" usbwrite <device> <lba> <text> - Write text into one block\n");
+    printf(" mount <device> - Mount a FAT filesystem from a USB device\n");
+    printf(" unmount - Unmount the currently mounted filesystem\n");
     printf("\nNetwork:\n");
     printf(" ifconfig [ip] [netmask] [gateway] - Show/set network configuration\n");
     printf(" ping <ip> [count] - Send ICMP echo requests\n");
