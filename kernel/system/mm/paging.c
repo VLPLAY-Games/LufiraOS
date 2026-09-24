@@ -372,6 +372,81 @@ void clone_low_identity_map(uint64_t dest_pml4_phys) {
     dest_pml4[0] = paddr_to_entry(new_pdpt_phys, PAGE_PRESENT | PAGE_WRITE);
 }
 
+// Единственная функция в кодовой базе, разбирающая PML4 целиком — обходит
+// пользовательскую половину (индексы 0-255) PDPT->PD->PT и освобождает
+// каждую присутствующую физическую страницу (листовую и промежуточные
+// таблицы), затем сам PML4. Kernel space (256-511) не трогает — она общая
+// между процессами (см. sync_kernel_mappings()), её нельзя освобождать
+// из-под одного конкретного процесса.
+//
+// PML4[0] требует особого случая: помимо настоящей памяти процесса (код/
+// данные ELF, стек, mmap), там же может лежать ЕЩЁ НЕ РАСЩЕПЛЁННАЯ huge-
+// страница из clone_low_identity_map() — общая identity-копия ядра, которую
+// освобождать НЕЛЬЗЯ (см. PAGE_HUGE-ветку ниже, "continue"), и, после того
+// как map_page_in_pml4()/map_page_in_space() (elf.c) расщепили такую
+// huge-страницу под конкретный виртуальный адрес процесса, соответствующая
+// PT содержит СМЕСЬ: одна запись — настоящая, только что замапленная
+// физическая страница процесса, а остальные 511 — нетронутые копии той же
+// identity-карты (расщепление копирует identity-формулу
+// phys_base + i*PAGE_SIZE во ВСЕ 512 записей, см. map_page_in_pml4()).
+// Различаем их геометрически: у нетронутой identity-записи всегда
+// leaf_phys == leaf_virt (так построена identity-карта), у настоящей
+// pmm_alloc_page()-страницы процесса это совпадение практически невозможно.
+// Риск асимметричен: ложный "пропуск" здесь — просто небольшая утечка,
+// НИКОГДА не порча чужой памяти (обратное совпадение геометрически
+// невозможно) — то же рассуждение, которым уже пользуется is_user_accessible()
+// выше при разборе тех же структур.
+void free_user_address_space(uint64_t pml4_phys) {
+    pt_entry_t *pml4 = (pt_entry_t*)phys_to_virt(pml4_phys);
+    if (!pml4) return;
+
+    for (int pml4_idx = 0; pml4_idx < 256; pml4_idx++) {
+        if (!(pml4[pml4_idx] & PAGE_PRESENT)) continue;
+        uint64_t pdpt_phys = pml4[pml4_idx] & 0x000FFFFFFFFFF000ULL;
+        pt_entry_t *pdpt = (pt_entry_t*)phys_to_virt(pdpt_phys);
+
+        for (int pdpt_idx = 0; pdpt_idx < 512; pdpt_idx++) {
+            if (!(pdpt[pdpt_idx] & PAGE_PRESENT)) continue;
+            uint64_t pd_phys = pdpt[pdpt_idx] & 0x000FFFFFFFFFF000ULL;
+            pt_entry_t *pd = (pt_entry_t*)phys_to_virt(pd_phys);
+
+            for (int pd_idx = 0; pd_idx < 512; pd_idx++) {
+                if (!(pd[pd_idx] & PAGE_PRESENT)) continue;
+
+                if (pd[pd_idx] & PAGE_HUGE) {
+                    // Нерасщеплённая huge-страница в пользовательской
+                    // половине встречается только в PML4[0] и всегда это
+                    // общая identity-карта ядра (см. clone_low_identity_map())
+                    // — не память процесса. Физическую страницу не трогаем.
+                    continue;
+                }
+
+                uint64_t pt_phys = pd[pd_idx] & 0x000FFFFFFFFFF000ULL;
+                pt_entry_t *pt = (pt_entry_t*)phys_to_virt(pt_phys);
+                uint64_t region_base = ((uint64_t)pml4_idx << 39) |
+                                        ((uint64_t)pdpt_idx << 30) |
+                                        ((uint64_t)pd_idx   << 21);
+
+                for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
+                    if (!(pt[pt_idx] & PAGE_PRESENT)) continue;
+                    uint64_t leaf_phys = pt[pt_idx] & 0x000FFFFFFFFFF000ULL;
+
+                    if (pml4_idx == 0) {
+                        uint64_t leaf_virt = region_base | ((uint64_t)pt_idx << 12);
+                        if (leaf_phys == leaf_virt) continue;
+                    }
+
+                    pmm_free_page(leaf_phys);
+                }
+                pmm_free_page(pt_phys);
+            }
+            pmm_free_page(pd_phys);
+        }
+        pmm_free_page(pdpt_phys);
+    }
+    pmm_free_page(pml4_phys);
+}
+
 // Синхронизация kernel space записей между PML4 (для процессов)
 void sync_kernel_mappings(uint64_t dest_pml4_phys, uint64_t src_pml4_phys) {
     pt_entry_t *dest_pml4 = (pt_entry_t*)phys_to_virt(dest_pml4_phys);

@@ -45,6 +45,15 @@ static uint32_t next_pid = 1;
 static process_t *idle_process = NULL;
 uint64_t kernel_cr3 = 0;
 
+// Живых process_t, созданных через process_create() (idle не в счёте — он
+// kmalloc()'ится напрямую в process_init() и никогда не уничтожается).
+// MAX_PROCESSES был объявлен (process.h), но нигде не проверялся:
+// process_create() создавал процессы без ограничения, пока не кончится
+// физическая память. Инкремент — на успешном пути process_create(),
+// декремент — в единственной точке, через которую проходит любое реальное
+// уничтожение process_t (process_remove_from_list(), см. ниже).
+static uint32_t process_count = 0;
+
 // Счётчик вложенных запретов прерываний. irq_disable()/irq_enable() иногда
 // вызываются уже ИЗНУТРИ обработчика IRQ (например, шелл выполняет команды
 // прямо в keyboard_irq_handler()), где прерывания уже отключены самим CPU —
@@ -128,6 +137,29 @@ static void free_ring0_stack(process_t *proc) {
     kfree(pages);
     proc->ring0_stack_pages = 0;
     proc->ring0_stack = 0;
+}
+
+// Закрывает все fd процесса (корректно освобождает file_t/inode и, для
+// пайпов, триггерит pipe_free_if_orphaned() через обычный vfs_close() — а
+// не просто забывает про них) и освобождает всю его пользовательскую память
+// (free_user_address_space(), paging.c) + ring0-стек. Единая точка,
+// вызываемая перед КАЖДЫМ реальным уничтожением process_t — раньше
+// process_remove_from_list()/process_reap() просто kfree()'или сам
+// process_t, оставляя page_table/ring0-стек/открытые fd висеть в памяти
+// навсегда (см. старые комментарии у process_commit_exec()/process_reap()).
+// vfs_close() работает только через current_fd_table (не current_process),
+// поэтому временная подмена этого глобального указателя безопасна и здесь,
+// когда proc — чужой (уже завершившийся) процесс, а не вызывающий.
+static void free_process_resources(process_t *proc) {
+    fd_table_t *saved = current_fd_table;
+    current_fd_table = &proc->fd_table;
+    for (int i = 0; i < MAX_FD_PER_PROCESS; i++) {
+        if (current_fd_table->files[i]) vfs_close(i);
+    }
+    current_fd_table = saved;
+
+    if (proc->page_table) free_user_address_space(proc->page_table);
+    free_ring0_stack(proc);
 }
 
 // Создаёт новое адресное пространство на основе КОРНЕВОГО ядерного PML4
@@ -382,6 +414,11 @@ static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys, uint32_t pi
 process_t* process_create(const char *name, void (*entry)(void)) {
     irq_disable();
 
+    if (process_count >= MAX_PROCESSES) {
+        irq_enable();
+        return NULL;
+    }
+
     process_t *proc = (process_t*)kmalloc(sizeof(process_t));
     if (!proc) {
         irq_enable();
@@ -441,7 +478,11 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     // Выделяем Ring 0 стек
     proc->ring0_stack = allocate_ring0_stack(proc);
     if (!proc->ring0_stack) {
-        pmm_free_page(new_pml4);
+        // free_user_address_space(), не голый pmm_free_page(): create_address_space()
+        // уже установила в new_pml4 приватную copy identity-map через
+        // clone_low_identity_map() — bare pmm_free_page() освобождал бы
+        // только саму страницу PML4, оставляя эту копию висеть навсегда.
+        free_user_address_space(new_pml4);
         kfree(proc);
         irq_enable();
         return NULL;
@@ -451,8 +492,8 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     proc->stack_size = 16384;
     proc->stack_base = allocate_user_stack(proc->stack_size, new_pml4, proc->pid);
     if (!proc->stack_base) {
-        pmm_free_page(new_pml4);
         free_ring0_stack(proc);
+        free_user_address_space(new_pml4);
         kfree(proc);
         irq_enable();
         return NULL;
@@ -501,7 +542,9 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     DLOG("[PROCESS] Created '%s' (PID %u, Ring 3, user stack: 0x%lx)\n",
            name, proc->pid, proc->stack_base);
     klog("[PROCESS] created '%s' (PID %u)", name, proc->pid);
-    
+
+    process_count++;
+
     irq_enable();
     return proc;
 }
@@ -543,17 +586,27 @@ static process_t *wake_waiting_parent(process_t *child) {
 }
 
 // Убирает target (уже PROCESS_TERMINATED, найденный process_wait()) из
-// кольцевого списка процессов и освобождает его process_t. Как и
-// process_reap(), не освобождает page_table/ring0-стек — в кодовой базе
-// пока нет функции разбора PML4 целиком.
+// кольцевого списка процессов, освобождает его ресурсы
+// (free_process_resources() — page_table/ring0-стек/открытые fd) и сам
+// process_t.
 static void process_remove_from_list(process_t *target) {
     if (!process_list || !target)
         return;
 
+    // Как и в process_wait() (единственный внешний вызывающий, чей скан уже
+    // защищён своим собственным irq_disable() — но process_discard() зовёт
+    // это напрямую, без такой защиты) — таймерный тик может прилететь и
+    // запустить process_reap(), который тоже правит process_list, прямо
+    // посреди этой правки.
+    irq_disable();
+
     if (target->next == target) {
         if (process_list == target)
             process_list = NULL;
+        free_process_resources(target);
+        process_count--;
         kfree(target);
+        irq_enable();
         return;
     }
 
@@ -571,7 +624,10 @@ static void process_remove_from_list(process_t *target) {
             prev->next = target->next;
     }
 
+    free_process_resources(target);
+    process_count--;
     kfree(target);
+    irq_enable();
 }
 
 // Немедленно убирает недостроенный процесс из списка планировщика (см.
@@ -633,6 +689,17 @@ int process_wait(uint32_t pid, int *status_out) {
         process_t *zombie = NULL;
         int has_child = 0;
 
+        // irq_disable()/irq_enable() вокруг ВСЕГО скана+удаления: с тех пор
+        // как process_reap() стал вызываться прямо из timer_irq_handler()
+        // (pit.c) на каждом тике, а не только из практически никогда не
+        // исполняющегося idle-цикла, таймерное прерывание МОЖЕТ прилететь
+        // посреди этого обхода process_list и удалить/освободить ДРУГОЙ
+        // узел, пока мы ещё держим на него p/p->next — без этой защиты это
+        // была бы классическая гонка (use-after-free/порча кольцевого
+        // списка). process_create() уже защищает свои собственные правки
+        // process_list ровно так же — здесь тот же самый список.
+        irq_disable();
+
         if (process_list) {
             process_t *p = process_list;
             process_t *start = p;
@@ -657,6 +724,8 @@ int process_wait(uint32_t pid, int *status_out) {
 
             process_remove_from_list(zombie);
 
+            irq_enable();
+
             if (status_out)
                 *status_out = code;
 
@@ -665,8 +734,11 @@ int process_wait(uint32_t pid, int *status_out) {
 
         if (!has_child) {
             // У вызывающего нет (или больше нет) такого ребёнка.
+            irq_enable();
             return -1;
         }
+
+        irq_enable();
 
         // Ребёнок жив — блокируемся до его завершения.
         current_process->wait_target_pid = target;
@@ -702,7 +774,9 @@ int process_prepare_exec(process_t *proc,
 
     uint64_t new_stack = allocate_user_stack(USER_STACK_SIZE, new_pml4, proc->pid);
     if (!new_stack) {
-        pmm_free_page(new_pml4);
+        // Не голый pmm_free_page() — см. тот же комментарий в process_create():
+        // create_address_space() уже установила приватную copy identity-map.
+        free_user_address_space(new_pml4);
         return -1;
     }
 
@@ -793,13 +867,17 @@ void process_reap(void) {
                         break;
                     }
                 }
-                
+
+                free_process_resources(p);
+                process_count--;
                 kfree(p);
                 p = process_list;
                 prev = NULL;
                 continue;
             } else {
                 prev->next = p->next;
+                free_process_resources(p);
+                process_count--;
                 kfree(p);
                 p = prev->next;
                 continue;
@@ -1195,7 +1273,13 @@ uint64_t process_fork(uint64_t frame_ptr) {
     }
 
     child->page_table = new_pml4;
-    pmm_free_page(placeholder_pml4);
+    // Не голый pmm_free_page(): process_create() уже полностью построил
+    // этот плейсхолдер (собственная copy identity-map через
+    // clone_low_identity_map() + выделенный allocate_user_stack()'ом
+    // пользовательский стек) — bare pmm_free_page() освобождал бы только
+    // саму страницу PML4, оставляя всё остальное висеть навсегда при
+    // каждом fork().
+    free_user_address_space(placeholder_pml4);
 
     // Ребёнок наследует ТОТ ЖЕ виртуальный адрес стека, что и родитель —
     // он был скопирован вместе со всем остальным пользовательским

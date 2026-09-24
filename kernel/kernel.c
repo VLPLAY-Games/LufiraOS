@@ -282,11 +282,17 @@ void _start(BootInfo* bi) {
     process_set_shell_entry(shell_task);
     process_t *shell_proc = process_create("shell", shell_task);
     if (shell_proc) shell_proc->is_shell = 1;
-    
+
     while (1) {
         asm volatile("sti");
         asm volatile("hlt");
         asm volatile("cli");
         schedule();
+        // Сбор осиротевших зомби (process_reap()) сделан прямо в
+        // timer_irq_handler() (pit.c), а не здесь: schedule() (process.c)
+        // намеренно почти никогда не переключает управление на сам
+        // idle-процесс, пока жив хоть один другой READY-процесс (шелл жив
+        // всегда) — так что этот цикл реально исполняется довольно редко,
+        // и вызов отсюда был бы ненадёжен.
     }
 }

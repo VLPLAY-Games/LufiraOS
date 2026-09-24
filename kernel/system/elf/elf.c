@@ -621,6 +621,10 @@ int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
 
     if (!entry) {
         printf("[ELF] exec: failed to load '%s', old process untouched\n", name);
+        // new_pml4/new_stack уже выделены process_prepare_exec() выше, но
+        // proc так и не подтвердил их через process_commit_exec() — раньше
+        // они просто бросались здесь навсегда при каждой неудачной загрузке.
+        free_user_address_space(new_pml4);
         elf_irq_restore(irq_flags);
         return -1;
     }
@@ -639,7 +643,20 @@ int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
     uint64_t rsp_phys = get_physical_address_in_pml4(new_pml4, rsp);
     *(uint64_t*)phys_to_virt(rsp_phys) = (uint64_t)process_exit;
 
+    // Захватываем СТАРОЕ адресное пространство до того, как
+    // process_commit_exec() перезапишет proc->page_table новым — иначе
+    // указатель на него теряется безвозвратно и каждый exec() навсегда
+    // утекал весь старый образ процесса (ELF/стек/mmap-регионы). Свободить
+    // можно уже сейчас, до переключения CR3 (context_enter_ring3() ниже) —
+    // free_user_address_space() работает через physmap (phys_to_virt()), не
+    // через текущий активный CR3, тем же способом, каким sys_munmap() уже
+    // освобождает страницы живого процесса из-под его же собственных
+    // маппингов.
+    uint64_t old_pml4 = proc->page_table;
+
     process_commit_exec(proc, new_pml4, new_stack, name);
+
+    free_user_address_space(old_pml4);
 
     process_context_t *ctx = &proc->context;
     memset(ctx, 0, sizeof(*ctx));

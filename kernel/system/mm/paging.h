@@ -84,3 +84,12 @@ void sync_kernel_mappings(uint64_t dest_pml4_phys, uint64_t src_pml4_phys);
 // портят identity map сразу для всей системы. См. подробный комментарий у
 // реализации в paging.c.
 void clone_low_identity_map(uint64_t dest_pml4_phys);
+
+// Полностью освобождает пользовательскую половину (PML4[0..255]) адресного
+// пространства pml4_phys — все промежуточные PDPT/PD/PT-страницы и все
+// присутствующие листовые физические страницы, включая сам PML4. Kernel
+// space (256-511, общий/синхронизированный через sync_kernel_mappings()) не
+// трогает. См. подробный комментарий у реализации в paging.c — единственная
+// функция разбора PML4 целиком, использует те же соглашения обхода/масок,
+// что и clone_address_space_deep() в process.c.
+void free_user_address_space(uint64_t pml4_phys);
