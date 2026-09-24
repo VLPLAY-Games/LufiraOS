@@ -23,6 +23,7 @@ This document describes the CPU management and interrupt handling subsystems of 
 6. [Programmable Interval Timer (PIT)](#programmable-interval-timer-pit)
    - [Configuration](#configuration)
    - [Timer Handler](#timer-handler)
+   - [Preemptive Scheduling](#preemptive-scheduling)
 7. [Dependencies](#dependencies)
 8. [Future Extensions](#future-extensions)
 
@@ -36,7 +37,7 @@ The CPU and interrupts subsystem provides the foundation for:
 - **Exception Handling** – CPU exceptions (page faults, divide by zero, general protection faults, etc.).
 - **Hardware Interrupts** – IRQ handling for peripherals (timer, keyboard, mouse).
 - **Multitasking Support** – the TSS provides the Ring 0 stack pointer for user-mode transitions.
-- **System Timing** – the PIT generates regular timer ticks for scheduling.
+- **System Timing and Preemption** – the PIT generates regular timer ticks for scheduling and drives preemptive multitasking, forcibly switching away from ring-3 processes that exceed their timeslice (see [Preemptive Scheduling](#preemptive-scheduling)).
 
 **Design Philosophy:**
 - **Minimal and Correct** – only essential features are implemented.
@@ -226,11 +227,13 @@ The PIC is remapped by `pic_remap()`:
 The IRQ handler (`irq_handler()`) is called from `isr_common_handler()` for vectors 32–47:
 
 1. Determine the IRQ number (`vector - 32`).
-2. Call the appropriate device driver:
+2. Send End-Of-Interrupt (EOI) to the PIC(s).
+3. Call the appropriate device driver:
    - IRQ 0 → `timer_irq_handler()`
    - IRQ 1 → `keyboard_irq_handler()`
    - IRQ 12 → `mouse_irq_handler()`
-3. Send End-Of-Interrupt (EOI) to the PIC(s).
+
+**EOI timing:** EOI is sent *before* dispatching to the device handler, not after. This matters because of [preemptive scheduling](#preemptive-scheduling): when `timer_irq_handler()` decides to preempt the interrupted process, it calls `schedule()`, which may divert execution into a different process's context via `switch_to_process()`/`context_switch()`/`context_enter_ring3()` and not return through `irq_handler()`'s normal end-of-function path for a long time — or, in the `context_enter_ring3()` cold-start case, possibly never on this exact call path. If EOI were sent at the end of the function (as it used to be), that IRQ would still be marked "in service" and the PIC would stop delivering it, hanging the timer. Sending EOI first is safe even for handlers that *do* return normally: every ISR stub disables interrupts (`cli`) on entry (see `interrupts.S`) and none of the handlers re-enable them internally, so an early EOI cannot cause a genuine nested interrupt — it only changes the moment the PIC is *ready* to deliver the next IRQ, not when the CPU actually accepts it.
 
 **Enabling IRQs:**
 `irq_enable()` clears the mask bit for a specific IRQ on the PIC.
@@ -264,10 +267,42 @@ The PIT provides regular timer interrupts (IRQ0) for task scheduling and timekee
 The timer handler (`timer_irq_handler()`) is called on every PIT interrupt (100 times per second):
 
 1. Increment the global tick counter (`pit_ticks`).
-2. Wake up any sleeping processes (`wakeup_tick`).
+2. Wake up any sleeping processes whose `wakeup_tick` has been reached (sets their state to `PROCESS_READY`).
 3. Update the cursor blink state (`update_cursor()`).
+4. Poll USB and the network stack (`usb_poll()`, `net_poll()`).
+5. Reap zombie processes nobody ever calls `process_wait()` on (`process_reap()`) — cheap and non-blocking, safe to call from interrupt context.
+6. Handle a pending Ctrl+C (`shell_handle_ctrl_c()`), if one was flagged, *after* the USB/network polling above so a keyboard HID report currently mid-parse is never abandoned.
+7. Decrement the preemption countdown and, if it has expired, call `schedule()` — see [Preemptive Scheduling](#preemptive-scheduling) below.
 
-**Scheduling:** The timer handler does not call `schedule()` directly; the scheduler is called from `kernel.c` after interrupts are re-enabled.
+### Preemptive Scheduling
+
+As of v0.6.0, `timer_irq_handler()` (`kernel/system/timer/pit.c`) does more than track ticks and wake sleepers — it also drives **preemptive multitasking**, forcibly switching away from a user-mode process that has run for too long without yielding on its own.
+
+**Timeslice:**
+
+| Parameter | Value |
+|-----------|-------|
+| `PREEMPT_TIMESLICE_TICKS` | 5 ticks |
+| Effective timeslice | ~50 ms (5 ticks × 10 ms at the 100 Hz PIT rate) |
+
+A static countdown, `preempt_countdown`, starts at `PREEMPT_TIMESLICE_TICKS` and is decremented on every timer tick. When it reaches zero it is reset and `schedule()` is called:
+
+```c
+if (frame->cs == 0x33 && current_process) {
+    if (--preempt_countdown == 0) {
+        preempt_countdown = PREEMPT_TIMESLICE_TICKS;
+        schedule();
+    }
+}
+```
+
+**The ring-3 gate:** preemption only fires when the code interrupted by *this* timer tick was running in ring 3 — i.e. `frame->cs == 0x33`, the user code segment selector (see the [GDT entries](#gdt-entries) table above) — and a process is actually current. This is deliberate and load-bearing:
+
+- Kernel-mode code — ISR/IRQ handlers, syscall handlers, and the idle process's `hlt` loop (which never leaves ring 0) — is **never** preempted mid-execution, because preemption simply never fires while `cs != 0x33`. No new reentrancy hazard is introduced into any existing kernel-mode or IRQ-handler code by adding this feature.
+- The idle process needs no separate exclusion check: since it always runs in ring 0, `frame->cs == 0x33` already excludes it.
+- The tradeoff is that a syscall handler can never be preempted partway through — acceptable because syscalls in this kernel are bounded and fast (e.g. `sys_mmap()` relies on exactly this guarantee to avoid needing its own locking while it walks page tables).
+
+**Process-side counterpart:** for preemption to be safe, every process must actually be running in ring 3 by the time it can be interrupted — including on its very first tick after creation. That guarantee (the `context_enter_ring3()` cold-start path and the `first_run` process flag) is on the process-management side of this feature and is documented in [12_elf_processes.md](12_elf_processes.md#context-switching).
 
 ---
 
@@ -291,6 +326,6 @@ For more details, refer to the source code in `system/cpu/` and `system/timer/`.
 
 ---
 
-**Document Version:** 1.0  
+**Document Version:** 2.0  
 **Last Updated:** September 2026  
 **Project:** LufiraOS

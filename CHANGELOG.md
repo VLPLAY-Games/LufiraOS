@@ -2,6 +2,49 @@
 
 All notable changes to LufiraOS are documented in this file.
 
+## [0.6.0] - 2026-09-24
+
+Covers all changes since `v0.3.1` (commit `7da5d8a`, "fixes 1", inclusive).
+
+### Added
+
+- **Preemptive multitasking.** The scheduler now genuinely preempts ring-3 code from the timer (100 Hz, ~50 ms timeslice) instead of relying on a process to voluntarily yield; a new `context_enter_ring3()` cold-start path guarantees every process actually reaches ring 3 (a CPU-bound program that never calls a syscall previously never left ring 0). A misbehaving program can no longer freeze the whole system.
+- **Anonymous memory mapping.** `mmap`/`munmap` are fully implemented (eager allocation, per-process region tracking, `PROT_READ`/`PROT_WRITE`/`PROT_EXEC` enforced via the NX bit) — no longer stubs. This is what the new minimal libc's `malloc()` is built on.
+- **Syscall hardening.** Every syscall that dereferences a user pointer now validates it (rejects kernel addresses and unmapped memory instead of trusting user input blindly). Real errno-style error codes (`EFAULT`, `EINVAL`, `ENOENT`, `ENOTDIR`, `ERANGE`, `EPERM`, `EACCES`, …) replace bare `-1`. `getcwd`/`chdir` are real syscalls backed by per-process state instead of stubs. New filesystem syscalls `SYS_MKDIR`, `SYS_RMDIR`, `SYS_UNLINK`, `SYS_READDIR` expose functionality the VFS already had internally. Total syscall count: 19 → 27.
+- **Real argv/envp.** `run`/`runbg`/`exec` now split and pass real command-line arguments through to user programs (`int main(int argc, char **argv, char **envp)`); previously every program always received zero arguments.
+- **A minimal userspace libc** (`libc/`) — `crt0.S` startup, `malloc`/`free` (arena-based, built on `mmap`), a `string.h` subset, and a small `printf`. This is the first C toolchain pipeline in the project; every prior test program was hand-written NASM.
+- **Users, groups, and permissions** — a Unix-like `uid`/`gid`/9-bit permission model. Persistent `/etc/passwd` and `/etc/group` (colon-separated, FNV-1a password hashing), new commands `whoami`, `chmod`, `chown`, `useradd`, `groupadd`, and `su`. Every file/directory operation (open, create, mkdir, rm, cp, mv, run, …) now enforces owner/group/other permission bits; root (`uid` 0) bypasses all checks. Boots straight into a root shell — no login prompt.
+- **xHCI USB host controller**, replacing the old UHCI (USB 1.1) driver entirely — real command/event/transfer ring model, HID keyboard/mouse support carried over with feature parity.
+- **USB Mass Storage** (Bulk-Only Transport over xHCI) — block-level `usbinfo`/`usbread`/`usbwrite` commands, and new `mount`/`unmount` commands that activate the (previously entirely dead, never-compiled) FAT driver to mount a USB flash drive's FAT12/16/32 filesystem read/write. Not integrated into the VFS (LufiraFS stays the only VFS-mounted filesystem) — `mount` reads the whole device into RAM (capped at 8 MB) and works directly against the FAT driver, the same way `usbread`/`usbwrite` talk to the block layer directly.
+- **RTL8139 network driver and a basic TCP/IP stack** — Ethernet, ARP, IPv4, ICMP, and a minimal single-connection blocking TCP client, entirely polled (no APIC/MSI support exists in this kernel). New commands `ifconfig`, `ping`, and `wget` (IP-address targets only, no DNS).
+- New filesystem syscalls exposed to shell commands via a `vfs_*_at()` layer (`cp`/`mv`/`ls`/`mkdir`/`rm`/`touch`/`run` now go through the same syscall-layer VFS calls that ring-3 programs use, instead of calling LufiraFS internals directly — removing the prior code duplication between the two paths).
+- Process teardown now actually frees a process's address space (page tables), ring-0 stack, and open file descriptors on exit — previously every `run`/`runbg`/`exec` leaked all three. Orphaned background (`runbg`) processes with no `wait()` are now reaped automatically from the idle loop. `MAX_PROCESSES` is now enforced (previously defined but never checked).
+
+### Fixed
+
+- `cd`, `mkdir`, `cp`, `mv`, `exec`, `fork()` (a register-clobber bug in the ring-3 entry path), and a small process-management race — the batch of stability fixes that opened this cycle (`fixes 1`, `fix mkdir and cd`, `fix`, `fix fork 2`).
+- A page-table-permission bug (`get_or_create_table()` never set `PAGE_USER` on newly-created intermediate paging structures) that silently made every freshly-`mmap`'d or stack page kernel-only accessible from ring 3 — invisible until real ring-3 code first tried to read/write data through `mmap`.
+- Two xHCI USB Mass Storage reliability bugs found while stress-testing the new `mount` command (the first code in the project to issue thousands of bulk transfers back-to-back): a bulk-transfer timeout that was five times shorter than the control-transfer timeout (a forgotten debugging artifact), and a real ring-buffer bug — the transfer ring's Link TRB never had its Cycle bit updated on wraparound, so the controller would stall at the boundary of every ~255 transfers. A third race (the timer-interrupt-driven USB poll could steal the completion event a synchronous Mass Storage wait was blocked on) was also found and fixed.
+- `command_rm`'s bulk-delete path (`rm *`) and its single-file path could triple-fault — GCC reserves a function's entire worst-case stack frame up front (no `-O`), so a large stack-local array inside a rarely-taken branch still consumed stack on every call, and the newly-added VFS call chain tipped an already-marginal 16 KB shell stack over the edge.
+- `lufirafs_create()`'s VFS wrapper collapsed every failure reason to the same generic error code instead of passing the real one through.
+- Various boot-path, HID input, and process-lifecycle fixes bundled in `bug fixes 1`.
+
+### Changed
+
+- Kernel version bumped to **0.6.0**.
+- Shell filesystem commands (`cp`, `mv`, `ls`, `mkdir`, `rm`, `touch`, `run`) migrated from calling LufiraFS internals directly to the same `vfs_*_at()` layer the syscalls use, while explicitly keeping their existing permission checks (the VFS layer itself does no permission enforcement).
+- Trimmed and corrected a number of oversized or stale comment blocks across the kernel (including doc comments that still referred to the removed UHCI driver or a cooperative-only scheduler).
+
+### Known Issues
+
+- **`mount` reads the whole USB device into RAM up front** (capped at 8 MB) — no lazy/streaming FAT access, and no VFS integration (files on a mounted USB drive aren't reachable through `cat`/`cp`/`ls` yet, only through `mount`'s own directory listing).
+- **The bootloader's own FAT loader and the legacy `kernel/fs/fat/fat.c` are two independent FAT implementations** that happen to now both be in active use (ESP loading vs. USB mount) — not unified.
+- **No DNS or DHCP.** `wget`/`ifconfig` work with literal IP addresses and a static network configuration only.
+- **Networking has no retransmission or congestion control.** The TCP client is a minimal, single-connection, best-effort implementation suited to a local/QEMU link, not a real network.
+- **Real hardware remains untested.** The system is developed and tested exclusively in QEMU.
+- No package manager yet — every driver and shell command still ships built into the kernel binary. This is the explicit scope of the next release (v0.7).
+
+
 ## [0.3.1] - 2026-09-13
 
 ### Fixed

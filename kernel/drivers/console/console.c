@@ -873,7 +873,7 @@ void display_system_info(BootInfo* bi) {
     current_color = convert_color(0x00AAFF); // Голубой
     printf("\n");
     printf("================================================\n");
-    printf("             LufiraOS Kernel v0.2              \n");
+    printf("             LufiraOS Kernel v0.6.0             \n");
     printf("================================================\n\n");
     
     // Системная информация

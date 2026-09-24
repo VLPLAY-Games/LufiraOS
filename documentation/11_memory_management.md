@@ -173,6 +173,68 @@ The heap is initialised by `heap_init()`:
 
 ---
 
+## Process Memory Mapping (mmap / munmap)
+
+`sys_mmap()` / `sys_munmap()` (`system/syscall/syscall.c`, syscalls 9 and 10 — see `13_syscalls.md`) let a process reserve and release its own virtual address ranges on top of the paging primitives described above. As of v0.6.0 both are fully implemented, subject to the constraints below.
+
+### Anonymous, Eager Allocation
+
+- **Anonymous only.** `flags` must include `MAP_ANONYMOUS`; file-backed mmap is not supported. `MAP_FIXED` is rejected outright — a caller-supplied address is never honoured, rather than being silently ignored.
+- **Eager, not demand-paged.** Every requested page is physically allocated (`pmm_alloc_page()`) and mapped (`map_page_in_pml4()`) synchronously, inside the `sys_mmap()` call itself — not lazily on first access via a page-fault handler. The kernel's page-fault handler (vector 14, see [10_cpu_interrupts.md](10_cpu_interrupts.md#exception-handlers)) has no recovery path for a real fault: it prints CR2/register state and halts the system unconditionally. Demand paging therefore isn't feasible without building that recovery path first, so eager allocation sidesteps the need for it.
+- If physical memory runs out partway through a request, every page mapped so far is rolled back via `unmap_page()` (which also frees the physical frame) and the call fails with `(uint64_t)-1` — no partially-mapped region is ever left behind.
+- Because `sys_mmap()` runs entirely in ring 0 as a syscall handler, it can never be interrupted by the scheduler's preemption (which only fires for ring-3 code — see [10_cpu_interrupts.md](10_cpu_interrupts.md#preemptive-scheduling)), so it needs no extra locking while it walks and mutates the process's page tables.
+
+### Address Space Layout
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `MMAP_AREA_START` | `0x0000600000000000` | Fixed virtual base of the mmap area (`process.h`) |
+| `MAX_MMAP_REGIONS` | 32 | Max simultaneously-live mmap regions per process |
+
+`MMAP_AREA_START` is the same virtual address for every process, which is safe because each process has its own private page table — identical virtual addresses in different processes never physically collide. Its PML4 index (`0x600000000000 / 2^39 = 192`) falls inside the 0–255 range that `process_fork()`/`clone_address_space_deep()` already copies wholesale, and sits well away from both ELF code (`0x400000` upward) and `USER_STACK_AREA_START` (PML4 index 224).
+
+Each `process_t` has its own bump-pointer cursor, `next_mmap_addr`, initialised to `MMAP_AREA_START` and advanced by the aligned length of every successful `mmap()`. **This cursor is never rewound by `munmap()`** — freeing a region only unmaps its pages and clears its tracking slot; the address range itself is not returned to a free list for reuse. A process that repeatedly `mmap()`s and `munmap()`s in a loop will eventually exhaust its mmap address range, even though the underlying physical memory is correctly freed each time. This is a known, documented limitation rather than an oversight.
+
+### Region Tracking
+
+Each `process_t` carries a fixed array of regions:
+
+| Field | Type | Description |
+|-------|------|--------------|
+| `mmap_regions[MAX_MMAP_REGIONS]` | `mmap_region_t[]` | One entry per live mapping; `length == 0` marks a free slot |
+| `mmap_region_t.addr` | `uint64_t` | Base virtual address returned by `mmap()` |
+| `mmap_region_t.length` | `uint64_t` | Page-aligned length of the region |
+
+`sys_munmap(addr, length)` requires an **exact match** against a previously-returned `(addr, length)` pair (the requested length is page-aligned the same way `mmap()` aligns it, before comparing). There is no partial or sub-range unmapping — unlike POSIX `munmap()`, a caller cannot free just a prefix, suffix, or middle slice of a larger mapping. If no tracked region matches exactly, the call fails with `(uint64_t)-1`.
+
+Freeing needs no separate physical-memory bookkeeping step: `unmap_page()` (`system/mm/paging.c`) already frees the underlying physical frame (`pmm_free_page()`) as part of clearing each PTE, so `sys_munmap()` simply calls it once per page in the region.
+
+### Protection Flags
+
+| Flag | Value | Effect on the mapped page table entry |
+|------|-------|------------------------------|
+| `PROT_READ` | 1 | Implicit — every mapped page is `PAGE_PRESENT \| PAGE_USER` regardless of flags |
+| `PROT_WRITE` | 2 | Sets `PAGE_WRITE` |
+| `PROT_EXEC` | 4 | *Absence* sets `PAGE_NX` — execute access is opt-in; omitting `PROT_EXEC` makes the region non-executable |
+
+`PAGE_NX` enforcement ultimately depends on `EFER.NXE` being enabled, but no boot-time code in this kernel explicitly sets that bit. `syscall_init()` (`system/syscall/syscall.c`) reads `EFER` and ORs in only bit 0 (`SCE`, to enable the `syscall`/`sysret` instructions) before writing it back — every other bit, including `NXE` (bit 11), is left exactly as the UEFI firmware set it at boot, with no assertion or fallback if firmware left it clear. `PAGE_NX`'s enforcement is therefore inherited from firmware state, not independently guaranteed by the kernel.
+
+### Zero-Fill Guarantee
+
+Every freshly mapped page is explicitly zeroed (`memset((void*)virt, 0, PAGE_SIZE)`) immediately after mapping and before `mmap()` returns. The source comment ties this directly to POSIX anonymous-mapping semantics and to a specific consumer: the userspace `malloc()` in `libc/src/malloc.c` relies on this guarantee and deliberately does not re-zero memory it receives from `sys_mmap()`.
+
+`06_libraries.md` currently documents only the kernel-side `kernel/lib/` utilities and does not yet cover the userspace `libc/` tree, so no cross-reference to it is given here.
+
+### A Fixed Bug: Missing `PAGE_USER` on Intermediate Page Tables
+
+`get_or_create_table()` (`system/mm/paging.c`), used by both `map_page()` and `map_page_in_pml4()` — and therefore by every mapping path that goes through them, including `sys_mmap()` and `allocate_user_stack()` — previously created new intermediate PDPT/PD/PT tables with only `PAGE_PRESENT | PAGE_WRITE`, never `PAGE_USER`.
+
+This was a real, silent bug: x86-64 ANDs the user/supervisor bit across *every* translation level (PML4E, PDPTE, PDE, and PTE). A supervisor-only entry at any intermediate level makes the entire address supervisor-only no matter what the leaf PTE itself requests. As a result, any freshly-mapped page reached through a newly-created intermediate table was silently kernel-only-accessible, regardless of the leaf's own `PAGE_USER` flag — a page fault waiting to happen on the first ring-3 access to that region.
+
+The fix sets `PAGE_USER` on intermediate tables too, both when a table is newly created and (idempotently) whenever an existing intermediate table is reused for a new mapping. This does not weaken kernel-only mappings: allowing `PAGE_USER` at the intermediate levels only relaxes an upper bound on access — actual access control is still enforced by the *leaf* PTE's own flags, and kernel-only mappings simply never request `PAGE_USER` at the leaf level, so they remain inaccessible from ring 3 regardless of what the intermediate tables permit.
+
+---
+
 ## Dependencies
 
 | Component | Depends On | Purpose |
@@ -180,6 +242,7 @@ The heap is initialised by `heap_init()`:
 | PMM | BootInfo (Memory Map) | Physical memory tracking |
 | Paging | PMM | Page table allocation |
 | Heap | Paging, PMM | Pre-mapping heap pages |
+| mmap/munmap | Paging, PMM, Process Manager | Anonymous user-space memory mapping |
 
 ---
 
@@ -191,6 +254,6 @@ For more details, refer to the source code in `system/mm/`.
 
 ---
 
-**Document Version:** 1.0  
+**Document Version:** 2.0  
 **Last Updated:** September 2026  
 **Project:** LufiraOS

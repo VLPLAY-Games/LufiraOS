@@ -27,12 +27,14 @@ This document describes the filesystem subsystem of LufiraOS, which consists of 
    - [File Operations](#file-operations-1)
    - [Inode Operations](#inode-operations)
    - [Per-Process File Tables](#per-process-file-tables)
+   - [VFS `_at` Functions](#vfs-_at-functions)
+   - [Permission Checking](#permission-checking)
 7. [LufiraFS VFS Wrapper](#lufirafs-vfs-wrapper)
 8. [The `mkfs_lufirafs` Tool](#the-mkfs_lufirafs-tool)
 9. [Special Devices](#special-devices)
-10. [Legacy FAT Driver](#legacy-fat-driver)
+10. [FAT and USB Mass Storage Mounting](#fat-and-usb-mass-storage-mounting)
 11. [Dependencies](#dependencies)
-12. [Future Extensions](#future-extensions)
+12. [Conclusion](#conclusion)
 
 ---
 
@@ -47,6 +49,11 @@ The low-level implementation of LufiraOS's own filesystem. It operates on a disk
 A generic abstraction layer that presents files, directories, and devices as inodes and file descriptors. It dispatches operations to the underlying filesystem driver and provides a unified API for userspace programs and shell commands.
 
 LufiraFS was written to remove the dependency on FAT (and its limitations — root-directory-only lookups, no real `.`/`..` handling, hardcoded parent clusters in several commands) for anything beyond what UEFI firmware itself requires.
+
+Both layers have grown two significant additions since the initial design:
+
+- A cwd-relative **`_at()`** layer (`vfs_open_at()`, `vfs_mkdir_at()`, and friends — see [VFS `_at` Functions](#vfs-_at-functions)) that resolves a path starting from a caller-supplied base inode instead of always the LufiraFS root. Both the newer cwd-relative filesystem syscalls and the shell's filesystem commands now go through this layer.
+- Per-inode **owner/group/permission** bits (`uid`/`gid`/`perm` on `lufirafs_inode_t` — see [Inode Table](#inode-table)). Neither LufiraFS nor the VFS enforces these automatically; callers must check them explicitly (see [Permission Checking](#permission-checking)). The full permission model is covered in [`15_users_permissions.md`](15_users_permissions.md).
 
 ---
 
@@ -77,10 +84,10 @@ and mounts LufiraFS over the remaining bytes. `LUFIRAFS_ESP_SIZE` must be kept i
 The filesystem subsystem follows a layered architecture:
 
 **Userspace / Shell**
-Applications and shell commands use the VFS API (or, for shell commands that need cwd-relative resolution, the LufiraFS API directly) for all file operations.
+Applications and shell commands use the VFS API for all file operations. Shell commands that need cwd-relative resolution (`ls`, `mkdir`, `rm`, `touch`, `cp`, `mv`, `run`, in `kernel/shell/commands/filesystem.c`) now do this through the VFS `_at()` functions (see [VFS `_at` Functions](#vfs-_at-functions)) rather than calling the LufiraFS driver directly, as they used to. `cd` is the one holdout — it still calls `lufirafs_lookup()` directly, since it only needs a raw LufiraFS inode number to store as the shell's `cwd_inode`, not a VFS `inode_t`/file descriptor.
 
 **VFS Layer**
-Provides a uniform interface for file operations. Dispatches calls to the underlying filesystem driver via function pointers. VFS-facing lookups always resolve from the root inode, matching what userland ELF syscalls expect.
+Provides a uniform interface for file operations. Dispatches calls to the underlying filesystem driver via function pointers. The original API (`vfs_open()`, `vfs_mkdir()`, etc.) always resolves from the LufiraFS root inode; the newer `_at()` variants resolve from a caller-supplied base inode instead — see [VFS `_at` Functions](#vfs-_at-functions), including a note on which syscalls resolve from where.
 
 **LufiraFS VFS Wrapper**
 Converts VFS operations to LufiraFS driver calls. Implements inode and file operations for LufiraFS.
@@ -116,7 +123,7 @@ block 0                                    superblock
 | Field | Description |
 |-------|-------------|
 | `magic` | `0x31534C4F` ("OLS1" in little-endian bytes) — identifies a formatted LufiraFS region. |
-| `version` | Format version (currently 1). |
+| `version` | Format version (currently 2 — bumped from 1 when the inode table gained `uid`/`gid`/`perm`; see [Inode Table](#inode-table)). |
 | `block_size` | Always 4096 bytes. |
 | `total_blocks` | Total blocks in the region. |
 | `bitmap_start` / `bitmap_blocks` | Location and size of the block bitmap. |
@@ -132,7 +139,7 @@ One bit per block for the **entire** region, including the superblock, the bitma
 
 ### Inode Table
 
-Fixed-size table of 512 inodes, 64 bytes each:
+Fixed-size table of 512 inodes, 76 bytes each (`LUFIRAFS_INODE_SIZE`). The inode grew from 64 to 76 bytes when `uid`/`gid`/`perm` were added, bumping `LUFIRAFS_VERSION` from 1 to 2:
 
 | Field | Description |
 |-------|-------------|
@@ -141,8 +148,13 @@ Fixed-size table of 512 inodes, 64 bytes each:
 | `links_count` | ≥1 while the inode is live; 0 means free. |
 | `direct[12]` | 12 direct block pointers. |
 | `indirect` | One single-indirect block pointer (1024 more pointers). |
+| `uid` | Owner user id (0 = root). |
+| `gid` | Owner group id. |
+| `perm` | Classic 9-bit `rwxrwxrwx` permission bits (e.g. `0644`, `0755`). Defaults are `LUFIRAFS_DEFAULT_FILE_PERM` (0644) and `LUFIRAFS_DEFAULT_DIR_PERM` (0755). |
 
 Maximum file size is `(12 + 1024) * 4096` bytes (~4.2 MiB) — there is no double-indirect block.
+
+LufiraFS carries these permission bits but does not enforce them by itself — see [Permission Checking](#permission-checking). The bit semantics and the user/group database are covered in [`15_users_permissions.md`](15_users_permissions.md).
 
 ### Directory Entries
 
@@ -167,6 +179,8 @@ Directories store fixed 64-byte entries (`uint32_t inode` + `char name[60]`, 59 
 
 `lufirafs_resolve_parent(fs, start_inode, path, &out_parent, out_name)` splits a path into a parent inode and a final component name — used by `create`/`mkdir`/`unlink`, whose target does not need to exist yet.
 
+Both functions take an explicit `start_inode`, so nothing here prevents cwd-relative resolution — see [VFS `_at` Functions](#vfs-_at-functions) for a note on which VFS-facing callers (syscalls in particular) actually pass a cwd instead of the root.
+
 ### File Operations
 
 | Function | Description |
@@ -174,8 +188,9 @@ Directories store fixed 64-byte entries (`uint32_t inode` + `char name[60]`, 59 
 | `lufirafs_read(fs, ino, offset, buf, count)` | Reads up to `count` bytes starting at `offset`. |
 | `lufirafs_write(fs, ino, offset, buf, count)` | Writes `count` bytes at `offset`, growing the file (and allocating blocks) as needed; updates `inode.size`. |
 | `lufirafs_truncate(fs, ino, new_size)` | Shrinks or clears a file, freeing now-unused blocks. |
-| `lufirafs_create(fs, parent_ino, name, mode, &out_ino)` | Creates a file or directory; for directories, also creates `.`/`..`. |
+| `lufirafs_create(fs, parent_ino, name, mode, uid, gid, perm, &out_ino)` | Creates a file or directory owned by `uid`/`gid` with permission bits `perm` (typically `current_process->uid`/`gid` and `LUFIRAFS_DEFAULT_FILE_PERM`/`LUFIRAFS_DEFAULT_DIR_PERM`); for directories, also creates `.`/`..`. |
 | `lufirafs_unlink(fs, parent_ino, name)` | Removes a file or empty directory. |
+| `lufirafs_check_access(inode, uid, gid, want_read, want_write, want_exec)` | Classic Unix owner/group/other permission check (root always passes); returns 1 if allowed, 0 if not. Not called automatically by any of the functions above — see [Permission Checking](#permission-checking). |
 
 ### Directory Operations
 
@@ -244,6 +259,32 @@ File descriptors are allocated by `alloc_fd()`, which searches the current proce
 
 Each process has its own file descriptor table (`fd_table_t`), initialised by `vfs_init_fd_table()` for every new process (not just the first one). The current process's table is pointed to by `current_fd_table`. `fork()` duplicates the parent's table (shared `file_t`/inode with an incremented reference count); anonymous pipes (`vfs_pipe()`) and `dup2()`-style redirection build on this same table.
 
+### VFS `_at` Functions
+
+`vfs.c`/`.h` originally only exposed root-relative operations — `vfs_open()`, `vfs_mkdir()`, `vfs_rmdir()`, `vfs_unlink()`, `vfs_create()`, `vfs_lookup()` — which always resolve `path` starting from the LufiraFS root inode. Alongside these, `vfs.h` now also declares cwd-relative counterparts that resolve `path` starting from an arbitrary `base_inode` instead:
+
+| Function | Signature |
+|----------|-----------|
+| `vfs_open_at` | `int vfs_open_at(uint32_t base_inode, const char *path, int flags)` |
+| `vfs_mkdir_at` | `int vfs_mkdir_at(uint32_t base_inode, const char *path)` |
+| `vfs_rmdir_at` | `int vfs_rmdir_at(uint32_t base_inode, const char *path)` |
+| `vfs_unlink_at` | `int vfs_unlink_at(uint32_t base_inode, const char *path)` |
+| `vfs_create_at` | `int vfs_create_at(uint32_t base_inode, const char *path)` |
+| `vfs_lookup_at` | `inode_t* vfs_lookup_at(uint32_t base_inode, const char *path)` |
+
+Each is backed by a matching `vfs_lufirafs_*_at()` implementation in `lufirafs_vfs.c` (`vfs_lufirafs_open_at`, `vfs_lufirafs_create_at`, `vfs_lufirafs_mkdir_at`, `vfs_lufirafs_unlink_at`, `vfs_lufirafs_lookup_at`), which pass `base_inode` through to `lufirafs_lookup()`/`lufirafs_resolve_parent()` as the starting inode instead of the hardcoded LufiraFS root. The original root-relative functions are now thin wrappers around these — e.g. `vfs_mkdir(path)` is exactly `vfs_mkdir_at(lufirafs.sb.root_inode, path)` under the hood, and likewise for `create`/`unlink`/`lookup`/`open`.
+
+Two independent call paths go through this same layer instead of each duplicating path-resolution logic:
+
+- **The newer cwd-relative filesystem syscalls** — `SYS_MKDIR`, `SYS_RMDIR`, `SYS_UNLINK`, `SYS_READDIR` (ids 23–26; full semantics in [`13_syscalls.md`](13_syscalls.md)) — call `vfs_mkdir_at()`/`vfs_rmdir_at()`/`vfs_unlink_at()` with `current_process->cwd_inode` as the base.
+- **The shell's filesystem commands** — `cp`, `mv`, `ls`, `mkdir`, `rm`, `touch`, `run` (`kernel/shell/commands/filesystem.c`; full command reference in [`14_shell_commands.md`](14_shell_commands.md)) — call the same `vfs_*_at()` functions with the shell's own `cwd_inode`, instead of calling LufiraFS driver functions directly as they used to.
+
+**A real, still-unresolved inconsistency:** not every path-taking syscall resolves the same way. `SYS_MKDIR`/`SYS_RMDIR`/`SYS_UNLINK` resolve `path` relative to `current_process->cwd_inode` — the same choice already made for `SYS_CHDIR`/`SYS_CHMOD`/`SYS_CHOWN`. But the older `SYS_OPEN` and `SYS_EXEC` still resolve `filename` from the LufiraFS root unconditionally, ignoring the calling process's cwd. This is a genuine inconsistency in the current syscall ABI, not a deliberate design split that was later reconciled — it remains unfixed. See [`13_syscalls.md`](13_syscalls.md) for syscall-by-syscall semantics.
+
+### Permission Checking
+
+The VFS layer performs **no** permission checking of its own — `vfs_open()`/`vfs_open_at()`, `vfs_mkdir()`/`vfs_mkdir_at()`, and every other VFS entry point will perform the operation regardless of the caller's identity. Each `lufirafs_inode_t` carries `uid`/`gid`/`perm` (see [Inode Table](#inode-table)), and it is the caller's responsibility to check them — via `lufirafs_check_access()` — before making the VFS call. The syscall layer (`kernel/system/syscall/syscall.c`) and the shell's filesystem commands (`kernel/shell/commands/filesystem.c`) each call `lufirafs_check_access()` explicitly ahead of the VFS operations that need it. The permission model itself (bit semantics, the user/group database, etc.) is covered in [`15_users_permissions.md`](15_users_permissions.md).
+
 ---
 
 ## LufiraFS VFS Wrapper
@@ -252,9 +293,11 @@ The LufiraFS VFS wrapper (`lufirafs_vfs.c`) bridges the raw LufiraFS driver and 
 
 **Private Data:** `lufirafs_private_t` (stored in `inode_t::private_data`) holds the LufiraFS inode number, whether the object is a directory, and (for directories) a `lufirafs_dir_t` cursor.
 
-**VFS entry points:** `vfs_open_lufirafs`, `vfs_lufirafs_create`, `vfs_lufirafs_mkdir`, `vfs_lufirafs_unlink`, `vfs_lufirafs_lookup`, `vfs_lufirafs_get_root` — these replace the equivalent `vfs_fat_*` functions in `kernel/fs/vfs/vfs.c` one-for-one.
+**VFS entry points:** `vfs_open_lufirafs`, `vfs_lufirafs_create`, `vfs_lufirafs_mkdir`, `vfs_lufirafs_unlink`, `vfs_lufirafs_lookup`, `vfs_lufirafs_get_root` — these replace the equivalent `vfs_fat_*` functions in `kernel/fs/vfs/vfs.c` one-for-one, and always resolve from the LufiraFS root inode.
 
-VFS-facing lookups always resolve from the LufiraFS root inode. Shell commands that need cwd-relative behaviour (`cd`, `ls`, `mkdir`, etc.) call the lower-level `lufirafs_*` functions directly with the shell's own `cwd_inode`, rather than going through the VFS layer.
+`lufirafs_vfs.c` also exports cwd-relative `_at()` counterparts — `vfs_lufirafs_open_at`, `vfs_lufirafs_create_at`, `vfs_lufirafs_mkdir_at`, `vfs_lufirafs_unlink_at`, `vfs_lufirafs_lookup_at` — that resolve from an arbitrary `base_inode` instead; see [VFS `_at` Functions](#vfs-_at-functions). The root-relative entry points above are now thin wrappers around these (e.g. `vfs_lufirafs_mkdir(path)` is `vfs_lufirafs_mkdir_at(lufirafs.sb.root_inode, path)`).
+
+Most shell commands that need cwd-relative behaviour (`ls`, `mkdir`, `rm`, `touch`, `cp`, `mv`, `run`) now call the `_at()` VFS functions with the shell's own `cwd_inode`, rather than calling the lower-level `lufirafs_*` functions directly as they used to. `cd` is the exception — it still calls `lufirafs_lookup()` directly, since it only needs a raw LufiraFS inode number to store as the new `cwd_inode`, not a VFS `inode_t`.
 
 ---
 
@@ -288,9 +331,24 @@ Standard file descriptors (stdin, stdout, stderr) are connected to the console d
 
 ---
 
-## Legacy FAT Driver
+## FAT and USB Mass Storage Mounting
 
-The original FAT12/16/32 driver (`kernel/fs/fat/`) is still present in the source tree but is **no longer compiled into the kernel** — it has been fully superseded by LufiraFS for anything the kernel itself mounts. It is kept only for reference. The UEFI ESP partition (see [Disk Layout](#disk-layout)) is still FAT12, but it is read exclusively by UEFI firmware and the bootloader's own FAT reader, not by this kernel driver.
+The original FAT12/16/32 driver (`kernel/fs/fat/fat.c`/`.h`) sat in the source tree for a long time without being compiled into the kernel at all — dead code. It is now built (`kernel/fs/fat/fat.c` is listed in `KERNEL_C_SOURCES` in the `Makefile`) and used by two shell commands, `mount` and `unmount` (`kernel/shell/commands/mount.c`; full command reference in [`14_shell_commands.md`](14_shell_commands.md)), to read and write a **USB flash drive's** FAT filesystem.
+
+This is **not** a second VFS mount point. LufiraFS remains the only filesystem registered with the VFS (see [Architecture](#architecture)) — `mount`/`unmount` work directly against a single global `fat_fs_t` and the USB Mass Storage driver, entirely outside the VFS layer, the same way `usbinfo`/`usbread`/`usbwrite` already talk to `xhci_msd_*` directly (driver-level details in [`07_drivers.md`](07_drivers.md)).
+
+**Loading the image.** `fat_init(fs, image, image_size)` expects the *entire* device image already resident in RAM as one flat buffer — there is no lazy or streaming block I/O once mounted. `command_mount()` therefore:
+
+1. Reads the USB device's geometry via `xhci_msd_get_info()` and rejects devices whose block size isn't 512 bytes.
+2. Rejects devices whose total size exceeds `MOUNT_MAX_IMAGE_BYTES` (8 MiB) — the kernel heap is only 16 MiB total, so the whole-image buffer has to leave headroom for everything else the kernel allocates.
+3. `kmalloc()`s a buffer of that size and reads every block into it via `xhci_msd_read_block()` (retried up to 3 times per block on failure).
+4. Calls `fat_init(&fatfs, buf, total_bytes)` to parse the BPB and locate the FAT/root-directory/data regions.
+
+**Writing back.** `fat_flush()`/`fat_sync()` (in `fat.c`) hardcode the ATA disk driver (`disk_read_sectors()`/`disk_write_sectors()`) — they write to the disk holding LufiraFS, not to the USB device — so they are **not** used by the mount/unmount write-back path. Instead, `command_unmount()` walks FAT's own dirty-sector bitmap (`fs->dirty_map`, marked by `fat_mark_sector_dirty()` on every write) and writes each changed sector back to the USB device directly through `xhci_msd_write_block()` (also documented at the driver level in [`07_drivers.md`](07_drivers.md)).
+
+**Still dead code.** `kernel/fs/fat/fat_vfs.c` exists in the source tree but is still **not** compiled into the kernel — it is not listed in `KERNEL_C_SOURCES` in the `Makefile` (only `fat.c` is, for `mount`/`unmount` above). It remains a placeholder for real VFS multi-mount integration that does not exist yet.
+
+The UEFI ESP partition (see [Disk Layout](#disk-layout)) is still FAT12, but it continues to be read exclusively by UEFI firmware and the bootloader's own FAT reader — never by this kernel driver or by `mount`/`unmount`.
 
 ---
 
@@ -305,6 +363,7 @@ The original FAT12/16/32 driver (`kernel/fs/fat/`) is still present in the sourc
 | VFS | LufiraFS Driver | Underlying filesystem operations |
 | LufiraFS VFS Wrapper | LufiraFS Driver, VFS | Bridge between layers |
 | Special Devices | Console | Output operations |
+| FAT Driver (`mount`/`unmount`) | Heap, USB xHCI Mass Storage Driver | Whole-image buffer (`kmalloc`) and block I/O (`xhci_msd_read_block`/`xhci_msd_write_block`) for USB FAT filesystems — see [FAT and USB Mass Storage Mounting](#fat-and-usb-mass-storage-mounting) |
 
 ---
 

@@ -242,8 +242,7 @@ void _start(BootInfo* bi) {
     irq_enable(12); // мышь
     cpu_mark_interrupts_active();
 
-    // Требует, чтобы прерывания таймера уже тикали (pit_wait_ms() внутри
-    // сброса UHCI-контроллера), поэтому вызывается только после sti/irq_enable.
+    // Требует уже тикающего таймера (pit_wait_ms() внутри сброса контроллера).
     xhci_init();
 
     // net_init() (RTL8139 + статическая настройка IP) — по той же причине,
@@ -254,7 +253,7 @@ void _start(BootInfo* bi) {
         printf("\n");
         set_foreground_color(LOG_COLOR_HEADER);
         printf("================================================\n");
-        printf("     LufiraOS Kernel v0.3.1                     \n");
+        printf("     LufiraOS Kernel v0.6.0                     \n");
         printf("================================================\n");
         set_foreground_color(LOG_COLOR_INFO);
 

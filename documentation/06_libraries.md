@@ -13,8 +13,9 @@ This document describes the system libraries that provide fundamental types, uti
 5. [Colour Definitions (colors.h)](#colour-definitions-colorsh)
 6. [String Utilities (string.h / string.c)](#string-utilities-stringh--stringc)
 7. [CPU Utilities (cpu.h / cpu.c)](#cpu-utilities-cpuh--cpuc)
-8. [Dependencies](#dependencies)
-9. [Future Extensions](#future-extensions)
+8. [Userspace libc (`libc/`)](#userspace-libc-libc)
+9. [Dependencies](#dependencies)
+10. [Conclusion](#conclusion)
 
 ---
 
@@ -251,6 +252,19 @@ The CPU utilities provide low-level CPU state inspection.
 
 ---
 
+## Userspace libc (`libc/`)
+
+This document covers only the kernel-space libraries in `kernel/lib/`, used internally by the kernel itself. Since v0.6.0, LufiraOS also ships a separate, minimal **userspace** C library under `libc/` at the repository root — for ELF programs to link against, not for kernel code:
+
+- **`libc/crt0.S`** – startup code; `_start` aligns the stack, then calls `int main(int argc, char **argv, char **envp)` with the real arguments the kernel passes through `exec()`/`run`/`runbg` (see [`12_elf_processes.md`](12_elf_processes.md)).
+- **`libc/include/lufira/syscall.h`** – thin inline-asm wrappers over the raw `syscall` instruction for all 27 syscalls (see [`13_syscalls.md`](13_syscalls.md)).
+- **`libc/src/malloc.c`** – arena-based `malloc`/`free`, built entirely on `mmap()`/`munmap()` (see [`11_memory_management.md`](11_memory_management.md)).
+- **`libc/src/printf.c`** and **`libc/include/string.h`/`string.c`** – a small `printf` and a `string.h` subset.
+
+It is compiled and linked as a completely separate toolchain pass from the kernel (freestanding, non-PIE, no red zone — see the header comment in `libc/crt0.S` for the exact flags) and has no build-system automation yet (test programs under `test/c/` are built manually and committed prebuilt, matching this project's existing convention for `test/*.asm`). It is not documented section-by-section here since it's a distinct, userspace-only component; read the source directly for details.
+
+---
+
 ## Dependencies
 
 | Library | Depends On | Purpose |
@@ -275,6 +289,6 @@ For more details, refer to the source code in the `kernel/lib/` directory.
 
 ---
 
-**Document Version:** 1.0  
-**Last Updated:** September 2026  
+**Document Version:** 1.1
+**Last Updated:** September 2026
 **Project:** LufiraOS

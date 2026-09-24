@@ -12,12 +12,12 @@ This document describes the device drivers included in the LufiraOS kernel. The 
 4. [Disk Driver (ATA PIO)](#disk-driver-ata-pio)
 5. [Keyboard Driver (PS/2)](#keyboard-driver-ps2)
 6. [Mouse Driver (PS/2)](#mouse-driver-ps2)
-7. [USB (UHCI + HID)](#usb-uhci--hid)
+7. [USB (xHCI + HID + Mass Storage)](#usb-xhci--hid--mass-storage)
 8. [Input Dispatcher](#input-dispatcher)
-9. [PCI Bus Driver](#pci-bus-driver)
-10. [AC’97 Audio Driver](#ac97-audio-driver)
-11. [Driver Initialisation Sequence](#driver-initialisation-sequence)
-12. [Future Extensions](#future-extensions)
+9. [RTL8139 Network Driver](#rtl8139-network-driver)
+10. [PCI Bus Driver](#pci-bus-driver)
+11. [AC’97 Audio Driver](#ac97-audio-driver)
+12. [Driver Initialisation Sequence](#driver-initialisation-sequence)
 
 ---
 
@@ -29,7 +29,8 @@ The driver subsystem provides hardware abstraction for essential peripherals:
 - **Disk** – ATA PIO read/write for raw sector access (primary IDE channel).
 - **Keyboard** – PS/2 keyboard with scancode translation, modifier handling, and IRQ1 interrupt support.
 - **Mouse** – PS/2 mouse initialisation and packet decoding.
-- **USB** – a UHCI host‑controller driver plus a USB HID boot‑protocol keyboard/mouse driver, unified with PS/2 through a shared input dispatcher.
+- **USB** – an xHCI host‑controller driver providing boot‑protocol HID keyboard/mouse input and Bulk‑Only Transport USB Mass Storage (block read/write), unified with PS/2 through a shared input dispatcher.
+- **Network** – an RTL8139 Fast Ethernet driver providing raw frame TX/RX to the protocol stack in `kernel/net/` (see [`16_networking.md`](16_networking.md) for Ethernet/ARP/IP/ICMP/TCP and the `ifconfig`/`ping`/`wget` shell commands built on top).
 - **PCI** – bus enumeration, configuration space access, and BAR (Base Address Register) management.
 - **AC’97** – audio controller (Intel ICH‑compatible) with DMA‑based playback and tone generation.
 
@@ -45,7 +46,7 @@ Drivers rely on a small set of common facilities:
 - **`lib/string.h`** – memory and string functions (`memcpy`, `memset`, `strlen`).
 - **`lib/stdarg.h`** – variadic argument handling for `printf`.
 - **`drivers/console/console.h`** – console output functions (`printf`, `put_char`, etc.).
-- **`system/mm/pmm.h`** – physical memory manager for allocating DMA‑safe pages (used by AC’97).
+- **`system/mm/pmm.h`** – physical memory manager for allocating DMA‑safe pages. `pmm_alloc_page()` hands out a single 4 KiB page at a time with no guarantee of physical contiguity between calls (used by AC’97, and by xHCI for its per-structure pages). `pmm_alloc_contiguous_pages(count)` allocates `count` *physically contiguous* pages in one call — added for the RTL8139 driver, whose receive ring is a single scatter‑gather‑incapable physical buffer; see [RTL8139 Network Driver](#rtl8139-network-driver).
 
 All drivers are compiled into the kernel image and initialised by `kernel.c` after hardware detection.
 
@@ -106,7 +107,7 @@ The disk driver provides low‑level sector access to an ATA hard disk or CD‑R
 **Notes:**
 - The driver assumes a single master drive on the primary channel.
 - No DMA or interrupt support – purely synchronous.
-- Used by higher‑level filesystem code (e.g., FAT32) if present.
+- Used by higher‑level filesystem code (e.g., FAT32, LufiraFS) if present.
 
 ---
 
@@ -163,25 +164,52 @@ The mouse driver initialises a PS/2 mouse (auxiliary device) and processes stand
 
 ---
 
-## USB (UHCI + HID)
+## USB (xHCI + HID + Mass Storage)
 
-LufiraOS speaks USB through a **UHCI** (Universal Host Controller Interface) driver plus a **USB HID boot-protocol** decoder — enough to support the simple keyboards and mice QEMU emulates (`-device usb-kbd -device usb-mouse`), without a general-purpose USB stack.
+LufiraOS speaks USB through an **xHCI** (eXtensible Host Controller Interface) driver — PCI class `0x0C` (Serial Bus Controller), subclass `0x03` (USB), prog‑if `0x30`. It replaces the earlier **UHCI** driver (`drivers/usb/uhci.c`/`.h`, deleted). The overall architecture is carried over deliberately from UHCI — PCI discovery, controller reset, synchronous enumeration via control transfers, boot‑protocol HID, and polling from `usb_poll()` once per PIT tick instead of real interrupts — but the underlying mechanism is completely different: instead of a Frame List of Queue Heads/Transfer Descriptors, xHCI uses a **Command Ring**, an **Event Ring**, and a per‑device **Device Context**/**Input Context**, all built from **TRBs** (Transfer Request Blocks). This version adds a second capability UHCI never had: **USB Mass Storage**.
 
-### UHCI Host Controller (`drivers/usb/uhci.c`)
+### xHCI Host Controller (`drivers/usb/xhci.c`)
 
-- Found via PCI (class `0x0C`, subclass `0x03`, prog-if `0x00`); disables legacy BIOS PS/2 emulation (`USBLEGSUP`) so the controller isn't fought over.
-- Global and host-controller reset, followed by building a 1024-entry Frame List that permanently links a control queue head (QH) into every slot (rather than only slot 0), so control transfers don't have to wait up to ~1 second for the frame counter to wrap back around.
-- Root-hub port detection and reset (2 ports), followed by standard USB enumeration (GET_DESCRIPTOR, SET_ADDRESS, GET_DESCRIPTOR again, SET_CONFIGURATION) for any connected device.
-- Looks for a boot-protocol HID interface (keyboard or mouse) in the device's configuration descriptor; if found, arms a permanent interrupt transfer (a self-re-arming Transfer Descriptor on its own queue head, ahead of the control QH in the Frame List) that delivers new HID reports without polling the device from software.
-- `usb_poll()`, called once per timer tick from `timer_irq_handler()`, checks whether the armed interrupt transfer(s) completed and, if so, decodes the report and re-arms them for the next one.
+**Register model** (all accessed via the MMIO BAR0, mapped into `KERNEL_MMIO_BASE` space with a simple bump allocator since the controller is the only consumer):
 
-### USB HID Decoder (`drivers/usb/usb_hid.c`)
+- **Capability Registers** (fixed offset from BAR0) – `CAPLENGTH` (size of this block, used to locate the Operational Registers), `HCSPARAMS1` (max device slots/ports), `HCSPARAMS2` (scratchpad buffer count), `HCCPARAMS1` (context size: 32 or 64 bytes), `DBOFF`/`RTSOFF` (offsets to the Doorbell and Runtime register blocks).
+- **Operational Registers** (`CAPLENGTH` bytes after BAR0) – `USBCMD`/`USBSTS` (run/stop, halted/controller‑not‑ready flags), `PAGESIZE`, `CRCR` (Command Ring Control Register — physical address + cycle state of the Command Ring), `DCBAAP` (Device Context Base Address Array Pointer), `CONFIG` (number of enabled device slots), and one `PORTSC(n)` register per root‑hub port (connect/enable/reset/speed status; the reset‑on‑write‑1 change bits are masked before any read‑modify‑write, same discipline the old UHCI driver used for its port‑status‑change bits).
+- **Runtime Registers** – only Interrupter 0 is used: `ERSTSZ`/`ERSTBA` (Event Ring Segment Table size/address) and `ERDP` (Event Ring Dequeue Pointer, written after every event is consumed).
+- **Doorbell Array** – one register per device slot; ringing a slot's doorbell with a target Device Context Index (DCI) tells the controller to start processing that endpoint's Transfer Ring.
 
-- Decodes 8-byte boot-protocol keyboard reports (modifier byte + up to 6 simultaneous usage codes) and 3–4 byte boot-protocol mouse reports (buttons + relative X/Y).
-- Translates HID usage codes to the same ASCII/`KEY_*` values the PS/2 driver produces, and tracks Ctrl state explicitly so `Ctrl+C` and `Ctrl`+arrow history scrolling work identically regardless of which input path delivered the keystroke.
-- Feeds decoded events into the same `input_keyboard_event()`/`input_mouse_event()` entry points as PS/2 — see [Input Dispatcher](#input-dispatcher) below.
+**TRB rings:** the Command Ring and every endpoint's Transfer Ring are single 4 KiB pages holding 256 TRBs each. The last slot is permanently occupied by a **Link TRB** that points back to the start of the ring (255 usable slots); the Event Ring instead uses all 256 slots directly, with wraparound detected purely by the ring's Cycle bit flipping (no Link TRB needed for a single-segment Event Ring). Each ring tracks its own `cycle_state`, which every enqueued TRB's Cycle bit must match for the controller to treat it as valid.
 
-**Limitations:** UHCI only (no OHCI/EHCI/xHCI); boot-protocol HID only (no report descriptor parsing, so multimedia keys, N-key rollover beyond 6 keys, and non-boot devices are unsupported); no USB mass storage.
+**No real interrupts:** exactly like the AC’97 driver and the UHCI driver before it, the controller's interrupt line is never used — this kernel has no APIC/MSI‑X support and does not parse the PCI capability list at all, so there is no mechanism to receive one. Instead, `usb_poll()` is called once per PIT tick (100 Hz) from `timer_irq_handler()` in `kernel/system/timer/pit.c` (alongside `net_poll()`, see below) and drains the Event Ring by checking the Cycle bit — cheap enough that dedicating real interrupt plumbing to it was judged not worthwhile.
+
+**Enumeration:** each root‑hub port is checked and, if a device is connected, fully enumerated (Enable Slot → Address Device → GET_DESCRIPTOR → SET_CONFIGURATION) before moving to the next port, one slot at a time — the same "no more than one device answers at once" discipline UHCI used for its default address, adapted to the fact that xHCI has no single shared "default address" but Address Device commands still must be serialized while enumeration stays synchronous.
+
+**Two bugs found and fixed in the ring/event-handling code this release:**
+
+1. **Link TRB Cycle‑bit bug (`xhci_ring_enqueue()`)** — the permanent Link TRB's Cycle bit was set once when the ring was initialised and never updated afterwards. On the ring's first wrap this happened to still match `cycle_state` (both start at 1), but from the *second* wrap onward the controller saw a stale Cycle bit on the Link TRB, treated it as not‑yet‑produced, and stalled at the ring boundary instead of following the link back to the start — reproducing reliably around multiples of ~255 transfers on the same ring (visible as `mount`/large-transfer stalls). Fixed by updating the Link TRB's Cycle bit synchronously with `ring->cycle_state` on every wrap, not just at ring initialisation.
+2. **Event Ring race between `usb_poll()` and synchronous waits** — the Command Ring, every HID interrupt endpoint, and every Mass Storage bulk endpoint all post completions to the *same* single Event Ring. A synchronous wait for one specific completion (e.g. an MSD control or bulk transfer, or device enumeration) could have its event stolen by the periodic, timer‑tick‑driven `usb_poll()` before the waiting code observed it, producing a spurious timeout even though the controller had already responded. Fixed with an `xhci_sync_wait_depth` guard: while any synchronous wait is outstanding, `usb_poll()` does not touch the Event Ring at all; the synchronous wait path drains the ring itself and services any interleaved HID interrupt‑transfer completions inline (via the shared `xhci_service_hid_event()` helper) rather than dropping them, so keyboard/mouse input never starves while a Mass Storage transfer is in flight.
+
+### HID Boot Protocol (keyboard/mouse)
+
+- Looks for a boot‑protocol HID interface (keyboard or mouse) in a device's configuration descriptor during enumeration; if found, configures an interrupt IN endpoint and arms a self‑re‑arming Transfer Descriptor so `usb_poll()` picks up new reports without the device needing to be polled at the control level.
+- `xhci_get_hid_device(int index)` returns the `index`‑th discovered HID device (or `NULL`). Unlike the old `uhci_get_hid_device()`, which indexed by root‑hub *port number* (UHCI had a fixed 2 ports), this indexes the array of devices *in discovery order* — xHCI controllers typically expose 4 or more ports, and nothing in the tree called the old accessor either, so this is a deliberate contract change rather than an incidental one.
+- Report decoding itself is unchanged and still lives in `drivers/usb/usb_hid.c`: 8‑byte boot‑protocol keyboard reports (modifier byte + up to 6 simultaneous usage codes) and 3–4 byte boot‑protocol mouse reports (buttons + relative X/Y), translated to the same ASCII/`KEY_*` values the PS/2 driver produces and fed into `input_keyboard_event()`/`input_mouse_event()` — see [Input Dispatcher](#input-dispatcher).
+
+### USB Mass Storage (Bulk‑Only Transport)
+
+A device whose enumerated interface is class `0x08` (Mass Storage), subclass `0x06` (SCSI transparent command set), protocol `0x50` (Bulk‑Only Transport) gets a pair of bulk endpoints (IN + OUT) configured instead of an interrupt endpoint. Each command is a full BOT cycle over those two endpoints: a 31‑byte **CBW** (Command Block Wrapper, signature `"USBC"`) sent OUT, an optional data stage (bulk IN for reads, bulk OUT for writes), and a 13‑byte **CSW** (Command Status Wrapper, signature `"USBS"`) read IN and checked against the CBW's tag and status. The SCSI command set used is minimal: `TEST UNIT READY` and `READ CAPACITY(10)` during device init (to learn the block size and maximum LBA), and `READ(10)`/`WRITE(10)` for I/O — always exactly **one block per command**, driven one at a time by the caller; there is no request queueing or multi‑block transfer coalescing.
+
+Public API (`drivers/usb/xhci.h`):
+
+| Function | Description |
+|----------|-------------|
+| `int xhci_msd_device_count(void)` | Number of Mass Storage devices found during enumeration. |
+| `int xhci_msd_get_info(int index, uint32_t *out_max_lba, uint32_t *out_block_size)` | Capacity (max LBA) and real block size (usually 512) of device `index`. Returns 0 on success, -1 for an invalid index. |
+| `int xhci_msd_read_block(int index, uint32_t lba, void *buf, uint32_t block_size)` | Reads one `block_size`-byte block at `lba` via SCSI `READ(10)`. |
+| `int xhci_msd_write_block(int index, uint32_t lba, const void *buf, uint32_t block_size)` | Writes one `block_size`-byte block at `lba` via SCSI `WRITE(10)`. |
+
+There is no filesystem mounted on top of these devices by the driver itself — callers (the `usbinfo`/`usbread`/`usbwrite`/`mount`/`unmount` shell commands; see [`14_shell_commands.md`](14_shell_commands.md)) work directly in raw blocks.
+
+**Limitations:** no OHCI/EHCI fallback for non‑xHCI controllers; boot‑protocol HID only (no report descriptor parsing, so multimedia keys, N‑key rollover beyond 6 keys, and non‑boot devices are unsupported); no real SuperSpeed link‑power‑management or BOS descriptor handling — devices simply run at whatever speed they report via `PORTSC`; Mass Storage is single‑LUN, single‑block‑at‑a‑time, with no filesystem support built in.
 
 ---
 
@@ -191,6 +219,41 @@ Because QEMU (and potentially real hardware) can deliver the *same* physical key
 
 - **Debouncing:** a duplicate of the same key arriving again within a few timer ticks is dropped, so one physical keystroke can't be processed twice (which previously caused `run`/`runbg` to execute the same command twice from a single Enter press — with the second execution starting from inside the timer IRQ and corrupting the heap).
 - **Key routing:** arrow keys, Tab, Ctrl+C, Enter, and Backspace are routed to their dedicated shell handlers; anything else becomes a regular character passed to `shell_handle_char()`.
+
+---
+
+## RTL8139 Network Driver
+
+`drivers/net/rtl8139.c`/`.h` drives a Realtek RTL8139 Fast Ethernet controller (PCI vendor `0x10EC`, device `0x8139`) — the NIC QEMU emulates by default (`-net nic,model=rtl8139`). This section covers the driver/hardware layer only; the Ethernet/ARP/IP/ICMP/TCP protocol stack built on top of it lives in `kernel/net/` and is documented in [`16_networking.md`](16_networking.md).
+
+### Discovery and register access
+
+- Found via PCI by exact vendor/device ID (`pci_find_device(0x10EC, 0x8139)`) rather than by class, since RTL8139 predates the PCI class-code conventions later cards use.
+- BAR0 is an **I/O-port** BAR, not MMIO — every register access goes through `in8`/`in16`/`in32`/`out8`/`out16`/`out32` on `rtl_io_base + offset`, the same style as the PCI and AC’97 drivers. Key registers: `MAC0` (6-byte station address), `TSD0`/`TSAD0` (4 Transmit Status/Address Descriptors, one set per TX slot), `RBSTART` (physical base of the RX ring), `CR` (Command Register: reset/enable RX/TX/buffer-empty flags), `CAPR`/`CBR` (RX read/write cursors), `IMR`/`ISR` (interrupt mask/status — mask is always left 0, see below), `TCR`/`RCR` (transmit/receive configuration).
+- `pci_enable_io()` and `pci_enable_bus_master()` are called during discovery (the card DMAs directly to/from system memory), and `pci_disable_interrupts()` disables the legacy PCI INTx line, since it is never serviced.
+
+### Boot sequence
+
+1. **Reset** – write `0x00` to `CONFIG1` to wake the device from power-down, then set the `RST` bit in `CR` and poll (up to ~1 second, via `pit_wait_ms()`) until the controller clears it.
+2. **Buffer allocation** – the receive path needs one **physically contiguous** buffer, because the RTL8139 has no scatter‑gather support on receive: it DMAs incoming frames directly into a single ring without any descriptor list. The existing `pmm_alloc_page()` only ever hands out one page at a time with no contiguity guarantee across calls, so this driver's arrival motivated a new allocator, `pmm_alloc_contiguous_pages(count)` (`kernel/system/mm/pmm.c`/`.h`), which scans the PMM bitmap for a run of `count` free pages and reserves it atomically. The RX ring is allocated as 3 contiguous pages (8 KiB logical ring size plus the spec's recommended 16-byte prefetch slack and 1500 bytes of overrun room for `WRAP`-mode writes that cross the ring boundary, rounded up). Four separate 1‑page buffers (one per TX slot) are allocated with plain `pmm_alloc_page()`, since transmit doesn't need contiguity across slots.
+3. **RX ring setup** – `RBSTART` is programmed with the RX buffer's physical address; `RCR` is configured to accept packets matching our MAC address and broadcasts (`APM`/`AB`), allow ring-boundary-crossing writes into the overrun slack (`WRAP`), use unlimited DMA burst size, an 8 KiB ring length, and no RX FIFO threshold (wait for a complete frame before it's handed to the driver). `CAPR` is initialised to `0 - 16` (not `0`) because the hardware always stores this register offset by −16 from the true read position — writing a bare `0` here leaves the ring permanently "non-empty" from the card's point of view and the poll loop reads uninitialised buffer contents on every tick.
+4. **TX/RX enable** – `CR` is set to `RE | TE`, and the driver reads back the 6-byte station MAC from `MAC0..MAC0+5`.
+
+### Polling and interrupts
+
+Like xHCI and AC’97, the RTL8139's interrupt line is never wired up — there is no APIC/MSI support and no PCI capability-list parsing in this kernel. `ISR` bits still latch in hardware regardless of `IMR` (which is left `0`), so `rtl8139_poll()` reads and acknowledges them purely in software; nothing hardware-visible depends on that acknowledgement. `rtl8139_poll()` is called once per PIT tick (100 Hz) from `net_poll()` (`kernel/net/net.c`), which is itself called from `timer_irq_handler()` in `kernel/system/timer/pit.c` right alongside `usb_poll()`. Each call drains up to 8 pending frames from the RX ring (checking the `BUFE` "buffer empty" flag in `CR` between each), parsing the 4-byte status+length header the card prepends to every frame, advancing the ring cursor, and handing the payload to `eth_receive()` (`kernel/net/eth.c`) for the protocol stack to process. Because the RX cursor and `CAPR` are shared mutable state and `rtl8139_poll()`/`rtl8139_send()` can be called both from inside the timer IRQ (via `net_poll()`) and synchronously from ordinary code with interrupts enabled (protocol code that busy-waits on send/receive), a `cli`/`sti`-guarded re-entrancy flag prevents a nested timer tick from processing the ring concurrently with an already-running synchronous poll.
+
+### Public API (`drivers/net/rtl8139.h`)
+
+| Function | Description |
+|----------|-------------|
+| `void rtl8139_init(void)` | Discovers the controller via PCI, resets it, allocates RX/TX buffers, and brings up RX/TX. Safe to call even if no controller is found. |
+| `int rtl8139_found(void)` | Returns 1 if a controller was found and initialised. |
+| `const uint8_t *rtl8139_get_mac(void)` | Returns a pointer to the 6-byte MAC address (valid only if `rtl8139_found()`). |
+| `int rtl8139_send(const void *frame, uint16_t len)` | Transmits one pre-built Ethernet frame; blocks (bounded `pit_wait_ms()` timeout) until the hardware reports the transfer complete. Frames shorter than 60 bytes are padded up to the Ethernet minimum. |
+| `void rtl8139_poll(void)` | Called once per PIT tick from `net_poll()`; drains pending RX frames into `eth_receive()`. |
+
+**Limitations:** single RX ring with no automatic recovery from a desynchronised ring header (the driver simply stops parsing until the next tick, a documented simplification rather than a full reset-and-recover path); no interrupt-driven wakeups; one NIC supported at a time.
 
 ---
 
@@ -214,11 +277,13 @@ The PCI driver enumerates all devices on the PCI bus using Configuration Mechani
 | `pci_get_device(uint32_t index)` | Returns a pointer to the `pci_device_t` structure. |
 | `pci_find_device(vendor, device)` | Finds a device by vendor/device ID. |
 | `pci_find_class(class, subclass)` | Finds a device by class/subclass. |
+| `pci_find_class_if(class, subclass, prog_if)` | Finds a device by class/subclass/programming interface (used by xHCI, since prog-if `0x30` distinguishes it from OHCI/EHCI on the same class/subclass). |
 | `pci_get_bar(dev, bar_index, &bar)` | Fills a `pci_bar_t` with address, size, and type. |
 | `pci_enable_io(dev)` | Enables I/O space decoding. |
 | `pci_enable_bus_master(dev)` | Enables bus mastering for DMA. |
+| `pci_disable_interrupts(dev)` | Sets the Interrupt Disable bit in the command register (used by xHCI/RTL8139 since their interrupt lines are never serviced — see their respective sections). |
 
-The PCI driver is used by the AC’97 audio driver to locate the audio controller.
+The PCI driver is used by the AC’97, xHCI, and RTL8139 drivers to locate their respective controllers.
 
 ---
 
@@ -272,8 +337,10 @@ Drivers are initialised in a specific order after the kernel sets up the physica
 3. **Mouse** – `mouse_init()` (IRQ12 enabled later).
 4. **PCI** – `pci_init()` enumerates all devices.
 5. **AC’97** – `ac97_init()` depends on PCI and PMM.
-6. **UHCI/USB** – `uhci_init()`, after interrupts are enabled (needs the PIT ticking for real millisecond delays during controller reset).
-7. **Disk** – optional; can be used by filesystem code later.
+6. **Interrupts enabled** – `sti` plus IRQ0 (timer), IRQ1 (keyboard), IRQ2, IRQ12 (mouse) unmasked; from this point the PIT is ticking, which the next two steps require for their millisecond delays during controller reset.
+7. **xHCI/USB** – `xhci_init()`, after interrupts are enabled (needs the PIT ticking for real millisecond delays during controller/port reset).
+8. **Network** – `net_init()` (which calls `rtl8139_init()` and applies the static IP configuration), for the same reason as xHCI.
+9. **Disk** – optional; can be used by filesystem code later.
 
 Interrupt handlers are registered in the IDT before enabling IRQs. See [`02_kernel_init.md`](02_kernel_init.md) for the complete, authoritative boot order.
 
@@ -281,6 +348,12 @@ Interrupt handlers are registered in the IDT before enabling IRQs. See [`02_kern
 
 ## Conclusion
 
-The LufiraOS driver subsystem provides a solid foundation for basic hardware interaction. The modular design and clear APIs make it easy to add new devices or improve existing ones. The console driver alone is powerful enough for debugging and shell interaction, while the audio driver adds a touch of fun to the system.
+The LufiraOS driver subsystem provides a solid foundation for basic hardware interaction. The modular design and clear APIs make it easy to add new devices or improve existing ones. The console driver alone is powerful enough for debugging and shell interaction, while the audio, USB, and networking drivers add a full complement of I/O to the system.
 
 For more details, please refer to the source code and comments in each driver directory.
+
+---
+
+**Document Version:** 2.0
+**Last Updated:** September 2026
+**Project:** LufiraOS

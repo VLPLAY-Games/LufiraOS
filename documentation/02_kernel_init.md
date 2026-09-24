@@ -29,14 +29,16 @@ This document provides comprehensive documentation for the kernel entry point, i
    - [17. PCI Bus](#17-pci-bus)
    - [18. AC'97 Audio](#18-ac97-audio)
    - [19. Enable Interrupts and IRQs](#19-enable-interrupts-and-irqs)
-   - [20. UHCI/USB Controller](#20-uhciusb-controller)
-   - [21. Create Shell Process](#21-create-shell-process)
+   - [20. xHCI/USB Controller](#20-xhciusb-controller)
+   - [21. Network Stack](#21-network-stack)
+   - [22. User/Group Database](#22-usergroup-database)
+   - [23. Create Shell Process](#23-create-shell-process)
 5. [Main Loop (Idle Loop)](#main-loop-idle-loop)
 6. [Test System Call Process](#test-system-call-process)
 7. [Boot Info Structure](#boot-info-structure)
 8. [Dependencies](#dependencies)
 9. [Error Handling](#error-handling)
-10. [Future Extensions](#future-extensions)
+10. [Conclusion](#conclusion)
 
 ---
 
@@ -93,9 +95,11 @@ The kernel performs the following steps in strict order:
 17. PCI Bus
 18. AC'97 Audio
 19. Enable Interrupts and IRQs
-20. UHCI/USB Controller
-21. Create Shell Process
-22. Enter Main Loop
+20. xHCI/USB Controller
+21. Network Stack
+22. User/Group Database
+23. Create Shell Process
+24. Enter Main Loop
 
 ---
 
@@ -501,21 +505,45 @@ A persistent flag (`cpu_mark_interrupts_active()`) is set right after this step 
 
 ---
 
-### 20. UHCI/USB Controller
+### 20. xHCI/USB Controller
 
-**Function:** uhci_init()
+**Function:** xhci_init()
 
-**Location:** drivers/usb/uhci.c
+**Location:** drivers/usb/xhci.c
 
-**Purpose:** Finds a UHCI host controller on the PCI bus, resets it, and enumerates any connected USB devices, arming a boot-protocol HID keyboard/mouse if found.
+**Purpose:** Finds an xHCI host controller on the PCI bus, resets it, and enumerates any connected USB devices — arming a boot-protocol HID keyboard/mouse and/or a Mass Storage device if found. Replaces the former UHCI driver (see [`07_drivers.md`](07_drivers.md#usb-xhci--hid--mass-storage)).
 
-**Why after enabling interrupts?** UHCI's controller reset sequence uses `pit_wait_ms()` for real millisecond delays, which requires the PIT to already be ticking — that only happens once `sti`/`irq_enable(0)` have run.
+**Why after enabling interrupts?** xHCI's controller reset sequence uses `pit_wait_ms()` for real millisecond delays, which requires the PIT to already be ticking — that only happens once `sti`/`irq_enable(0)` have run.
 
-**Result:** Detected USB keyboards/mice are polled once per timer tick (`usb_poll()`, called from `timer_irq_handler()`) and fed into the same `drivers/input` dispatcher as the PS/2 keyboard and mouse.
+**Result:** Detected USB keyboards/mice are polled once per timer tick (`usb_poll()`, called from `timer_irq_handler()`) and fed into the same `drivers/input` dispatcher as the PS/2 keyboard and mouse. A detected Mass Storage device becomes available to the `usbinfo`/`usbread`/`usbwrite`/`mount` shell commands.
 
 ---
 
-### 21. Create Shell Process
+### 21. Network Stack
+
+**Function:** net_init()
+
+**Location:** net/net.c
+
+**Purpose:** Initialises the RTL8139 driver (if a controller is found) and the default static network configuration. See [`16_networking.md`](16_networking.md).
+
+**Why after enabling interrupts?** Same reason as xHCI — `net_poll()` and the driver's own reset sequence need the PIT already ticking.
+
+**Result:** `net_poll()` is polled once per timer tick, alongside `usb_poll()`; `ifconfig`/`ping`/`wget` become usable.
+
+---
+
+### 22. User/Group Database
+
+**Function:** users_init()
+
+**Location:** system/users/users.c
+
+**Purpose:** Parses `/etc/passwd` and `/etc/group` from LufiraFS into the in-memory user/group tables. Called after LufiraFS mounts successfully and before the shell process is created, so `whoami`/`su` work correctly from the very first prompt. See [`15_users_permissions.md`](15_users_permissions.md).
+
+---
+
+### 23. Create Shell Process
 
 **Function:** process_create()
 
@@ -607,6 +635,6 @@ For more details, refer to the source code in kernel.c and the individual subsys
 
 ---
 
-**Document Version:** 1.1  
-**Last Updated:** September 2026  
+**Document Version:** 1.2
+**Last Updated:** September 2026
 **Project:** LufiraOS
