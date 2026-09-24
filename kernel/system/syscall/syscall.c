@@ -17,9 +17,17 @@ extern lufirafs_t lufirafs;
 
 // Открывает filename через VFS, читает его целиком и заменяет им текущий
 // процесс через elf_exec_replace() (настоящий execve()). Используется и
-// шеллом (команда "exec"), и системным вызовом SYS_EXEC.
-int do_exec(const char *filename) {
-    if (!filename || !*filename) return -1;
+// шеллом (команда "exec"), и системным вызовом SYS_EXEC. argv/envp
+// передаются elf_exec_replace() как есть — ОНА забирает владение ими (см.
+// комментарий у её объявления в elf.h) и освобождает их на каждом СВОЁМ
+// пути отказа; но если do_exec() проваливается РАНЬШЕ вызова
+// elf_exec_replace() (файл не нашёлся/не прочитался/пуст), освобождать
+// их обязаны мы сами здесь — иначе они просто утекут.
+int do_exec(const char *filename, char *argv[], char *envp[]) {
+    if (!filename || !*filename) {
+        free_argv_envp(argv, envp);
+        return -1;
+    }
 
     // Проверка бита исполнения — VFS-пути всегда разрешаются от корня (см.
     // комментарий вверху lufirafs_vfs.c), поэтому резолвим так же, а не
@@ -30,6 +38,7 @@ int do_exec(const char *filename) {
             lufirafs_inode_t inode;
             if (lufirafs_read_inode(&lufirafs, ino, &inode) == 0 &&
                 !lufirafs_check_access(&inode, current_process->uid, current_process->gid, 0, 0, 1)) {
+                free_argv_envp(argv, envp);
                 return -1;
             }
         }
@@ -38,23 +47,27 @@ int do_exec(const char *filename) {
     int fd = vfs_open(filename, O_RDONLY);
     if (fd < 0) {
         printf("[EXEC] Failed to open %s\n", filename);
+        free_argv_envp(argv, envp);
         return -1;
     }
 
     file_t *f = current_fd_table->files[fd];
     if (!f || !f->inode) {
         vfs_close(fd);
+        free_argv_envp(argv, envp);
         return -1;
     }
     uint32_t size = f->inode->size;
     if (size == 0) {
         vfs_close(fd);
+        free_argv_envp(argv, envp);
         return -1;
     }
 
     uint8_t *buf = (uint8_t *)kmalloc(size);
     if (!buf) {
         vfs_close(fd);
+        free_argv_envp(argv, envp);
         return -1;
     }
 
@@ -62,12 +75,13 @@ int do_exec(const char *filename) {
     vfs_close(fd);
     if (bytes_read != (int)size) {
         kfree(buf);
+        free_argv_envp(argv, envp);
         return -1;
     }
 
-    // elf_exec_replace() освобождает buf при любом исходе (успех или
-    // неудача), поэтому здесь его повторно не освобождаем.
-    return elf_exec_replace(buf, size, filename);
+    // elf_exec_replace() освобождает и buf, и argv/envp при любом исходе
+    // (успех или неудача) — начиная с этой точки владение уже её.
+    return elf_exec_replace(buf, size, filename, argv, envp);
 }
 
 typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -98,6 +112,57 @@ static int64_t validate_user_string(uint64_t pml4_phys, uint64_t addr, uint64_t 
         if (*(const char*)cur == '\0') return (int64_t)i;
     }
     return -1;
+}
+
+// Копирует NUL-терминированный массив указателей на NUL-терминированные
+// строки (argv[]/envp[]-стиль) из ПОЛЬЗОВАТЕЛЬСКОЙ памяти ТЕКУЩЕГО
+// процесса в свежевыделенный kernel-side буфер (kmalloc на сам массив
+// указателей + отдельный kmalloc на каждую строку) — та самая форма,
+// которую dl_exec_replace()/free_argv_envp() (elf.h) ожидают/освобождают.
+// pml4_phys ОБЯЗАН быть активным CR3 (те же условия, что и у
+// validate_user_string() выше). array_ptr==0 трактуется как "аргументов
+// нет вовсе" (argc=0), а не ошибка — вызывающему (sys_exec) не нужно
+// отдельно различать "argv не передан" и "передан пустым". Возвращает
+// NULL при любой другой ошибке (плохой указатель, больше MAX_EXEC_ARGS
+// элементов, строка длиннее USER_STRING_MAX) — и тогда ничего не остаётся
+// частично выделенным.
+static char **copy_user_string_array(uint64_t pml4_phys, uint64_t array_ptr) {
+    if (array_ptr == 0) {
+        char **empty = (char **)kmalloc(sizeof(char*));
+        if (empty) empty[0] = NULL;
+        return empty;
+    }
+
+    if (!is_user_range_valid(pml4_phys, array_ptr, (uint64_t)(MAX_EXEC_ARGS + 1) * sizeof(uint64_t), 0))
+        return NULL;
+
+    const uint64_t *user_array = (const uint64_t *)array_ptr;
+    int count = 0;
+    while (count < MAX_EXEC_ARGS && user_array[count] != 0) count++;
+    if (count >= MAX_EXEC_ARGS) return NULL;   // терминатор не найден в разумных пределах
+
+    char **result = (char **)kmalloc(sizeof(char*) * (size_t)(count + 1));
+    if (!result) return NULL;
+    for (int i = 0; i <= count; i++) result[i] = NULL;
+
+    for (int i = 0; i < count; i++) {
+        int64_t slen = validate_user_string(pml4_phys, user_array[i], USER_STRING_MAX);
+        if (slen < 0) {
+            for (int j = 0; j < i; j++) kfree(result[j]);
+            kfree(result);
+            return NULL;
+        }
+        char *copy = (char *)kmalloc((size_t)slen + 1);
+        if (!copy) {
+            for (int j = 0; j < i; j++) kfree(result[j]);
+            kfree(result);
+            return NULL;
+        }
+        memcpy(copy, (const void *)user_array[i], (size_t)slen + 1);
+        result[i] = copy;
+    }
+
+    return result;
 }
 
 // ========== РЕАЛИЗАЦИИ СИСТЕМНЫХ ВЫЗОВОВ ==========
@@ -342,18 +407,25 @@ static uint64_t sys_munmap(uint64_t addr, uint64_t length,
 }
 
 // SYS_EXEC (11): filename_ptr, argv_ptr, envp_ptr
-static uint64_t sys_exec(uint64_t filename_ptr, uint64_t argv_ptr, 
+static uint64_t sys_exec(uint64_t filename_ptr, uint64_t argv_ptr,
                          uint64_t envp_ptr, uint64_t unused1, uint64_t unused2) {
-    (void)argv_ptr; (void)envp_ptr; (void)unused1; (void)unused2;
+    (void)unused1; (void)unused2;
     if (!current_process) return (uint64_t)-EFAULT;
     if (validate_user_string(current_process->page_table, filename_ptr, USER_STRING_MAX) < 0)
         return (uint64_t)-EFAULT;
     const char *filename = (const char *)filename_ptr;
 
-    // do_exec() -> elf_exec_replace() не возвращается по этому стеку
-    // вызовов при успехе (настоящий execve()) — возврат сюда возможен
-    // только при ошибке.
-    return (uint64_t)do_exec(filename);
+    char **argv = copy_user_string_array(current_process->page_table, argv_ptr);
+    if (!argv) return (uint64_t)-EFAULT;
+    char **envp = copy_user_string_array(current_process->page_table, envp_ptr);
+    if (!envp) { free_argv_envp(argv, NULL); return (uint64_t)-EFAULT; }
+
+    // do_exec() (и, за ней, elf_exec_replace()) забирает владение argv/envp
+    // и освобождает их сама на любом исходе — do_exec() -> elf_exec_replace()
+    // не возвращается по этому стеку вызовов при УСПЕХЕ (настоящий
+    // execve()), возврат сюда возможен только при ошибке, но освобождать
+    // их здесь всё равно НЕ нужно ни в каком случае (уже сделано внутри).
+    return (uint64_t)do_exec(filename, argv, envp);
 }
 
 // SYS_FORK (12) обрабатывается отдельно в syscall_handler() (см. ниже) —
@@ -571,6 +643,99 @@ static uint64_t sys_getgid(uint64_t u1, uint64_t u2, uint64_t u3, uint64_t u4, u
     return current_process->gid;
 }
 
+// SYS_MKDIR (23): path, mode (пока игнорируется — LufiraFS даёт новым
+// директориям фиксированный LUFIRAFS_DEFAULT_DIR_PERM; параметр принят
+// только ради совместимости сигнатуры с POSIX mkdir(2), как уже сделано у
+// SYS_OPEN-а mode). Резолвит path относительно current_process->cwd_inode —
+// тот же выбор, что уже сделан у SYS_CHDIR/SYS_CHMOD/SYS_CHOWN выше, а не у
+// более старых SYS_OPEN/SYS_EXEC (те всегда идут от корня, см. комментарий
+// вверху lufirafs_vfs.c). Эти четыре новых syscall'а раньше просто не
+// существовали — vfs_mkdir()/vfs_rmdir()/vfs_unlink()/vfs_readdir() (vfs.h)
+// уже были реализованы и рабочи, но не были доступны из ring3 ни одним
+// syscall'ом.
+static uint64_t sys_mkdir(uint64_t path_ptr, uint64_t mode, uint64_t unused1,
+                          uint64_t unused2, uint64_t unused3) {
+    (void)mode; (void)unused1; (void)unused2; (void)unused3;
+
+    if (!current_process) return (uint64_t)-EFAULT;
+    int64_t slen = validate_user_string(current_process->page_table, path_ptr, USER_STRING_MAX);
+    if (slen < 0) return (uint64_t)-EFAULT;
+    if (slen == 0) return (uint64_t)-EINVAL;
+    const char *path = (const char *)path_ptr;
+
+    // Право на создание записи проверяется на РОДИТЕЛЬСКОЙ директории
+    // (write+exec), не на самом path — его ещё не существует. Тот же
+    // паттерн, что уже используется в SYS_OPEN-е для O_CREAT выше.
+    uint32_t parent;
+    char leaf[LUFIRAFS_MAX_NAME + 1];
+    if (lufirafs_resolve_parent(&lufirafs, current_process->cwd_inode, path, &parent, leaf) != 0)
+        return (uint64_t)-ENOENT;
+
+    lufirafs_inode_t pinode;
+    if (lufirafs_read_inode(&lufirafs, parent, &pinode) != 0)
+        return (uint64_t)-ENOENT;
+    if (!lufirafs_check_access(&pinode, current_process->uid, current_process->gid, 0, 1, 1))
+        return (uint64_t)-EACCES;
+
+    int res = vfs_mkdir_at(current_process->cwd_inode, path);
+    return (res == 0) ? 0 : (uint64_t)-1;
+}
+
+// SYS_RMDIR (24) / SYS_UNLINK (25): path — LufiraFS не различает "удалить
+// файл" и "удалить директорию" на уровне lufirafs_unlink() (см.
+// vfs_rmdir()/vfs_unlink() в vfs.c — обе зовут один и тот же
+// vfs_lufirafs_unlink()), так что оба syscall'а идут через один и тот же
+// статический хелпер; типовая проверка (файл это или директория) —
+// не задача этого фундамента, см. план.
+static uint64_t sys_remove(uint64_t path_ptr, int is_rmdir) {
+    if (!current_process) return (uint64_t)-EFAULT;
+    int64_t slen = validate_user_string(current_process->page_table, path_ptr, USER_STRING_MAX);
+    if (slen < 0) return (uint64_t)-EFAULT;
+    if (slen == 0) return (uint64_t)-EINVAL;
+    const char *path = (const char *)path_ptr;
+
+    uint32_t parent;
+    char leaf[LUFIRAFS_MAX_NAME + 1];
+    if (lufirafs_resolve_parent(&lufirafs, current_process->cwd_inode, path, &parent, leaf) != 0)
+        return (uint64_t)-ENOENT;
+
+    lufirafs_inode_t pinode;
+    if (lufirafs_read_inode(&lufirafs, parent, &pinode) != 0)
+        return (uint64_t)-ENOENT;
+    if (!lufirafs_check_access(&pinode, current_process->uid, current_process->gid, 0, 1, 1))
+        return (uint64_t)-EACCES;
+
+    int res = is_rmdir ? vfs_rmdir_at(current_process->cwd_inode, path)
+                        : vfs_unlink_at(current_process->cwd_inode, path);
+    return (res == 0) ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_rmdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
+                          uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    return sys_remove(path_ptr, 1);
+}
+
+static uint64_t sys_unlink(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
+                           uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    return sys_remove(path_ptr, 0);
+}
+
+// SYS_READDIR (26): fd, buf_ptr (указывает на vfs_dirent_t в памяти
+// вызывающего). Права не проверяются отдельно — fd уже прошёл проверку
+// доступа на чтение при открытии (SYS_OPEN выше).
+static uint64_t sys_readdir(uint64_t fd, uint64_t buf_ptr, uint64_t unused1,
+                            uint64_t unused2, uint64_t unused3) {
+    (void)unused1; (void)unused2; (void)unused3;
+
+    if (!current_process ||
+        !is_user_range_valid(current_process->page_table, buf_ptr, sizeof(vfs_dirent_t), 1))
+        return (uint64_t)-EFAULT;
+
+    return (uint64_t)vfs_readdir((int)fd, (void *)buf_ptr);
+}
+
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
 
 static syscall_fn_t syscall_table[256] = {
@@ -597,6 +762,10 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_CHOWN]   = sys_chown,
     [SYS_GETUID]  = sys_getuid,
     [SYS_GETGID]  = sys_getgid,
+    [SYS_MKDIR]   = sys_mkdir,
+    [SYS_RMDIR]   = sys_rmdir,
+    [SYS_UNLINK]  = sys_unlink,
+    [SYS_READDIR] = sys_readdir,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
@@ -627,7 +796,7 @@ void syscall_init(void) {
     asm volatile("wrmsr" : : "c"(0xC0000080), "a"((uint32_t)efer),
                  "d"((uint32_t)(efer >> 32)));
     
-    DLOG("[SYSCALL] 19 system calls registered\n");
+    DLOG("[SYSCALL] 27 system calls registered\n");
 }
 
 // ========== ДИСПАТЧЕР ==========

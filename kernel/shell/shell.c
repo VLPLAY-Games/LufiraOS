@@ -224,8 +224,10 @@ void execute_command(void) {
         if (input_buffer_index <= 4) printf("\nUsage: cat <filename>\n");
         else command_cat(input_buffer + 4);
     } else if (strcmp(cmd_lower, "run") == 0) {
-        if (*args == '\0') printf("\nUsage: run <filename>\n");
-        else command_run(args);
+        // Сырой input_buffer (не лоуеркейснутый args) — аргументы программы
+        // регистрозависимы, как уже сделано для cat/write ниже.
+        if (*args == '\0') printf("\nUsage: run <filename> [args...]\n");
+        else command_run(input_buffer + 4);
     } else if (strcmp(cmd_lower, "exec") == 0) {
         if (*args == '\0') printf("\nUsage: exec <filename>\n");
         else command_exec(args);
@@ -259,16 +261,14 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "ps") == 0) {
         process_ps();
     } else if (strcmp(cmd_lower, "runbg") == 0) {
-        if (*args == '\0') printf("\nUsage: runbg <filename>\n");
-        else command_runbg(args);
+        // Сырой input_buffer — та же причина, что и у "run" выше.
+        if (*args == '\0') printf("\nUsage: runbg <filename> [args...]\n");
+        else command_runbg(input_buffer + 6);
     } else if (strcmp(cmd_lower, "kill") == 0) {
         command_kill(args);
     } else if (strcmp(cmd_lower, "wait") == 0) {
         if (*args == '\0') printf("\nUsage: wait <pid>\n");
         else command_wait(args);
-    } else if (strcmp(cmd_lower, "exec") == 0) {
-        if (*args == '\0') printf("\nUsage: exec <filename>\n");
-        else command_exec(args);
     } else if (strcmp(cmd_lower, "whoami") == 0) {
         command_whoami();
     } else if (strcmp(cmd_lower, "chmod") == 0) {

@@ -63,24 +63,29 @@ void command_ls(const char* flags) {
         p = skip_spaces(p + len);
     }
 
-    uint32_t target_inode = cwd_inode;
     if (path) {
-        uint32_t found;
-        if (lufirafs_lookup(&lufirafs, cwd_inode, path, &found) != 0) {
+        // vfs_lookup_at() возвращает "голый" inode_t (не через file_t/fd),
+        // так что освобождаем его вручную — private_data (build_inode(),
+        // lufirafs_vfs.c) и сам inode_t, а не через vfs_close().
+        inode_t *target = vfs_lookup_at(cwd_inode, path);
+        if (!target) {
             printf("\nls: cannot access '%s': No such file or directory\n", path);
             return;
         }
-        lufirafs_inode_t target;
-        lufirafs_read_inode(&lufirafs, found, &target);
-        if (target.mode != LUFIRAFS_MODE_DIR) {
+        int is_dir = (target->type == FT_DIRECTORY);
+        kfree(target->private_data);
+        kfree(target);
+        if (!is_dir) {
             printf("\n%s\n", path);
             return;
         }
-        target_inode = found;
     }
 
-    lufirafs_dir_t dir;
-    if (lufirafs_opendir(&lufirafs, target_inode, &dir) != 0) {
+    // "." — настоящая запись в каждом каталоге LufiraFS (см. mkfs_lufirafs.c/
+    // lufirafs_create()), поэтому открывает саму cwd_inode/path без
+    // отдельного "открыть по голому inode" примитива, которого у VFS нет.
+    int fd = vfs_open_at(cwd_inode, path ? path : ".", O_RDONLY);
+    if (fd < 0) {
         printf("\nCannot open directory\n");
         return;
     }
@@ -91,17 +96,23 @@ void command_ls(const char* flags) {
     ConsoleColor saved_fg = current_colors.fg_index;
 
     printf("\n");
-    lufirafs_dirent_t entry;
+    vfs_dirent_t entry;
     int count = 0;
-    while (lufirafs_readdir(&dir, &entry) == 0) {
-        lufirafs_inode_t inode;
-        lufirafs_read_inode(&lufirafs, entry.inode, &inode);
-        int is_dir = (inode.mode == LUFIRAFS_MODE_DIR);
+    while (vfs_readdir(fd, &entry) > 0) {
+        int is_dir = (entry.type == FT_DIRECTORY);
         int is_exec = !is_dir && is_executable_name(entry.name);
 
         set_foreground_color(is_dir ? LS_COLOR_DIR : (is_exec ? LS_COLOR_EXEC : LS_COLOR_FILE));
 
         if (long_fmt) {
+            // vfs_dirent_t не несёт perm/uid/gid/size — их всё ещё нужно
+            // читать напрямую из lufirafs_inode_t (нет vfs-уровневого
+            // stat()-примитива, см. план фундамента v0.7 — это осознанно
+            // оставленный остаток прямого обращения к LufiraFS, не то же
+            // самое, что миграция самой команды на VFS-слой).
+            lufirafs_inode_t inode;
+            lufirafs_read_inode(&lufirafs, entry.ino, &inode);
+
             char perm_str[11];
             perm_str[0] = is_dir ? 'd' : '-';
             perm_str[1] = (inode.perm & 0400) ? 'r' : '-';
@@ -130,6 +141,7 @@ void command_ls(const char* flags) {
             if (++count % 4 == 0) printf("\n");
         }
     }
+    vfs_close(fd);
     set_foreground_color(saved_fg);
     if (!long_fmt && count % 4 != 0) printf("\n");
 }
@@ -173,13 +185,13 @@ void command_mkdir(const char* name) {
     if (!name || !*name) return;
     if (!check_perm(cwd_inode, 0, 1, 1, "mkdir", name)) return;
 
-    uint32_t out_ino;
-    int res = lufirafs_create(&lufirafs, cwd_inode, name, LUFIRAFS_MODE_DIR,
-                               current_process->uid, current_process->gid,
-                               LUFIRAFS_DEFAULT_DIR_PERM, &out_ino);
+    // vfs_mkdir_at() (vfs.h/lufirafs_vfs.c) — тот же код, что теперь
+    // использует и SYS_MKDIR (syscall.c); возвращает сырой код
+    // lufirafs_create() без искажений (0/-1/-2/-3), как и раньше, и сам же
+    // синхронизирует диск на успехе.
+    int res = vfs_mkdir_at(cwd_inode, name);
     switch (res) {
         case 0:
-            lufirafs_sync(&lufirafs);
             printf("\nDirectory created: %s\n", name);
             break;
         case -1:
@@ -197,6 +209,81 @@ void command_mkdir(const char* name) {
     }
 }
 
+// Отдельная функция, а НЕ ветка внутри command_rm() — этот массив (~15KB)
+// иначе резервировался бы в СОБСТВЕННОМ прологе command_rm() безусловно,
+// на КАЖДЫЙ вызов, даже для обычного "rm <file>": этот проект собирается
+// без -O (см. вывод make), а без оптимизации компилятор считает размер
+// кадра функции по максимуму среди всех веток разом, а не переиспользует
+// стек по факту исполнения конкретной ветки. Именно это и обнаружилось
+// живьём: "rm foo" (однофайловый путь, эта гигантская ветка вообще не
+// исполняется) triple-fault'ил на переполнении 16KB ring0-стека шелла —
+// собственный кадр command_rm() с этим массивом внутри уже был на самой
+// грани, и добавленная миграцией на vfs_unlink_at()/lufirafs_resolve_parent()
+// (лишние ~400 байт кадров) её и переполнила. Вынос в отдельную функцию
+// означает, что этот кадр существует только пока реально исполняется "rm *".
+static void command_rm_all(void) {
+    lufirafs_dir_t dir;
+    if (lufirafs_opendir(&lufirafs, cwd_inode, &dir) != 0) {
+        printf("\nCannot open directory\n");
+        return;
+    }
+
+    // kmalloc, а не локальный массив на стеке — даже выделенная в СВОЮ
+    // функцию (см. комментарий у command_rm_all() в объявлении), эта
+    // таблица (256*60=15360 байт) всё ещё triple-fault'ила по факту
+    // РЕАЛЬНОГО вызова "rm *": её же собственный кадр (весь размер сразу,
+    // компиляция без -O) плюс глубина цепочки вызовов до
+    // lufirafs_resolve_parent() внутри цикла ниже вплотную подходят к
+    // 16KB ring0-стека шелла. В куче этого ограничения просто нет.
+    char (*names_to_delete)[LUFIRAFS_MAX_NAME + 1] =
+        (char (*)[LUFIRAFS_MAX_NAME + 1])kmalloc(256 * (LUFIRAFS_MAX_NAME + 1));
+    if (!names_to_delete) {
+        printf("\nrm: not enough memory\n");
+        return;
+    }
+
+    printf("\n");
+    lufirafs_dirent_t entry;
+    int name_count = 0;
+
+    while (lufirafs_readdir(&dir, &entry) == 0) {
+        if (strcmp(entry.name, ".") == 0 || strcmp(entry.name, "..") == 0)
+            continue;
+        if (name_count >= 256) break;
+        strcpy(names_to_delete[name_count], entry.name);
+        name_count++;
+    }
+
+    int removed_count = 0, error_count = 0;
+    for (int i = 0; i < name_count; i++) {
+        // vfs_unlink_at() синхронизирует диск на каждый успешный вызов сама
+        // (vfs_lufirafs_unlink_at(), lufirafs_vfs.c) — чуть больше отдельных
+        // sync'ов, чем раньше (один пакетный в конце), но функционально то
+        // же самое.
+        int res = vfs_unlink_at(cwd_inode, names_to_delete[i]);
+        switch (res) {
+            case 0:
+                printf("  Removed: %s\n", names_to_delete[i]);
+                removed_count++;
+                break;
+            case -2:
+                printf("  Skipped (not empty): %s\n", names_to_delete[i]);
+                error_count++;
+                break;
+            default:
+                printf("  Failed to remove: %s (error %d)\n", names_to_delete[i], res);
+                error_count++;
+                break;
+        }
+    }
+
+    printf("\nRemoved %d item(s)", removed_count);
+    if (error_count > 0) printf(", %d error(s)", error_count);
+    printf("\n");
+
+    kfree(names_to_delete);
+}
+
 void command_rm(const char* name) {
     if (!name || !*name) {
         printf("\nUsage: rm <name> or rm *\n");
@@ -208,55 +295,13 @@ void command_rm(const char* name) {
     if (!check_perm(cwd_inode, 0, 1, 1, "rm", name)) return;
 
     if (strcmp(name, "*") == 0) {
-        lufirafs_dir_t dir;
-        if (lufirafs_opendir(&lufirafs, cwd_inode, &dir) != 0) {
-            printf("\nCannot open directory\n");
-            return;
-        }
-
-        printf("\n");
-        lufirafs_dirent_t entry;
-        char names_to_delete[256][LUFIRAFS_MAX_NAME + 1];
-        int name_count = 0;
-
-        while (lufirafs_readdir(&dir, &entry) == 0) {
-            if (strcmp(entry.name, ".") == 0 || strcmp(entry.name, "..") == 0)
-                continue;
-            if (name_count >= 256) break;
-            strcpy(names_to_delete[name_count], entry.name);
-            name_count++;
-        }
-
-        int removed_count = 0, error_count = 0;
-        for (int i = 0; i < name_count; i++) {
-            int res = lufirafs_unlink(&lufirafs, cwd_inode, names_to_delete[i]);
-            switch (res) {
-                case 0:
-                    printf("  Removed: %s\n", names_to_delete[i]);
-                    removed_count++;
-                    break;
-                case -2:
-                    printf("  Skipped (not empty): %s\n", names_to_delete[i]);
-                    error_count++;
-                    break;
-                default:
-                    printf("  Failed to remove: %s (error %d)\n", names_to_delete[i], res);
-                    error_count++;
-                    break;
-            }
-        }
-        if (removed_count > 0) lufirafs_sync(&lufirafs);
-
-        printf("\nRemoved %d item(s)", removed_count);
-        if (error_count > 0) printf(", %d error(s)", error_count);
-        printf("\n");
+        command_rm_all();
         return;
     }
 
-    int res = lufirafs_unlink(&lufirafs, cwd_inode, name);
+    int res = vfs_unlink_at(cwd_inode, name);
     switch (res) {
         case 0:
-            lufirafs_sync(&lufirafs);
             printf("\nRemoved: %s\n", name);
             break;
         case -1:
@@ -281,13 +326,12 @@ void command_touch(const char* name) {
     }
     if (!check_perm(cwd_inode, 0, 1, 1, "touch", name)) return;
 
-    uint32_t out_ino;
-    int res = lufirafs_create(&lufirafs, cwd_inode, name, LUFIRAFS_MODE_FILE,
-                               current_process->uid, current_process->gid,
-                               LUFIRAFS_DEFAULT_FILE_PERM, &out_ino);
+    // vfs_create_at() теперь тоже отдаёт сырой код lufirafs_create() (см.
+    // комментарий у vfs_lufirafs_create_at() в lufirafs_vfs.c — раньше
+    // схлопывал всё в -2, что ломало бы switch ниже).
+    int res = vfs_create_at(cwd_inode, name);
     switch (res) {
         case 0:
-            lufirafs_sync(&lufirafs);
             printf("\nFile created: %s\n", name);
             break;
         case -1:
@@ -339,31 +383,73 @@ void command_cat(const char* filename) {
 }
 
 // run - запуск ELF файла
-void command_run(const char *filename) {
-    if (!filename || *filename == '\0') {
-        printf("\nUsage: run <filename>\n");
+// Разбивает raw по пробелам на до max_argv токенов ПРЯМО НА МЕСТЕ (см.
+// объявление в commands.h) — общая для command_run() ниже и
+// command_runbg() (kernel/shell/commands/system.c).
+int split_argv(char *raw, char *argv[], int max_argv) {
+    int count = 0;
+    char *p = raw;
+    while (*p && count < max_argv) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        argv[count++] = p;
+        while (*p && *p != ' ') p++;
+        if (*p) { *p = '\0'; p++; }
+    }
+    if (count < max_argv) argv[count] = NULL;
+    return count;
+}
+
+void command_run(const char *raw_args) {
+    if (!raw_args || *raw_args == '\0') {
+        printf("\nUsage: run <filename> [args...]\n");
         printf("Example: run hello.elf\n");
         return;
     }
+
+    // Копия — split_argv() режет строку на месте (пробелы -> '\0'), а
+    // raw_args обычно указывает прямо в сырой input_buffer шелла (см.
+    // shell.c), который лучше не портить.
+    char buf[INPUT_BUFFER_SIZE];
+    int i = 0;
+    for (; raw_args[i] && i < INPUT_BUFFER_SIZE - 1; i++) buf[i] = raw_args[i];
+    buf[i] = '\0';
+
+    char *argv[MAX_EXEC_ARGS + 1];
+    int argc = split_argv(buf, argv, MAX_EXEC_ARGS);
+    if (argc == 0) {
+        printf("\nUsage: run <filename> [args...]\n");
+        return;
+    }
+    const char *filename = argv[0];
 
     uint32_t ino;
     if (lufirafs_lookup(&lufirafs, cwd_inode, filename, &ino) != 0) {
         printf("\nFile not found: %s\n", filename);
         return;
     }
+    // Проверка прав — как и раньше, отдельно от самого открытия: vfs_open_at()
+    // (как и sys_open() в syscall.c) прав не проверяет вообще, это всегда
+    // забота вызывающего (см. комментарий у vfs_open() в vfs.c).
     if (!check_perm(ino, 0, 0, 1, "run", filename)) return;
 
-    lufirafs_inode_t inode;
-    lufirafs_read_inode(&lufirafs, ino, &inode);
-    uint32_t fsize = inode.size;
+    int fd = vfs_open_at(cwd_inode, filename, O_RDONLY);
+    if (fd < 0) {
+        printf("\nError opening file: %s\n", filename);
+        return;
+    }
+    file_t *f = current_fd_table->files[fd];
+    uint32_t fsize = (f && f->inode) ? f->inode->size : 0;
 
     uint8_t *file_buf = (uint8_t *)kmalloc(fsize);
     if (!file_buf) {
         printf("\nNot enough memory to load %s (%u bytes)\n", filename, fsize);
+        vfs_close(fd);
         return;
     }
 
-    int br = lufirafs_read(&lufirafs, ino, 0, file_buf, fsize);
+    int br = vfs_read(fd, file_buf, fsize);
+    vfs_close(fd);
     if (br <= 0) {
         printf("\nError reading file: %s\n", filename);
         kfree(file_buf);
@@ -373,7 +459,10 @@ void command_run(const char *filename) {
     DLOG("\nLoading ELF: %s (%u bytes)...\n", filename, fsize);
     klog("[SHELL] run '%s' (%u bytes)", filename, fsize);
 
-    if (elf_exec(file_buf, fsize, filename) == 0) {
+    // argv одалживается (elf_exec() его не освобождает, см. elf.h) —
+    // указывает на локальный buf[], которого достаточно на всё время
+    // синхронного вызова ниже.
+    if (elf_exec(file_buf, fsize, filename, argv, NULL) == 0) {
         printf("Process started!\n");
     }
 }
@@ -424,7 +513,24 @@ void command_exec(const char *filename) {
     for (int i = 0; i < leaf_len; i++) abs_path[pos++] = leaf[i];
     abs_path[pos] = '\0';
 
-    if (do_exec(abs_path) != 0) {
+    // do_exec()/elf_exec_replace() всегда забирают владение argv/envp и
+    // освобождают их сами (см. free_argv_envp() в elf.h) — синтезируем
+    // крошечный argv={имя программы, NULL}/envp={NULL} той же формы
+    // (kmalloc на массив + kmalloc на каждую строку), какую строит
+    // copy_user_string_array() (syscall.c) для настоящего SYS_EXEC. Без
+    // этого exec'нутая программа получила бы argc=0 — расходится с
+    // POSIX-соглашением, что argv[0] есть всегда (имя самой программы).
+    char **argv = (char **)kmalloc(sizeof(char *) * 2);
+    if (argv) {
+        size_t flen = strlen(filename) + 1;
+        argv[0] = (char *)kmalloc(flen);
+        if (argv[0]) memcpy(argv[0], filename, flen);
+        argv[1] = NULL;
+    }
+    char **envp = (char **)kmalloc(sizeof(char *));
+    if (envp) envp[0] = NULL;
+
+    if (do_exec(abs_path, argv, envp) != 0) {
         printf("\nExec failed: %s\n", filename);
     }
     // Не освобождаем буфер - он используется процессом
@@ -522,16 +628,23 @@ void command_cp(const char *args) {
     }
     if (!check_perm(src_ino, 1, 0, 0, "cp", src_name)) return;
 
-    lufirafs_inode_t src_inode;
-    lufirafs_read_inode(&lufirafs, src_ino, &src_inode);
+    int src_fd = vfs_open_at(cwd_inode, src_name, O_RDONLY);
+    if (src_fd < 0) {
+        printf("\ncp: error opening source file\n");
+        return;
+    }
+    file_t *sf = current_fd_table->files[src_fd];
+    uint32_t src_size = (sf && sf->inode) ? sf->inode->size : 0;
 
-    uint8_t *buf = (uint8_t *)kmalloc(src_inode.size > 0 ? src_inode.size : 1);
+    uint8_t *buf = (uint8_t *)kmalloc(src_size > 0 ? src_size : 1);
     if (!buf) {
         printf("\ncp: not enough memory\n");
+        vfs_close(src_fd);
         return;
     }
 
-    int br = lufirafs_read(&lufirafs, src_ino, 0, buf, src_inode.size);
+    int br = vfs_read(src_fd, buf, src_size);
+    vfs_close(src_fd);
     if (br < 0) {
         printf("\ncp: error reading source file\n");
         kfree(buf);
@@ -539,9 +652,11 @@ void command_cp(const char *args) {
     }
 
     // dst_name может содержать путь к каталогу (например "system/copy.txt") —
-    // lufirafs_create принимает только (родитель, простое имя), поэтому
-    // сначала разбиваем dst_name на родительский inode и конечное имя, а не
-    // передаём его целиком как имя записи в cwd_inode.
+    // resolve_parent разбивает его на родителя и простое имя ТОЛЬКО ради
+    // проверки прав ниже (какую именно — "создать новую запись" или
+    // "переписать существующую" — решает то, нашёлся ли dst_leaf); сам
+    // открывающий вызов дальше передаёт dst_name целиком, vfs_open_at()
+    // резолвит путь заново сам.
     uint32_t dst_parent;
     char dst_leaf[LUFIRAFS_MAX_NAME + 1];
     if (lufirafs_resolve_parent(&lufirafs, cwd_inode, dst_name, &dst_parent, dst_leaf) != 0) {
@@ -553,23 +668,27 @@ void command_cp(const char *args) {
     uint32_t dst_ino;
     if (lufirafs_lookup(&lufirafs, dst_parent, dst_leaf, &dst_ino) != 0) {
         if (!check_perm(dst_parent, 0, 1, 1, "cp", dst_name)) { kfree(buf); return; }
-        if (lufirafs_create(&lufirafs, dst_parent, dst_leaf, LUFIRAFS_MODE_FILE,
-                             current_process->uid, current_process->gid,
-                             LUFIRAFS_DEFAULT_FILE_PERM, &dst_ino) != 0) {
-            printf("\ncp: error creating destination file\n");
-            kfree(buf);
-            return;
-        }
     } else {
         if (!check_perm(dst_ino, 0, 1, 0, "cp", dst_name)) { kfree(buf); return; }
-        lufirafs_truncate(&lufirafs, dst_ino, 0);
     }
 
-    int result = lufirafs_write(&lufirafs, dst_ino, 0, buf, src_inode.size);
-    lufirafs_sync(&lufirafs);
+    // O_CREAT|O_TRUNC покрывает оба случая (нет записи / уже есть, надо
+    // перезаписать) одним вызовом — vfs_open_at() сама решает, какую из
+    // двух веток пройти (см. vfs_open_at()/vfs_lufirafs_open_at()).
+    int dst_fd = vfs_open_at(cwd_inode, dst_name, O_CREAT | O_WRONLY | O_TRUNC);
+    if (dst_fd < 0) {
+        printf("\ncp: error creating destination file\n");
+        kfree(buf);
+        return;
+    }
+
+    // lufirafs_file_write() синхронизирует диск сама на каждый успешный
+    // write (см. lufirafs_vfs.c) — отдельный lufirafs_sync() тут не нужен.
+    int result = vfs_write(dst_fd, buf, src_size);
+    vfs_close(dst_fd);
 
     if (result >= 0) {
-        printf("\nCopied '%s' to '%s' (%u bytes)\n", src_name, dst_name, src_inode.size);
+        printf("\nCopied '%s' to '%s' (%u bytes)\n", src_name, dst_name, src_size);
     } else {
         printf("\ncp: error writing destination file\n");
     }
@@ -635,16 +754,23 @@ void command_mv(const char *args) {
     if (!check_perm(src_ino, 1, 0, 0, "mv", src_name)) return;
     if (!check_perm(src_parent, 0, 1, 1, "mv", src_name)) return;
 
-    lufirafs_inode_t src_inode;
-    lufirafs_read_inode(&lufirafs, src_ino, &src_inode);
+    int src_fd = vfs_open_at(cwd_inode, src_name, O_RDONLY);
+    if (src_fd < 0) {
+        printf("\nmv: error opening source file\n");
+        return;
+    }
+    file_t *sf = current_fd_table->files[src_fd];
+    uint32_t src_size = (sf && sf->inode) ? sf->inode->size : 0;
 
-    uint8_t *buf = (uint8_t *)kmalloc(src_inode.size > 0 ? src_inode.size : 1);
+    uint8_t *buf = (uint8_t *)kmalloc(src_size > 0 ? src_size : 1);
     if (!buf) {
         printf("\nmv: not enough memory\n");
+        vfs_close(src_fd);
         return;
     }
 
-    int br = lufirafs_read(&lufirafs, src_ino, 0, buf, src_inode.size);
+    int br = vfs_read(src_fd, buf, src_size);
+    vfs_close(src_fd);
     if (br < 0) {
         printf("\nmv: error reading source file\n");
         kfree(buf);
@@ -662,23 +788,25 @@ void command_mv(const char *args) {
     uint32_t dst_ino;
     if (lufirafs_lookup(&lufirafs, dst_parent, dst_leaf, &dst_ino) != 0) {
         if (!check_perm(dst_parent, 0, 1, 1, "mv", dst_name)) { kfree(buf); return; }
-        if (lufirafs_create(&lufirafs, dst_parent, dst_leaf, LUFIRAFS_MODE_FILE,
-                             current_process->uid, current_process->gid,
-                             LUFIRAFS_DEFAULT_FILE_PERM, &dst_ino) != 0) {
-            printf("\nmv: error creating destination file\n");
-            kfree(buf);
-            return;
-        }
     } else {
         if (!check_perm(dst_ino, 0, 1, 0, "mv", dst_name)) { kfree(buf); return; }
-        lufirafs_truncate(&lufirafs, dst_ino, 0);
     }
-    lufirafs_write(&lufirafs, dst_ino, 0, buf, src_inode.size);
 
-    lufirafs_unlink(&lufirafs, src_parent, src_leaf);
-    lufirafs_sync(&lufirafs);
+    int dst_fd = vfs_open_at(cwd_inode, dst_name, O_CREAT | O_WRONLY | O_TRUNC);
+    if (dst_fd < 0) {
+        printf("\nmv: error creating destination file\n");
+        kfree(buf);
+        return;
+    }
+    vfs_write(dst_fd, buf, src_size);
+    vfs_close(dst_fd);
 
-    printf("\nMoved '%s' to '%s' (%u bytes)\n", src_name, dst_name, src_inode.size);
+    // vfs_unlink_at() резолвит src_name от cwd_inode заново само (тот же
+    // родитель/leaf, что уже нашли выше через lufirafs_resolve_parent()
+    // для проверки прав) — и само синхронизирует диск на успехе.
+    vfs_unlink_at(cwd_inode, src_name);
+
+    printf("\nMoved '%s' to '%s' (%u bytes)\n", src_name, dst_name, src_size);
 
     kfree(buf);
 }

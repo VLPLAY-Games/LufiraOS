@@ -493,10 +493,30 @@ static inline void elf_irq_restore(uint64_t flags) {
     asm volatile("push %0; popfq" : : "r"(flags) : "memory", "cc");
 }
 
+// Освобождает argv/envp, ПОЛУЧЕННЫЕ В СОБСТВЕННОСТЬ (каждая строка через
+// kmalloc + сам массив указателей через kmalloc — форма, которую строит
+// copy_user_string_array() в syscall.c). Не static — нужна и do_exec()
+// (syscall.c) для его собственных путей отказа ДО вызова
+// elf_exec_replace() (та берёт владение только с момента, когда её
+// реально вызвали). elf_exec()/elf_exec_background() argv/envp лишь
+// одалживают (см. комментарий у их деклараций в elf.h) и никогда это не
+// зовут.
+void free_argv_envp(char *argv[], char *envp[]) {
+    if (argv) {
+        for (int i = 0; argv[i]; i++) kfree(argv[i]);
+        kfree(argv);
+    }
+    if (envp) {
+        for (int i = 0; envp[i]; i++) kfree(envp[i]);
+        kfree(envp);
+    }
+}
+
 // Загрузка ELF и создание процесса
 static int elf_exec_internal(const void *elf_data,
                              uint64_t elf_size,
                              const char *name,
+                             char *const argv[], char *const envp[],
                              int background)
 {
     uint64_t irq_flags = elf_irq_save();
@@ -528,6 +548,28 @@ static int elf_exec_internal(const void *elf_data,
 
     // Устанавливаем точку входа
     proc->context.rip = (uint64_t)entry;
+
+    // Строим argv[]/envp[] на верху уже выделенного process_create()'ом
+    // пользовательского стека этого процесса — заменяет собой те самые
+    // "мёртвые" 3 qword'а, что process_create() туда до этого записал (их
+    // не читает никто, см. комментарий в crt0.S), новым содержимым, и
+    // кладёт РЕАЛЬНЫЙ RSP/argc/argv/envp в контекст процесса — см.
+    // build_exec_stack() (process.c) и комментарий у main()'а в crt0.S.
+    uint64_t new_rsp, argv_addr, envp_addr;
+    if (build_exec_stack(proc->page_table, proc->stack_base, argv, envp,
+                          &new_rsp, &argv_addr, &envp_addr) != 0) {
+        printf("[ELF] argv/envp too large\n");
+        proc->state = PROCESS_TERMINATED;
+        kfree((void*)elf_data);
+        elf_irq_restore(irq_flags);
+        return -1;
+    }
+    int argc = 0;
+    if (argv) while (argc < MAX_EXEC_ARGS && argv[argc]) argc++;
+    proc->context.rsp = new_rsp;
+    proc->context.rdi = (uint64_t)argc;
+    proc->context.rsi = argv_addr;
+    proc->context.rdx = envp_addr;
 
     // Освобождаем буфер ELF (данные уже скопированы)
     kfree((void*)elf_data);
@@ -563,24 +605,28 @@ static int elf_exec_internal(const void *elf_data,
 
 int elf_exec(const void *elf_data,
              uint64_t elf_size,
-             const char *name)
+             const char *name,
+             char *const argv[], char *const envp[])
 {
     return elf_exec_internal(
         elf_data,
         elf_size,
         name,
+        argv, envp,
         0
     );
 }
 
 int elf_exec_background(const void *elf_data,
                         uint64_t elf_size,
-                        const char *name)
+                        const char *name,
+                        char *const argv[], char *const envp[])
 {
     return elf_exec_internal(
         elf_data,
         elf_size,
         name,
+        argv, envp,
         1
     );
 }
@@ -590,7 +636,8 @@ int elf_exec_background(const void *elf_data,
 // процесс и переключаться на него. PID, ring0-стек и место процесса в
 // списке планировщика не меняются — управление просто больше никогда не
 // возвращается к старому коду процесса.
-int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
+int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name,
+                     char *argv[], char *envp[])
 {
     uint64_t irq_flags = elf_irq_save();
 
@@ -598,6 +645,7 @@ int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
     if (!proc) {
         elf_irq_restore(irq_flags);
         kfree((void*)elf_data);
+        free_argv_envp(argv, envp);
         return -1;
     }
 
@@ -606,6 +654,7 @@ int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
         printf("[ELF] exec: not enough memory for new address space\n");
         elf_irq_restore(irq_flags);
         kfree((void*)elf_data);
+        free_argv_envp(argv, envp);
         return -1;
     }
 
@@ -626,22 +675,32 @@ int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
         // они просто бросались здесь навсегда при каждой неудачной загрузке.
         free_user_address_space(new_pml4);
         elf_irq_restore(irq_flags);
+        free_argv_envp(argv, envp);
         return -1;
     }
 
-    // Готовим начальный кадр пользовательского стека новой программы —
-    // так же, как это делает process_create() для только что созданного
-    // процесса: возврат "с конца" main() уводит в process_exit().
-    //
-    // Пишем по физическому адресу, не переключая CR3 — see подробное
-    // объяснение у allocate_ring0_stack() в process.c: текущий стек
-    // вызовов (exec/do_exec/shell/...) лежит на пользовательском стеке
-    // ЭТОГО ЖЕ процесса, чей PML4-индекс в new_pml4 (свежесозданном
-    // адресном пространстве) ещё отсутствует.
-    uint64_t rsp = new_stack;
-    rsp -= 8;
-    uint64_t rsp_phys = get_physical_address_in_pml4(new_pml4, rsp);
-    *(uint64_t*)phys_to_virt(rsp_phys) = (uint64_t)process_exit;
+    // Строим argv[]/envp[] на верху НОВОГО пользовательского стека (см.
+    // build_exec_stack() в process.c и подробный комментарий у main()'а в
+    // crt0.S) — заменяет собой прежнюю запись одного "мёртвого" qword'а
+    // (process_exit), которую всё равно никто не читал (crt0._start не
+    // опирается ни на что ниже своего же, только что выровненного rsp).
+    // argv/envp здесь уже В СОБСТВЕННОСТИ этой функции (см. elf.h) —
+    // build_exec_stack() их только читает, освобождаем сами чуть ниже.
+    uint64_t rsp, argv_addr, envp_addr;
+    if (build_exec_stack(new_pml4, new_stack, argv, envp,
+                          &rsp, &argv_addr, &envp_addr) != 0) {
+        printf("[ELF] exec: argv/envp too large\n");
+        free_user_address_space(new_pml4);
+        elf_irq_restore(irq_flags);
+        free_argv_envp(argv, envp);
+        return -1;
+    }
+    int argc = 0;
+    if (argv) while (argc < MAX_EXEC_ARGS && argv[argc]) argc++;
+
+    // build_exec_stack() уже скопировал всё нужное в память НОВОГО
+    // процесса — kernel-side argv/envp дальше не нужны.
+    free_argv_envp(argv, envp);
 
     // Захватываем СТАРОЕ адресное пространство до того, как
     // process_commit_exec() перезапишет proc->page_table новым — иначе
@@ -664,6 +723,11 @@ int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name)
     ctx->rip = (uint64_t)entry;
     ctx->rflags = 0x202;
     ctx->cr3 = new_pml4;
+    // main(int argc, char **argv, char **envp) — см. подробное объяснение
+    // соглашения (регистры, не стек) у main()'а в crt0.S.
+    ctx->rdi = (uint64_t)argc;
+    ctx->rsi = argv_addr;
+    ctx->rdx = envp_addr;
 
     DLOG("[ELF] Process %u replaced with '%s' (entry=0x%lx)\n",
            proc->pid, name, (uint64_t)entry);

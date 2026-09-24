@@ -141,12 +141,27 @@ void command_echo(const char* args) {
     else printf("\n%s\n", args);
 }
 
-void command_runbg(const char *filename) {
-    if (!filename || *filename == '\0') {
-        printf("\nUsage: runbg <filename>\n");
+void command_runbg(const char *raw_args) {
+    if (!raw_args || *raw_args == '\0') {
+        printf("\nUsage: runbg <filename> [args...]\n");
         printf("Example: runbg hello.elf\n");
         return;
     }
+
+    // Копия — split_argv() режет на месте, raw_args обычно указывает прямо
+    // в сырой input_buffer шелла (см. shell.c).
+    char buf[INPUT_BUFFER_SIZE];
+    int i = 0;
+    for (; raw_args[i] && i < INPUT_BUFFER_SIZE - 1; i++) buf[i] = raw_args[i];
+    buf[i] = '\0';
+
+    char *argv[MAX_EXEC_ARGS + 1];
+    int argc = split_argv(buf, argv, MAX_EXEC_ARGS);
+    if (argc == 0) {
+        printf("\nUsage: runbg <filename> [args...]\n");
+        return;
+    }
+    const char *filename = argv[0];
 
     uint32_t ino;
     if (lufirafs_lookup(&lufirafs, cwd_inode, filename, &ino) != 0) {
@@ -178,7 +193,10 @@ void command_runbg(const char *filename) {
            fsize);
     klog("[SHELL] runbg '%s' (%u bytes)", filename, fsize);
 
-    int pid = elf_exec_background(file_buf, fsize, filename);
+    // argv одалживается (elf_exec_background() его не освобождает, см.
+    // elf.h) — указывает на локальный buf[], живой на всё время этого
+    // синхронного вызова.
+    int pid = elf_exec_background(file_buf, fsize, filename, argv, NULL);
     if (pid < 0) {
         printf("Failed to start background process\n");
         kfree(file_buf);

@@ -4,6 +4,15 @@
 int atoi(const char* str);
 int hex_to_int(const char* hex);
 
+// Разбивает raw (изменяемую строку, обычно локальную копию сырого
+// input_buffer — см. command_run()/command_runbg()) по пробелам на до
+// max_argv токенов, модифицируя raw НА МЕСТЕ (пробелы становятся '\0',
+// тот же приём, что execute_command() в shell.c уже делает для первого
+// разделения имя-команды/аргументы). argv[0] — первый токен (имя файла),
+// argv[1..count-1] — остальные, argv[count]=NULL (если count<max_argv).
+// Возвращает количество токенов (0, если raw пуст/только пробелы).
+int split_argv(char *raw, char *argv[], int max_argv);
+
 // Системные
 void command_help(void);
 void command_clear(void);

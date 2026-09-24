@@ -26,6 +26,10 @@
 #define SYS_CHOWN    20
 #define SYS_GETUID   21
 #define SYS_GETGID   22
+#define SYS_MKDIR    23
+#define SYS_RMDIR    24
+#define SYS_UNLINK   25
+#define SYS_READDIR  26
 
 // Флаги для sys_open
 #define O_RDONLY    0
@@ -84,5 +88,8 @@ uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1,
                          uint64_t frame_ptr);
 
 // Открывает filename и заменяет им текущий процесс (execve()-подобно).
-// Используется и SYS_EXEC, и командой shell "exec".
-int do_exec(const char *filename);
+// Используется и SYS_EXEC, и командой shell "exec". Забирает владение
+// argv/envp (форма "kmalloc на каждую строку + kmalloc на сам массив",
+// NULL допустим у обоих) — освобождает их сама на любом пути, успех или
+// нет (см. free_argv_envp() в elf.h).
+int do_exec(const char *filename, char *argv[], char *envp[]);

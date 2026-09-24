@@ -265,12 +265,15 @@ void _start(BootInfo* bi) {
         LOG_STATUS_LINE("Console", 1, "READY");
         LOG_STATUS_LINE("Keyboard", keyboard_is_initialized(), keyboard_is_initialized() ? "READY" : "NOT FOUND");
         LOG_STATUS_LINE("Mouse", mouse_is_initialized(), mouse_is_initialized() ? "READY" : "NOT FOUND");
-        LOG_STATUS_LINE("Syscalls", 1, "ACTIVE (18 syscalls)");
+        LOG_STATUS_LINE("Syscalls", 1, "ACTIVE (27 syscalls)");
         LOG_STATUS_LINE("VFS", 1, "READY");
 
         set_foreground_color(STATUS_READY);
         printf("  Memory manager: INITIALIZED\n");
-        printf("  Scheduler: COOPERATIVE\n");
+        // "COOPERATIVE" была стала ещё с v0.4 Phase 1 (см. план) — планировщик
+        // давно вытесняет ring3-код по таймеру (PREEMPT_TIMESLICE_TICKS,
+        // kernel/system/timer/pit.c), просто никто не поправил эту строку.
+        printf("  Scheduler: PREEMPTIVE\n");
         printf("  Process manager: INITIALIZED\n");
         printf("  LufiraFS: %s\n", lufirafs_mounted ? "MOUNTED" : "NOT MOUNTED");
         printf("  Developer mode: %s\n", devmode_is_enabled() ? "ON" : "OFF");

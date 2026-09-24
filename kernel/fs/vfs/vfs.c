@@ -14,6 +14,14 @@ extern int vfs_lufirafs_unlink(const char *path);
 extern inode_t* vfs_lufirafs_lookup(const char *path);
 extern inode_t* vfs_lufirafs_get_root(void);
 
+// _at()-варианты (lufirafs_vfs.c) — см. vfs_*_at() ниже и комментарий у их
+// объявлений в vfs.h.
+extern int vfs_lufirafs_open_at(uint32_t base_inode, const char *path, int flags);
+extern int vfs_lufirafs_create_at(uint32_t base_inode, const char *path);
+extern int vfs_lufirafs_mkdir_at(uint32_t base_inode, const char *path);
+extern int vfs_lufirafs_unlink_at(uint32_t base_inode, const char *path);
+extern inode_t* vfs_lufirafs_lookup_at(uint32_t base_inode, const char *path);
+
 /* ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ========== */
 
 file_t *file_table[MAX_FILES_SYSTEM] = {0};
@@ -392,6 +400,34 @@ int vfs_open(const char *path, int flags)
     return -1;
 }
 
+// То же самое, что vfs_open() выше, но разрешает path от base_inode, а не
+// всегда от корня (см. vfs.h). Логика O_CREAT/console — дословная копия
+// vfs_open()'а; отдельная функция, а не параметр по умолчанию у
+// vfs_open(), чтобы не трогать сигнатуру уже широко используемой функции.
+int vfs_open_at(uint32_t base_inode, const char *path, int flags)
+{
+    if (!path || !*path)
+        return -1;
+
+    int fd = vfs_lufirafs_open_at(base_inode, path, flags);
+    if (fd >= 0)
+        return fd;
+
+    if (flags & O_CREAT) {
+        if (vfs_lufirafs_create_at(base_inode, path) != 0)
+            return -1;
+        return vfs_lufirafs_open_at(base_inode, path, flags);
+    }
+
+    if (strcmp(path, "/dev/console") == 0 ||
+        strcmp(path, "console") == 0)
+    {
+        return vfs_open_console(flags);
+    }
+
+    return -1;
+}
+
 /* ========== ОСТАЛЬНЫЕ ОПЕРАЦИИ ========== */
 
 int vfs_close(int fd) {
@@ -597,6 +633,51 @@ inode_t* vfs_lookup(const char *path)
         return NULL;
 
     return vfs_lufirafs_lookup(path);
+}
+
+
+int vfs_mkdir_at(uint32_t base_inode, const char *path)
+{
+    if (!path || !*path)
+        return -1;
+
+    return vfs_lufirafs_mkdir_at(base_inode, path);
+}
+
+
+int vfs_rmdir_at(uint32_t base_inode, const char *path)
+{
+    if (!path || !*path)
+        return -1;
+
+    return vfs_lufirafs_unlink_at(base_inode, path);
+}
+
+
+int vfs_unlink_at(uint32_t base_inode, const char *path)
+{
+    if (!path || !*path)
+        return -1;
+
+    return vfs_lufirafs_unlink_at(base_inode, path);
+}
+
+
+int vfs_create_at(uint32_t base_inode, const char *path)
+{
+    if (!path || !*path)
+        return -1;
+
+    return vfs_lufirafs_create_at(base_inode, path);
+}
+
+
+inode_t* vfs_lookup_at(uint32_t base_inode, const char *path)
+{
+    if (!path || !*path)
+        return NULL;
+
+    return vfs_lufirafs_lookup_at(base_inode, path);
 }
 
 

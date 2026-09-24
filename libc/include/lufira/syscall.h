@@ -39,6 +39,10 @@
 #define SYS_CHOWN    20
 #define SYS_GETUID   21
 #define SYS_GETGID   22
+#define SYS_MKDIR    23
+#define SYS_RMDIR    24
+#define SYS_UNLINK   25
+#define SYS_READDIR  26
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -152,4 +156,34 @@ static inline long sys_getuid(void) {
 }
 static inline long sys_getgid(void) {
     return __syscall5(SYS_GETGID, 0, 0, 0, 0, 0);
+}
+static inline long sys_mkdir(const char *path, int mode) {
+    return __syscall5(SYS_MKDIR, (long)path, mode, 0, 0, 0);
+}
+static inline long sys_rmdir(const char *path) {
+    return __syscall5(SYS_RMDIR, (long)path, 0, 0, 0, 0);
+}
+static inline long sys_unlink(const char *path) {
+    return __syscall5(SYS_UNLINK, (long)path, 0, 0, 0, 0);
+}
+
+// Зеркалит vfs_dirent_t (kernel/fs/vfs/vfs.h) байт-в-байт: type — обычный
+// (не short/packed) C enum на этом тулчейне, то есть ровно 4 байта, как и
+// uint32_t здесь — тот же размер и раскладка полей, что видит ядро при
+// записи через sys_readdir().
+#define LUFIRA_FT_REGULAR   0
+#define LUFIRA_FT_DIRECTORY 1
+#define LUFIRA_FT_CHARDEV   2
+#define LUFIRA_FT_BLOCKDEV  3
+#define LUFIRA_FT_PIPE      4
+#define LUFIRA_FT_SYMLINK   5
+
+struct lufira_dirent {
+    uint32_t ino;
+    uint32_t type;
+    char name[256];
+};
+
+static inline long sys_readdir(int fd, struct lufira_dirent *out) {
+    return __syscall5(SYS_READDIR, fd, (long)out, 0, 0, 0);
 }

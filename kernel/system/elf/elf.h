@@ -68,12 +68,33 @@ typedef struct process process_t;
 int elf_validate(const elf64_header_t *header);
 void* elf_load_to_process(const void *elf_data, uint64_t elf_size, 
                           process_t *proc, const char *name);
-int elf_exec(const void *elf_data, uint64_t elf_size, const char *name);
+// argv/envp — NULL-терминированные массивы (как у execve()); передайте
+// NULL, если аргументов/окружения нет вовсе (эквивалентно argc=0). Обе
+// функции только ЧИТАЮТ argv/envp (build_exec_stack(), process.c) —
+// владение и освобождение остаётся за вызывающим, в отличие от elf_data
+// (тот всегда освобождается этой функцией, успех или нет).
+int elf_exec(const void *elf_data, uint64_t elf_size, const char *name,
+             char *const argv[], char *const envp[]);
 int elf_exec_background(const void *elf_data,
                         uint64_t elf_size,
-                        const char *name);
+                        const char *name,
+                        char *const argv[], char *const envp[]);
 
 // Настоящий execve(): заменяет ТЕКУЩИЙ процесс образом новой программы
 // вместо создания нового процесса (используется командой shell "exec" и
-// системным вызовом SYS_EXEC).
-int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name);
+// системным вызовом SYS_EXEC). В отличие от elf_exec()/elf_exec_background()
+// выше, ЗАБИРАЕТ владение argv/envp — освобождает их сама (kfree каждой
+// строки + самого массива) в КАЖДОМ пути возврата, тем же соглашением, что
+// уже действует для elf_data. Вызывающий обязан передавать сюда только
+// куски, полученные через kmalloc (свежую строку на каждый элемент +
+// отдельный kmalloc на сам массив указателей) — например,
+// copy_user_string_array() в syscall.c.
+int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name,
+                     char *argv[], char *envp[]);
+
+// Освобождает argv[]/envp[] в форме "kmalloc на каждую строку + kmalloc на
+// сам массив" (то, что строит copy_user_string_array() в syscall.c) — оба
+// параметра можно передавать NULL. Экспортирована из elf.c для do_exec()
+// (syscall.c), у которого есть собственные пути отказа ДО того, как
+// владение реально перейдёт к elf_exec_replace().
+void free_argv_envp(char *argv[], char *envp[]);

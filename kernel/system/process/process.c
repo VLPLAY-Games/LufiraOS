@@ -411,6 +411,100 @@ static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys, uint32_t pi
     return stack_virt + size;
 }
 
+// Пишет len байт из src (kernel-side) по виртуальному адресу dst_virt В
+// АДРЕСНОМ ПРОСТРАНСТВЕ pml4_phys, БЕЗ переключения CR3 — постранично,
+// через get_physical_address_in_pml4()+phys_to_virt(), тот же приём, что
+// уже используется в elf_load_to_process() (elf.c) для копирования
+// сегментов ELF. dst_virt не обязан быть выровнен на границу страницы (и
+// в build_exec_stack() ниже почти никогда не бывает).
+static void write_user_bytes(uint64_t pml4_phys, uint64_t dst_virt,
+                              const void *src, uint64_t len) {
+    const uint8_t *s = (const uint8_t*)src;
+    uint64_t remaining = len;
+    while (remaining > 0) {
+        uint64_t page_off = dst_virt & (PAGE_SIZE - 1);
+        uint64_t chunk = PAGE_SIZE - page_off;
+        if (chunk > remaining) chunk = remaining;
+
+        // get_physical_address_in_pml4() уже возвращает ТОЧНЫЙ (не
+        // выровненный по странице) физический адрес байта dst_virt — сам
+        // page_off внутри него уже учтён (см. её реализацию в paging.c:
+        // "+ (virt & 0xFFF)"). Прибавлять page_off ЕЩЁ РАЗ здесь — как это
+        // корректно делает elf_load_to_process() в elf.c, но там phys
+        // берётся от ВЫРОВНЕННОГО page_va, а не от точного dst_virt —
+        // было бы двойным учётом смещения и уводило бы запись мимо цели.
+        uint64_t phys = get_physical_address_in_pml4(pml4_phys, dst_virt);
+        if (phys) memcpy(phys_to_virt(phys), s, chunk);
+
+        dst_virt += chunk;
+        s += chunk;
+        remaining -= chunk;
+    }
+}
+
+static void write_user_u64(uint64_t pml4_phys, uint64_t dst_virt, uint64_t val) {
+    write_user_bytes(pml4_phys, dst_virt, &val, sizeof(val));
+}
+
+int build_exec_stack(uint64_t new_pml4, uint64_t stack_top,
+                      char *const argv[], char *const envp[],
+                      uint64_t *rsp_out, uint64_t *argv_out, uint64_t *envp_out)
+{
+    int argc = 0, envc = 0;
+    if (argv) while (argc < MAX_EXEC_ARGS && argv[argc]) argc++;
+    if (envp) while (envc < MAX_EXEC_ARGS && envp[envc]) envc++;
+    if ((argv && argv[argc]) || (envp && envp[envc]))
+        return -1;   // не нашли NULL-терминатор в разумных пределах
+
+    uint64_t total = (uint64_t)(argc + 1) * 8 + (uint64_t)(envc + 1) * 8;
+    for (int i = 0; i < argc; i++) total += strlen(argv[i]) + 1;
+    for (int i = 0; i < envc; i++) total += strlen(envp[i]) + 1;
+    if (total > MAX_EXEC_ARGS_BYTES)
+        return -1;
+
+    uint64_t argv_ptrs[MAX_EXEC_ARGS];
+    uint64_t envp_ptrs[MAX_EXEC_ARGS];
+    uint64_t cursor = stack_top;
+
+    // Сами строки — куда угодно ниже stack_top, порядок не важен (только
+    // порядок ЗАПИСИ указателей в массивы ниже сохраняет argv[i]/envp[i]).
+    for (int i = 0; i < argc; i++) {
+        uint64_t len = strlen(argv[i]) + 1;
+        cursor -= len;
+        write_user_bytes(new_pml4, cursor, argv[i], len);
+        argv_ptrs[i] = cursor;
+    }
+    for (int i = 0; i < envc; i++) {
+        uint64_t len = strlen(envp[i]) + 1;
+        cursor -= len;
+        write_user_bytes(new_pml4, cursor, envp[i], len);
+        envp_ptrs[i] = cursor;
+    }
+
+    // envp[] — NULL-терминированный массив указателей.
+    cursor -= 8;
+    write_user_u64(new_pml4, cursor, 0);
+    for (int i = envc - 1; i >= 0; i--) {
+        cursor -= 8;
+        write_user_u64(new_pml4, cursor, envp_ptrs[i]);
+    }
+    uint64_t envp_addr = cursor;
+
+    // argv[] — то же самое.
+    cursor -= 8;
+    write_user_u64(new_pml4, cursor, 0);
+    for (int i = argc - 1; i >= 0; i--) {
+        cursor -= 8;
+        write_user_u64(new_pml4, cursor, argv_ptrs[i]);
+    }
+    uint64_t argv_addr = cursor;
+
+    *rsp_out = cursor;
+    *argv_out = argv_addr;
+    *envp_out = envp_addr;
+    return 0;
+}
+
 process_t* process_create(const char *name, void (*entry)(void)) {
     irq_disable();
 

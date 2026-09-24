@@ -42,6 +42,21 @@ int vfs_lufirafs_unlink(const char *path);
 inode_t *vfs_lufirafs_lookup(const char *path);
 inode_t *vfs_lufirafs_get_root(void);
 
+// _at()-варианты — то же самое, но разрешают путь от ПРОИЗВОЛЬНОГО
+// стартового inode, а не всегда от корня. lufirafs_lookup()/
+// lufirafs_resolve_parent() (lufirafs.c) уже умеют это сами (абсолютный
+// путь всё равно уходит от корня — см. их собственный код); не хватало
+// только того, чтобы это НЕ было захардкожено здесь на
+// lufirafs.sb.root_inode. Используются новыми cwd-relative syscall'ами
+// (SYS_MKDIR/RMDIR/UNLINK, syscall.c) — старые root-relative функции ниже
+// остаются как есть (используются SYS_OPEN/SYS_EXEC), просто становятся
+// тонкими обёртками над этими.
+int vfs_lufirafs_open_at(uint32_t base_inode, const char *path, int flags);
+int vfs_lufirafs_create_at(uint32_t base_inode, const char *path);
+int vfs_lufirafs_mkdir_at(uint32_t base_inode, const char *path);
+int vfs_lufirafs_unlink_at(uint32_t base_inode, const char *path);
+inode_t *vfs_lufirafs_lookup_at(uint32_t base_inode, const char *path);
+
 /* ========== ОПЕРАЦИИ ДЛЯ ФАЙЛОВ ========== */
 
 static int lufirafs_file_read(file_t *f, void *buf, size_t count) {
@@ -148,11 +163,15 @@ static inode_t *build_inode(uint32_t ino) {
 /* ========== VFS OPEN ========== */
 
 int vfs_open_lufirafs(const char *path, int flags) {
+    return vfs_lufirafs_open_at(lufirafs.sb.root_inode, path, flags);
+}
+
+int vfs_lufirafs_open_at(uint32_t base_inode, const char *path, int flags) {
     if (!path || !*path) return -1;
     if (path[0] == '/' && path[1] == 'd' && path[2] == 'e' && path[3] == 'v') return -1;
 
     uint32_t ino;
-    if (lufirafs_lookup(&lufirafs, lufirafs.sb.root_inode, path, &ino) != 0) return -1;
+    if (lufirafs_lookup(&lufirafs, base_inode, path, &ino) != 0) return -1;
 
     int fd = alloc_fd();
     if (fd < 0) return -1;
@@ -253,11 +272,15 @@ static int lufirafs_inode_remove(inode_t *dir, const char *name) {
 /* ========== path-level VFS хелперы ========== */
 
 int vfs_lufirafs_create(const char *path) {
+    return vfs_lufirafs_create_at(lufirafs.sb.root_inode, path);
+}
+
+int vfs_lufirafs_create_at(uint32_t base_inode, const char *path) {
     if (!path || !*path) return -1;
 
     uint32_t parent;
     char name[LUFIRAFS_MAX_NAME + 1];
-    if (lufirafs_resolve_parent(&lufirafs, lufirafs.sb.root_inode, path, &parent, name) != 0) return -1;
+    if (lufirafs_resolve_parent(&lufirafs, base_inode, path, &parent, name) != 0) return -1;
 
     uint32_t out_ino;
     uint32_t uid = current_process ? current_process->uid : 0;
@@ -265,16 +288,27 @@ int vfs_lufirafs_create(const char *path) {
     int res = lufirafs_create(&lufirafs, parent, name, LUFIRAFS_MODE_FILE,
                                uid, gid, LUFIRAFS_DEFAULT_FILE_PERM, &out_ino);
     if (res == 0) lufirafs_sync(&lufirafs);
-    return (res == 0) ? 0 : -2;
+    // Раньше здесь любая неудача схлопывалась в -2 ("нет свободного inode"),
+    // теряя различие между "уже существует"/"нет inode"/"нет места" — то же
+    // сырое значение lufirafs_create() уже отдаёт наружу _mkdir_at() ниже.
+    // Единственный вызывающий, которому это было важно (vfs_open()'s
+    // O_CREAT в vfs.c), проверяет только "== 0"/"!= 0" и не смотрит на
+    // конкретное значение — передавать raw-код ему безопасно, а
+    // command_touch() (filesystem.c) теперь как раз на него полагается.
+    return res;
 }
 
 int vfs_lufirafs_mkdir(const char *path) {
+    return vfs_lufirafs_mkdir_at(lufirafs.sb.root_inode, path);
+}
+
+int vfs_lufirafs_mkdir_at(uint32_t base_inode, const char *path) {
     if (!path || !*path) return -1;
     if (strcmp(path, "/") == 0) return -2;
 
     uint32_t parent;
     char name[LUFIRAFS_MAX_NAME + 1];
-    if (lufirafs_resolve_parent(&lufirafs, lufirafs.sb.root_inode, path, &parent, name) != 0) return -1;
+    if (lufirafs_resolve_parent(&lufirafs, base_inode, path, &parent, name) != 0) return -1;
 
     uint32_t out_ino;
     uint32_t uid = current_process ? current_process->uid : 0;
@@ -286,12 +320,16 @@ int vfs_lufirafs_mkdir(const char *path) {
 }
 
 int vfs_lufirafs_unlink(const char *path) {
+    return vfs_lufirafs_unlink_at(lufirafs.sb.root_inode, path);
+}
+
+int vfs_lufirafs_unlink_at(uint32_t base_inode, const char *path) {
     if (!path || !*path) return -1;
     if (strcmp(path, "/") == 0) return -2;
 
     uint32_t parent;
     char name[LUFIRAFS_MAX_NAME + 1];
-    if (lufirafs_resolve_parent(&lufirafs, lufirafs.sb.root_inode, path, &parent, name) != 0) return -1;
+    if (lufirafs_resolve_parent(&lufirafs, base_inode, path, &parent, name) != 0) return -1;
 
     int res = lufirafs_unlink(&lufirafs, parent, name);
     if (res == 0) lufirafs_sync(&lufirafs);
@@ -299,10 +337,14 @@ int vfs_lufirafs_unlink(const char *path) {
 }
 
 inode_t *vfs_lufirafs_lookup(const char *path) {
+    return vfs_lufirafs_lookup_at(lufirafs.sb.root_inode, path);
+}
+
+inode_t *vfs_lufirafs_lookup_at(uint32_t base_inode, const char *path) {
     if (!path || !*path) return NULL;
 
     uint32_t ino;
-    if (lufirafs_lookup(&lufirafs, lufirafs.sb.root_inode, path, &ino) != 0) return NULL;
+    if (lufirafs_lookup(&lufirafs, base_inode, path, &ino) != 0) return NULL;
     return build_inode(ino);
 }
 

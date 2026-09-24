@@ -102,6 +102,18 @@ file_t* alloc_file(void);
 int vfs_create(const char *path);
 int vfs_unlink(const char *path);
 
+// _at()-варианты open/mkdir/rmdir/unlink/create/lookup: разрешают path от
+// ПРОИЗВОЛЬНОГО base_inode (например, cwd вызывающего процесса), а не
+// всегда от корня LufiraFS, как это жёстко делают функции выше (см.
+// комментарий вверху lufirafs_vfs.c). Нужны новым cwd-relative syscall'ам
+// (SYS_MKDIR/RMDIR/UNLINK, kernel/system/syscall/syscall.c).
+int vfs_open_at(uint32_t base_inode, const char *path, int flags);
+int vfs_mkdir_at(uint32_t base_inode, const char *path);
+int vfs_rmdir_at(uint32_t base_inode, const char *path);
+int vfs_unlink_at(uint32_t base_inode, const char *path);
+int vfs_create_at(uint32_t base_inode, const char *path);
+inode_t* vfs_lookup_at(uint32_t base_inode, const char *path);
+
 // Заполняет table стандартными stdin/stdout/stderr (консоль). Используется
 // для инициализации fd-таблицы КАЖДОГО процесса (см. process_create()),
 // а не только самого первого — раньше в системе была только ОДНА реальная
