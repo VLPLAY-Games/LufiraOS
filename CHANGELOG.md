@@ -2,6 +2,68 @@
 
 All notable changes to LufiraOS are documented in this file.
 
+## [0.6.5] - 2026-09-29
+
+### Added
+
+- **`free`** — physical RAM and kernel-heap usage, backed by a live free-page
+  counter in `pmm.c` and a heap free-list walk.
+- **`cpuload`** — system-wide load plus per-process breakdown, sampled via
+  `process_sleep()` (a real yield, not a `pit_wait_ms()` spin).
+- **`-help`/`--help`/`-h`** — uniform convention for every command that takes
+  arguments, documented in `commands.h` for future v0.7 packages.
+- **`passwd`** — change a password after `useradd` (previously impossible);
+  root can reset anyone's.
+- **Password salt + double-round FNV-1a.** `/etc/passwd` grows a salt field.
+  Explicitly non-cryptographic — defeats a precomputed rainbow table, not a
+  determined attacker. No inode format change.
+- **Boot warning** if root's password is still the seeded default (`toor`).
+- **Real PATH fallback** — unknown commands resolve as `/bin/<name>`
+  (root-relative); non-executable files are correctly reported as unknown.
+- **`/bin`**, root:root 0755 — non-root writes blocked by the existing
+  permission system, no new enforcement code.
+- **64 KB USB MSD batched transfers** — up to 128 blocks per SCSI command via
+  a new contiguous DMA buffer; `mount` of an 8 MB image drops from ~16384
+  transfers to ~128.
+- **Multi-mount** — up to two named mounts (`mount 0 a`), each with its own
+  `fat_fs_t`, plus `mountls`/`mountcat`/`mountwrite <name>`.
+
+### Fixed
+
+- **TCP retransmission** — stop-and-wait, every segment (SYN/FIN included)
+  retained until cumulatively ACKed; fixed 300 ms RTO, 5 retries, then clean
+  close instead of a hang. `tcp_send()` is now blocking. No adaptive RTT or
+  backoff — enough for QEMU's SLIRP link.
+- USB MSD transfer-ring wraparound re-verified at the new batched sizes.
+
+### Changed
+
+- Confirmed the `vfs_*_at()` migration of shell filesystem commands was
+  already complete; only PATH resolution was missing.
+- **Shell dispatcher table refactor deferred to v0.7** — pure
+  behavior-preserving change with risk across every command at once.
+- **VFS routing into mounts deferred.** Full integration required reviving
+  ~1100 lines of never-compiled `fat_vfs.c`; shipped named mounts instead.
+- `tools/seed/passwd` updated for the salt field. Version bumped to 0.6.5.
+
+### Known Issues
+
+- **No VFS routing into mounts** — `cd` into a mount point does not work; use
+  `mountls`/`mountcat`/`mountwrite`.
+- **Shell dispatcher is still a 52-branch if/else chain** — deferred to v0.7.
+- **Shell is still kernel-native ring 0** (`shell_task`, synchronous console
+  input from the keyboard IRQ). Moving it to a ring-3 ELF needs a real
+  console subsystem (blocking read, Ctrl+C as a signal, cursor/color
+  syscalls) — planned as a separate final sub-stage of v0.7.
+- **Password hashing is non-cryptographic** (salted double-round FNV-1a,
+  best-effort salt).
+- **TCP uses a single fixed RTO** (300 ms, 5 retries), no adaptive RTT or
+  backoff.
+- **`mount` reads the whole device into RAM up front** (8 MB cap);
+  `MAX_MOUNTS = 2` — each image lives in the 16 MB kernel heap.
+- All prior Known Issues still apply (no DNS/DHCP, no congestion control,
+  real hardware untested, no package manager yet).
+
 ## [0.6.0] - 2026-09-24
 
 Covers all changes since `v0.3.1` (commit `7da5d8a`, "fixes 1", inclusive).
