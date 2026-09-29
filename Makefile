@@ -32,28 +32,7 @@ BMAGENTA:= \033[95m
 BCYAN   := \033[96m
 BWHITE  := \033[97m
 
-# Держите в синхроне с LUFIRAFS_ESP_SIZE в
-# kernel/fs/lufirafs/lufirafs_format.h — расхождение означает, что mkfs
-# отформатирует не тот регион диска, который потом читает ядро.
-DISK_TOTAL_SIZE := 16777216
-LUFIRAFS_ESP_SIZE := 4194304
-LUFIRAFS_REGION_SIZE := $(shell echo $$(($(DISK_TOTAL_SIZE) - $(LUFIRAFS_ESP_SIZE))))
-
-# Все тестовые ELF-бинарники (test/*.elf, test/c/*.elf) — грузятся в /tests
-# на образе ТОЛЬКО в debug-сборке (см. цель debug), обычный run их не видит.
-TEST_ELF_FILES := $(shell find test -name '*.elf' 2>/dev/null)
-
-# Userspace-программы (v0.7 план, этап 1: du/df/free/cpuload вынесены из
-# ядра в отдельные ELF поверх SYS_STATFS/SYS_MEMINFO/SYS_CPULOAD) — грузятся
-# в /bin на КАЖДОЙ сборке (в отличие от TEST_ELF_FILES выше), подхватываются
-# уже существующим PATH-fallback'ом шелла (run_external_command(),
-# kernel/shell/shell.c). Собраны вручную тем же gcc/ld-конвейером, что
-# test/c/*.elf (см. libc/crt0.S) — бинарники закоммичены как есть, никакого
-# отдельного Makefile-правила для их пересборки не заводится (тот же
-# принцип, что уже у TEST_ELF_FILES).
-USERSPACE_ELF_FILES := $(shell find userspace -name '*.elf' 2>/dev/null)
-
-REQUIRED_TOOLS := gcc ld objcopy nm truncate dd mkfs.fat mmd mcopy qemu-system-x86_64
+REQUIRED_TOOLS := gcc ld objcopy nm truncate
 $(foreach tool,$(REQUIRED_TOOLS),\
     $(if $(shell which $(tool) 2>/dev/null),,\
         $(error "Required tool '$(tool)' not found in PATH")))
@@ -164,12 +143,11 @@ KERNEL_C_OBJECTS := $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/kernel/%.o,$(KERNE
 KERNEL_ASM_OBJECTS := $(patsubst $(KERNEL_DIR)/%.S,$(BUILD_DIR)/kernel/%.o,$(KERNEL_ASM_SOURCES))
 KERNEL_OBJECTS := $(KERNEL_C_OBJECTS) $(KERNEL_ASM_OBJECTS)
 
-.PHONY: all bootloader kernel disk run clean check-disk debug info quick
-all: $(BUILD_DIR)/disk.img
+.PHONY: all bootloader kernel clean info quick
+all: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin
 
 bootloader: $(BUILD_DIR)/BOOTX64.EFI
 kernel: $(BUILD_DIR)/kernel.bin
-disk: $(BUILD_DIR)/disk.img
 
 $(BUILD_DIR)/boot/%.o: $(BOOTLOADER_DIR)/%.c
 	@printf "  $(BCYAN)CC$(RESET)      $(DIM)$<$(RESET)\n"
@@ -207,119 +185,6 @@ $(BUILD_DIR)/kernel.bin: $(BUILD_DIR)/kernel.elf
 	printf "  $(BOLD)$(BGREEN)✓ Kernel runtime size:$(RESET) $(BWHITE)%s bytes$(RESET)\n" "$$KERNEL_SIZE"; \
 	printf "  $(BOLD)$(BGREEN)✓ Kernel end:$(RESET)          $(BWHITE)0x%s$(RESET)\n" "$$KERNEL_END"; \
 	truncate -s $$KERNEL_SIZE $@
-
-$(BUILD_DIR)/mkfs_lufirafs: tools/mkfs_lufirafs.c $(KERNEL_DIR)/fs/lufirafs/lufirafs_format.h
-	@printf "  $(BCYAN)CC(host)$(RESET) $(DIM)$<$(RESET)\n"
-	$(CC) -O2 -Wall -o $@ $<
-
-# Хостовый упаковщик .lpg (v0.7 план, этап 2) — не входит в зависимости
-# disk.img (установка пакетов ВО ВРЕМЯ сборки образа — это этап 4), собран
-# отдельным правилом для ручной проверки ("make build/lpg_pack").
-$(BUILD_DIR)/lpg_pack: tools/lpg_pack.c tools/lpg_format.h
-	@printf "  $(BCYAN)CC(host)$(RESET) $(DIM)$<$(RESET)\n"
-	$(CC) -O2 -Wall -Wextra -o $@ $<
-
-# Диск — два региона без таблицы разделов (bootloader грузит в RAM ВЕСЬ
-# диск одним куском начиная с LBA 0, см. LUFIRAFS_ESP_SIZE в
-# lufirafs_format.h): первые LUFIRAFS_ESP_SIZE байт — маленький ESP,
-# отформатированный как FAT12 обычными mtools (UEFI-прошивка умеет читать
-# файлы ТОЛЬКО с FAT — это требование спецификации, не наш выбор), в нём
-# лежит ИСКЛЮЧИТЕЛЬНО сам бутлоадер и kernel.bin. Всё остальное место —
-# LufiraFS, наша собственная файловая система для всех пользовательских
-# данных, размечает и наполняет её $(BUILD_DIR)/mkfs_lufirafs.
-#
-# Общий размер образа (16МБ) сохранён от прежней FAT-only схемы — в своё
-# время меньший образ (512КБ) реально исчерпывал место при сборке
-# (mcopy проваливался с ошибкой), 16МБ даёт кратный запас.
-$(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin $(BUILD_DIR)/mkfs_lufirafs
-	@printf "\n$(BOLD)$(BCYAN)═══ Creating disk image ═══$(RESET)\n"
-	@rm -f $@ $(BUILD_DIR)/esp.img
-	dd if=/dev/zero of=$@ bs=1024 count=$$(($(DISK_TOTAL_SIZE) / 1024)) status=none
-	@printf "  $(BBLUE)▸$(RESET) Building ESP (FAT12, bootloader + kernel.bin only)...\n"
-	dd if=/dev/zero of=$(BUILD_DIR)/esp.img bs=1024 count=$$(($(LUFIRAFS_ESP_SIZE) / 1024)) status=none
-	mkfs.fat -F 12 -S 512 $(BUILD_DIR)/esp.img
-	mmd -i $(BUILD_DIR)/esp.img ::/EFI
-	mmd -i $(BUILD_DIR)/esp.img ::/EFI/BOOT
-	mcopy -i $(BUILD_DIR)/esp.img $(BUILD_DIR)/BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
-	mcopy -i $(BUILD_DIR)/esp.img $(BUILD_DIR)/kernel.bin ::/kernel.bin
-	dd if=$(BUILD_DIR)/esp.img of=$@ conv=notrunc status=none
-	rm -f $(BUILD_DIR)/esp.img
-	@printf "  $(BBLUE)▸$(RESET) Formatting LufiraFS region...\n"
-	$(BUILD_DIR)/mkfs_lufirafs format $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE)
-	@printf "  $(BBLUE)▸$(RESET) Populating initial files...\n"
-	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /system
-	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /logs
-	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /etc
-	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /bin
-	$(foreach f,$(USERSPACE_ELF_FILES),$(BUILD_DIR)/mkfs_lufirafs put $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(f) /bin/$(notdir $(f)) 755;)
-	echo "Hello from LufiraOS!" > $(BUILD_DIR)/readme.txt
-	$(BUILD_DIR)/mkfs_lufirafs put $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(BUILD_DIR)/readme.txt /readme.txt
-	rm -f $(BUILD_DIR)/readme.txt
-	$(BUILD_DIR)/mkfs_lufirafs put $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) tools/seed/passwd /etc/passwd
-	$(BUILD_DIR)/mkfs_lufirafs put $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) tools/seed/group /etc/group
-	sync
-	@printf "$(BOLD)$(BGREEN)═══ Disk image created: $(BWHITE)$@$(RESET)\n\n"
-
-check-disk: $(BUILD_DIR)/disk.img
-	@printf "\n$(BOLD)$(BCYAN)═══ Checking disk image ═══$(RESET)\n"
-	@file $@
-	@printf "\n"
-
-run: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs
-	@printf "\n$(BOLD)$(BMAGENTA)═══ Starting QEMU ═══$(RESET)\n\n"
-	qemu-system-x86_64 \
-		-bios /usr/share/ovmf/OVMF.fd \
-		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
-		-m 128M \
-		-netdev user,id=net0 -device rtl8139,netdev=net0 \
-		-machine pcspk-audiodev=audio \
-		-audiodev driver=alsa,id=audio \
-		-device AC97,audiodev=audio \
-		-device qemu-xhci \
-		-device usb-kbd \
-		-device usb-mouse \
-		-serial stdio
-
-# Пустой образ виртуальной USB-флешки для тестирования Mass Storage
-# (kernel/drivers/usb/xhci.c) — обычный сырой блочный файл без файловой
-# системы, драйвер работает только на уровне блоков (см. план).
-$(BUILD_DIR)/usbstick.img:
-	dd if=/dev/zero of=$@ bs=1024 count=8192 status=none
-
-debug: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs
-	echo "1" > $(BUILD_DIR)/devmode.flag
-	$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(BUILD_DIR)/devmode.flag /system/devmode.flag
-	rm -f $(BUILD_DIR)/devmode.flag
-	@printf "  $(BBLUE)▸$(RESET) Staging test binaries into /tests...\n"
-	$(BUILD_DIR)/mkfs_lufirafs mkdir $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /tests
-	$(foreach f,$(TEST_ELF_FILES),$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(f) /tests/$(notdir $(f));)
-	@printf "  $(BBLUE)▸$(RESET) Building usbstick.img (8 MB, FAT12)...\n"
-	rm -f $(BUILD_DIR)/usbstick.img
-	dd if=/dev/zero of=$(BUILD_DIR)/usbstick.img bs=1024 count=8192 status=none
-	mkfs.fat -F 12 $(BUILD_DIR)/usbstick.img
-	mmd -i $(BUILD_DIR)/usbstick.img ::/TESTDIR
-	echo "Hello from batched USB MSD test" > /tmp/hosttest.txt
-	mcopy -i $(BUILD_DIR)/usbstick.img /tmp/hosttest.txt ::/HOSTTEST.TXT
-	mdir -i $(BUILD_DIR)/usbstick.img ::/
-	qemu-system-x86_64 \
-		-bios /usr/share/ovmf/OVMF.fd \
-		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
-		-m 256M -netdev user,id=net0 -device rtl8139,netdev=net0 -serial stdio -no-reboot -no-shutdown \
-		-device qemu-xhci,id=xhci -device usb-kbd -device usb-mouse \
-		-drive if=none,id=usbstick,file=$(BUILD_DIR)/usbstick.img,format=raw \
-		-device usb-storage,bus=xhci.0,drive=usbstick \
-		-d int,cpu_reset,guest_errors -D $(BUILD_DIR)/qemu_debug.log
-
-monitor: $(BUILD_DIR)/disk.img $(BUILD_DIR)/usbstick.img
-	qemu-system-x86_64 \
-		-bios /usr/share/ovmf/OVMF.fd \
-		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
-		-m 256M -netdev user,id=net0 -device rtl8139,netdev=net0 -serial stdio \
-		-device qemu-xhci,id=xhci -device usb-kbd -device usb-mouse \
-		-drive if=none,id=usbstick,file=$(BUILD_DIR)/usbstick.img,format=raw \
-		-device usb-storage,bus=xhci.0,drive=usbstick \
-		-monitor telnet:127.0.0.1:4444,server,nowait \
-		-no-reboot -no-shutdown
 
 clean:
 	@printf "\n$(BOLD)$(BRED)═══ Cleaning ═══$(RESET)\n"
