@@ -233,6 +233,7 @@ $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin $(BUILD_
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /system
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /logs
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /etc
+	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /bin
 	echo "Hello from LufiraOS!" > $(BUILD_DIR)/readme.txt
 	$(BUILD_DIR)/mkfs_lufirafs put $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(BUILD_DIR)/readme.txt /readme.txt
 	rm -f $(BUILD_DIR)/readme.txt

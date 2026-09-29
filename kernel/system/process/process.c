@@ -333,6 +333,7 @@ void process_init(void) {
     // root, а не мусором из kmalloc().
     idle_process->uid = 0;
     idle_process->gid = 0;
+    idle_process->cpu_ticks = 0;
 
     const char *name = "idle";
     for (int i = 0; i < 31 && name[i]; i++) idle_process->name[i] = name[i];
@@ -351,6 +352,10 @@ void process_init(void) {
     current_fd_table = &idle_process->fd_table;
 
     DLOG("[PROCESS] Process manager initialized\n");
+}
+
+int process_is_idle(void) {
+    return current_process == idle_process;
 }
 
 // Тоже без переключения CR3 (см. подробное объяснение у
@@ -528,6 +533,7 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     // новый процесс всегда как root независимо от того, кто его запустил.
     proc->uid = current_process ? current_process->uid : 0;
     proc->gid = current_process ? current_process->gid : 0;
+    proc->cpu_ticks = 0;
 
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
     proc->name[31] = '\0';
@@ -1363,6 +1369,10 @@ uint64_t process_fork(uint64_t frame_ptr) {
     // этой реализации, так что тут просто копия, без exec-time пересчёта).
     child->uid = parent->uid;
     child->gid = parent->gid;
+
+    // Ребёнок ещё ни разу не выполнялся — собственный счётчик CPU-тиков
+    // начинается с нуля, а не копируется у родителя.
+    child->cpu_ticks = 0;
 
     // Контекст ребёнка продолжает выполнение сразу после syscall в
     // родителе (тот же rip/rflags/callee-saved регистры), но с rax=0 — это

@@ -34,3 +34,6 @@ void pmm_free_page(uint64_t phys);
 
 // Общее количество физических страниц (для paging)
 uint64_t pmm_get_total_pages(void);
+
+// Количество занятых страниц прямо сейчас (для команды free)
+uint64_t pmm_get_used_pages(void);

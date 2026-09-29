@@ -28,6 +28,11 @@ void pit_set_frequency(uint32_t hz);
 uint64_t pit_get_ticks(void);
 void timer_irq_handler(interrupt_frame_t *frame);
 
+// Для команды cpuload: суммарные тики и тики, отданные idle-процессу
+// (т.е. системе реально нечего было делать) — см. timer_irq_handler().
+uint64_t pit_get_total_ticks(void);
+uint64_t pit_get_idle_ticks(void);
+
 // Блокирующая (через hlt) задержка на ms миллисекунд, откалиброванная по
 // реальным тикам PIT. Требует, чтобы прерывания уже были разрешены.
 void pit_wait_ms(uint32_t ms);

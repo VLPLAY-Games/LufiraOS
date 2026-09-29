@@ -10,13 +10,15 @@
 #include "system/elf/elf.h"
 #include "system/devmode/devmode.h"
 #include "system/klog/klog.h"
+#include "system/mm/pmm.h"
+#include "system/timer/pit.h"
 
 extern lufirafs_t lufirafs;
 // cwd_inode теперь макрос поверх current_process->cwd_inode (shell.h).
 
 // help, clear, reboot, shutdown, version, status, trap
 void command_help(void) {
-    printf("\nAvailable commands:\n");
+    printf("\nAvailable commands (any command taking arguments also accepts -help/--help/-h):\n");
     printf(" help - Show this help\n");
     printf(" clear - Clear screen\n");
     printf(" reboot - Reboot system\n");
@@ -25,6 +27,8 @@ void command_help(void) {
     printf(" echo - Echo text back\n");
     printf(" history - Show command history\n");
     printf(" status - Show interrupt/CPU status\n");
+    printf(" free - Show physical RAM and kernel heap usage\n");
+    printf(" cpuload - Show system and per-process CPU load\n");
     printf(" trap - Trigger test exceptions\n");
     printf(" color - Set console colors or reset\n");
     printf(" colors - Show available colors\n");
@@ -61,12 +65,17 @@ void command_help(void) {
     printf(" useradd <user> <password> [group] - Create a new user\n");
     printf(" groupadd <group> - Create a new group\n");
     printf(" su <user> [password] - Switch user\n");
+    printf(" passwd <new-password> - Change your own password\n");
+    printf(" passwd -u <user> <new-password> - Reset another user's password (root only)\n");
     printf("\nUSB mass storage:\n");
     printf(" usbinfo - List detected USB storage devices\n");
     printf(" usbread <device> <lba> - Read one block, show hex dump\n");
     printf(" usbwrite <device> <lba> <text> - Write text into one block\n");
-    printf(" mount <device> - Mount a FAT filesystem from a USB device\n");
-    printf(" unmount - Unmount the currently mounted filesystem\n");
+    printf(" mount [device] [name] - Mount a FAT filesystem from a USB device (no args lists mounts)\n");
+    printf(" unmount [name] - Unmount a filesystem (up to 2 concurrent mounts)\n");
+    printf(" mountls <name> - List root directory of a mount\n");
+    printf(" mountcat <name> <file> - Print a file's contents from a mount's root\n");
+    printf(" mountwrite <name> <file> <text> - Create/overwrite a file in a mount's root\n");
     printf("\nNetwork:\n");
     printf(" ifconfig [ip] [netmask] [gateway] - Show/set network configuration\n");
     printf(" ping <ip> [count] - Send ICMP echo requests\n");
@@ -124,6 +133,84 @@ void command_status(void) {
     printf(" Interrupt Flag: %s\n", interrupts_enabled() ? "SET" : "CLEAR");
     printf(" Interrupts: %s\n", cpu_interrupts_active() ? "ENABLED" : "DISABLED");
     printf(" CPU Test: trap int3 / ud2 / pf\n");
+}
+
+// free — физическая RAM (pmm.c) + куча ядра (heap.c). Оба источника уже
+// ведут живой учёт (used_pages/heap-список), тут только форматированный вывод.
+void command_free(void) {
+    uint64_t total_pages = pmm_get_total_pages();
+    uint64_t used_pages = pmm_get_used_pages();
+    uint64_t free_pages = total_pages - used_pages;
+
+    uint64_t heap_used, heap_free;
+    heap_get_stats(&heap_used, &heap_free);
+
+    // Примечание: kernel-printf (console.c) не понимает ширину поля
+    // (%8lu и т.п.) — неизвестный спецификатор просто пропускается, а
+    // хвост печатается как обычный текст. Поэтому тут только %lu/%s без
+    // выравнивания в столбец.
+    printf("\nRAM:  %lu MB total, %lu MB used, %lu MB free\n",
+           (unsigned long)(total_pages * 4 / 1024),
+           (unsigned long)(used_pages * 4 / 1024),
+           (unsigned long)(free_pages * 4 / 1024));
+    printf("Heap: %lu KB total, %lu KB used, %lu KB free\n",
+           (unsigned long)((heap_used + heap_free) / 1024),
+           (unsigned long)(heap_used / 1024),
+           (unsigned long)(heap_free / 1024));
+}
+
+// cpuload — сэмплирует idle/total тики PIT (pit.c) и cpu_ticks каждого
+// процесса (process.h) до и после короткой паузы, печатает загрузку в
+// процентах системно и по процессам. Пауза сделана через process_sleep()
+// (настоящий yield планировщику — см. process.c), а НЕ через pit_wait_ms()
+// (busy-hlt-цикл): pit_wait_ms() не меняет current_process, так что сам
+// шелл всё это время оставался бы "текущим" и cpuload намеряла бы себе же
+// 100% просто за факт своего собственного ожидания.
+#define CPULOAD_SAMPLE_MS 500
+void command_cpuload(void) {
+    uint64_t total_before = pit_get_total_ticks();
+    uint64_t idle_before = pit_get_idle_ticks();
+
+    uint32_t pids[MAX_PROCESSES];
+    uint64_t ticks_before[MAX_PROCESSES];
+    int count = 0;
+
+    process_t *p = process_list;
+    if (p) {
+        process_t *start = p;
+        do {
+            if (count < MAX_PROCESSES) {
+                pids[count] = p->pid;
+                ticks_before[count] = p->cpu_ticks;
+                count++;
+            }
+            p = p->next;
+        } while (p && p != start);
+    }
+
+    process_sleep(CPULOAD_SAMPLE_MS);
+
+    uint64_t total_delta = pit_get_total_ticks() - total_before;
+    uint64_t idle_delta = pit_get_idle_ticks() - idle_before;
+    uint32_t system_pct = total_delta ? (uint32_t)(100 - (idle_delta * 100 / total_delta)) : 0;
+
+    printf("\nCPU load: %u%%\n\n", system_pct);
+    printf("PID  NAME  CPU%%\n");
+
+    p = process_list;
+    if (p) {
+        process_t *start = p;
+        do {
+            uint64_t before = 0;
+            for (int i = 0; i < count; i++) {
+                if (pids[i] == p->pid) { before = ticks_before[i]; break; }
+            }
+            uint64_t delta = p->cpu_ticks - before;
+            uint32_t pct = total_delta ? (uint32_t)(delta * 100 / total_delta) : 0;
+            printf("%u  %s  %u%%\n", p->pid, p->name, pct);
+            p = p->next;
+        } while (p && p != start);
+    }
 }
 
 void command_trap(void) {

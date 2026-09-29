@@ -131,6 +131,13 @@ typedef struct process {
     // ring3) всегда идут через context_switch() — это уже не "холодный
     // старт", а возобновление прерванного вызова.
     int first_run;
+    // Число тиков PIT (10мс каждый), в течение которых этот процесс был
+    // current_process при срабатывании timer_irq_handler() — грубая, но
+    // достаточная для команды cpuload оценка доли CPU (см. pit.c). Не
+    // сбрасывается при exec() (реальный ps/top тоже считают CPU-время
+    // накопительно по PID через exec), но начинается заново у ребёнка
+    // fork() (см. process_fork()) — он ещё не выполнялся.
+    uint64_t cpu_ticks;
     struct process *next;
 } process_t;
 
@@ -220,6 +227,11 @@ extern void context_enter_ring3(process_context_t *old_context,
 
 extern process_t *current_process;
 extern process_t *process_list;
+
+// 1, если current_process — служебный idle-процесс (crn3-цикл hlt, pid=0),
+// т.е. в данный момент реально никакая другая работа не выполняется.
+// Используется timer_irq_handler() (pit.c) для подсчёта простоя под cpuload.
+int process_is_idle(void);
 
 // PID процесса, который сейчас "на переднем плане" (запущен через run/exec
 // из шелла) — цель для Ctrl+C. 0 = нет такого (обычные background-процессы

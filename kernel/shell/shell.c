@@ -4,6 +4,9 @@
 #include "drivers/keyboard/keyboard.h"
 #include "system/process/process.h"
 #include "system/users/users.h"
+#include "fs/lufirafs/lufirafs.h"
+
+extern lufirafs_t lufirafs;
 
 #define HISTORY_SIZE 20
 
@@ -163,6 +166,67 @@ void shell_handle_down_arrow(void) {
         }
     }
 }
+// PATH-подобный fallback для builtin'ов, которых нет в 52-ветвевом
+// диспетчере ниже: ищет /bin/<cmd_name> (а если нет — /bin/<cmd_name>.elf,
+// как называется большинство .elf-программ в этой ОС), и если файл там
+// есть и у вызывающего есть право на исполнение, запускает его через
+// command_run() — тот же путь, что и обычный "run <file>". Это единственный
+// механизм, на который будет опираться будущий пакетный менеджер (v0.7),
+// чтобы установленные пакеты вели себя неотличимо от builtin-команд; сам
+// пакетный менеджер (.lpg/dlpg) тут не реализуется, только точка входа.
+// cmd_name — уже NUL-терминированное имя команды (cmd_lower ДО расщепления
+// args, т.е. cmd_lower и args из одного и того же массива — см. вызов
+// ниже), args — уже лоуеркейснутый хвост строки в ТОМ ЖЕ массиве, так что
+// (args - cmd_name) — это байтовое смещение в исходном (регистрозависимом)
+// input_buffer, где реально начинаются аргументы программы.
+static void run_external_command(const char *cmd_name, const char *args) {
+    char bin_path[80];
+    int plen = 0;
+    const char *prefix = "/bin/";
+    while (prefix[plen] && plen < (int)sizeof(bin_path) - 1) { bin_path[plen] = prefix[plen]; plen++; }
+    int j = 0;
+    while (cmd_name[j] && plen < (int)sizeof(bin_path) - 1) { bin_path[plen++] = cmd_name[j++]; }
+    bin_path[plen] = '\0';
+
+    uint32_t bin_ino;
+    int found = (lufirafs_lookup(&lufirafs, lufirafs.sb.root_inode, bin_path, &bin_ino) == 0);
+    if (!found) {
+        const char *suffix = ".elf";
+        int elen = plen;
+        int k = 0;
+        while (suffix[k] && elen < (int)sizeof(bin_path) - 1) { bin_path[elen++] = suffix[k++]; }
+        bin_path[elen] = '\0';
+        found = (lufirafs_lookup(&lufirafs, lufirafs.sb.root_inode, bin_path, &bin_ino) == 0);
+    }
+
+    if (!found) {
+        printf("\nUnknown command: %s\n", input_buffer);
+        printf("Type 'help' for available commands.\n");
+        return;
+    }
+
+    lufirafs_inode_t inode;
+    if (lufirafs_read_inode(&lufirafs, bin_ino, &inode) != 0 ||
+        !lufirafs_check_access(&inode, current_process->uid, current_process->gid, 0, 0, 1)) {
+        printf("\n%s: permission denied\n", input_buffer);
+        return;
+    }
+
+    int arg_offset = (int)(args - cmd_name);
+    const char *raw_args = input_buffer + arg_offset;
+
+    char run_line[INPUT_BUFFER_SIZE + 16];
+    int rp = 0;
+    for (int m = 0; bin_path[m] && rp < (int)sizeof(run_line) - 1; m++) run_line[rp++] = bin_path[m];
+    if (*raw_args) {
+        run_line[rp++] = ' ';
+        for (int m = 0; raw_args[m] && rp < (int)sizeof(run_line) - 1; m++) run_line[rp++] = raw_args[m];
+    }
+    run_line[rp] = '\0';
+
+    command_run(run_line);
+}
+
 void execute_command(void) {
     if (input_buffer_index == 0) return;
     char cmd_lower[INPUT_BUFFER_SIZE];
@@ -203,118 +267,147 @@ void execute_command(void) {
         command_echo(args);
     } else if (strcmp(cmd_lower, "status") == 0) {
         command_status();
+    } else if (strcmp(cmd_lower, "free") == 0) {
+        command_free();
+    } else if (strcmp(cmd_lower, "cpuload") == 0) {
+        command_cpuload();
     } else if (strcmp(cmd_lower, "trap") == 0) {
         command_trap();
     } else if (strcmp(cmd_lower, "pwd") == 0) {
         printf("\n%s\n", cwd_path);
     } else if (strcmp(cmd_lower, "cd") == 0) {
         // Без аргумента — домашний каталог (см. command_cd()), а не ошибка.
-        command_cd(*args ? args : NULL);
+        if (is_help_flag(args)) printf("\nUsage: cd [directory]\nNo argument goes to your home directory.\n");
+        else command_cd(*args ? args : NULL);
     } else if (strcmp(cmd_lower, "ls") == 0) {
-        command_ls(args);
+        if (is_help_flag(args)) printf("\nUsage: ls [-l] [path]\n -l shows permissions/owner/size\n");
+        else command_ls(args);
     } else if (strcmp(cmd_lower, "mkdir") == 0) {
-        if (*args == '\0') printf("\nUsage: mkdir <name>\n");
+        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: mkdir <name>\n");
         else command_mkdir(args);
     } else if (strcmp(cmd_lower, "rm") == 0) {
-        if (*args == '\0') printf("\nUsage: rm <name>\n");
+        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: rm <name>\n");
         else command_rm(args);
     } else if (strcmp(cmd_lower, "touch") == 0) {
-        command_touch(args);
+        if (is_help_flag(args)) printf("\nUsage: touch <filename>\n");
+        else command_touch(args);
     } else if (strcmp(cmd_lower, "cat") == 0) {
-        if (input_buffer_index <= 4) printf("\nUsage: cat <filename>\n");
+        if (input_buffer_index <= 4 || is_help_flag(args)) printf("\nUsage: cat <filename>\n");
         else command_cat(input_buffer + 4);
     } else if (strcmp(cmd_lower, "run") == 0) {
         // Сырой input_buffer (не лоуеркейснутый args) — аргументы программы
         // регистрозависимы, как уже сделано для cat/write ниже.
-        if (*args == '\0') printf("\nUsage: run <filename> [args...]\n");
+        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: run <filename> [args...]\n");
         else command_run(input_buffer + 4);
     } else if (strcmp(cmd_lower, "exec") == 0) {
-        if (*args == '\0') printf("\nUsage: exec <filename>\n");
+        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: exec <filename>\n");
         else command_exec(args);
     } else if (strcmp(cmd_lower, "write") == 0) {
-        if (input_buffer_index <= 6) printf("\nUsage: write <filename> <text>\n");
+        if (input_buffer_index <= 6 || is_help_flag(args)) printf("\nUsage: write <filename> <text>\n");
         else command_write(input_buffer + 6);
     } else if (strcmp(cmd_lower, "cp") == 0) {
-        if (*args == '\0') printf("\nUsage: cp <source> <destination>\n");
+        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: cp <source> <destination>\n");
         else command_cp(args);
     } else if (strcmp(cmd_lower, "mv") == 0) {
-        if (*args == '\0') printf("\nUsage: mv <source> <destination>\n");
+        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: mv <source> <destination>\n");
         else command_mv(args);
     } else if (strcmp(cmd_lower, "rename") == 0) {
-        if (*args == '\0') printf("\nUsage: rename <old> <new>\n");
+        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: rename <old> <new>\n");
         else command_rename(args);
     } else if (strcmp(cmd_lower, "df") == 0) {
         command_df();
     } else if (strcmp(cmd_lower, "du") == 0) {
-        command_du(args);
+        if (is_help_flag(args)) printf("\nUsage: du [path]\n");
+        else command_du(args);
     } else if (strcmp(cmd_lower, "devmode") == 0) {
+        // command_devmode() сама печатает Usage на любой нераспознанный
+        // аргумент, включая -help — отдельная проверка тут не нужна.
         command_devmode(args);
     } else if (strcmp(cmd_lower, "edit") == 0) {
-        if (*args == '\0') printf("\nUsage: edit <filename> <text>\n");
+        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: edit <filename> <text>\n");
         else command_edit(args);
     } else if (strcmp(cmd_lower, "beep") == 0) {
         command_beep();
     } else if (strcmp(cmd_lower, "mixer") == 0) {
-        command_mixer(args); 
+        // command_mixer() сама печатает "Usage: mixer [0-100]" на любой
+        // нечисловой аргумент, включая -help — отдельная проверка не нужна.
+        command_mixer(args);
     } else if (strcmp(cmd_lower, "music") == 0) {
         command_music();
     } else if (strcmp(cmd_lower, "ps") == 0) {
         process_ps();
     } else if (strcmp(cmd_lower, "runbg") == 0) {
         // Сырой input_buffer — та же причина, что и у "run" выше.
-        if (*args == '\0') printf("\nUsage: runbg <filename> [args...]\n");
+        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: runbg <filename> [args...]\n");
         else command_runbg(input_buffer + 6);
     } else if (strcmp(cmd_lower, "kill") == 0) {
-        command_kill(args);
+        if (is_help_flag(args)) printf("\nUsage: kill [-SIGNAL] <pid>\nSignals: -TERM (default), -KILL, -STOP, -CONT\n");
+        else command_kill(args);
     } else if (strcmp(cmd_lower, "wait") == 0) {
-        if (*args == '\0') printf("\nUsage: wait <pid>\n");
+        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: wait <pid>\n");
         else command_wait(args);
     } else if (strcmp(cmd_lower, "whoami") == 0) {
         command_whoami();
     } else if (strcmp(cmd_lower, "chmod") == 0) {
-        if (*args == '\0') printf("\nUsage: chmod <mode> <path>\n");
+        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: chmod <mode> <path>  (octal, e.g. 644)\n");
         else command_chmod(args);
     } else if (strcmp(cmd_lower, "chown") == 0) {
         // Сырой input_buffer — имя пользователя регистрозависимо (см. users.c).
-        if (input_buffer_index <= 6) printf("\nUsage: chown <user>[:group] <path>\n");
+        if (input_buffer_index <= 6 || is_help_flag(args)) printf("\nUsage: chown <user>[:group] <path>  (root only)\n");
         else command_chown(input_buffer + 6);
     } else if (strcmp(cmd_lower, "useradd") == 0) {
-        if (input_buffer_index <= 8) printf("\nUsage: useradd <username> <password> [group]\n");
+        if (input_buffer_index <= 8 || is_help_flag(args)) printf("\nUsage: useradd <username> <password> [group]\n");
         else command_useradd(input_buffer + 8);
     } else if (strcmp(cmd_lower, "groupadd") == 0) {
-        if (input_buffer_index <= 9) printf("\nUsage: groupadd <groupname>\n");
+        if (input_buffer_index <= 9 || is_help_flag(args)) printf("\nUsage: groupadd <groupname>\n");
         else command_groupadd(input_buffer + 9);
     } else if (strcmp(cmd_lower, "su") == 0) {
-        if (input_buffer_index <= 3) printf("\nUsage: su <username> [password]\n");
+        if (input_buffer_index <= 3 || is_help_flag(args)) printf("\nUsage: su <username> [password]\n");
         else command_su(input_buffer + 3);
+    } else if (strcmp(cmd_lower, "passwd") == 0) {
+        // Сырой input_buffer — пароль регистрозависим. "passwd " = 7 символов.
+        if (input_buffer_index <= 7 || is_help_flag(args))
+            printf("\nUsage: passwd <new-password>\nUsage: passwd -u <username> <new-password>  (root only)\n");
+        else command_passwd(input_buffer + 7);
     } else if (strcmp(cmd_lower, "usbinfo") == 0) {
         command_usbinfo();
     } else if (strcmp(cmd_lower, "usbread") == 0) {
-        if (*args == '\0') printf("\nUsage: usbread <device> <lba>\n");
+        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: usbread <device> <lba>\n");
         else command_usbread(args);
     } else if (strcmp(cmd_lower, "usbwrite") == 0) {
         // Сырой input_buffer — текст, который пишется на диск, регистрозависим.
         // "usbwrite " = 9 символов включая пробел.
-        if (input_buffer_index <= 9) printf("\nUsage: usbwrite <device> <lba> <text>\n");
+        if (input_buffer_index <= 9 || is_help_flag(args)) printf("\nUsage: usbwrite <device> <lba> <text>\n");
         else command_usbwrite(input_buffer + 9);
     } else if (strcmp(cmd_lower, "mount") == 0) {
-        if (*args == '\0') printf("\nUsage: mount <usb-device-index>\n");
+        if (is_help_flag(args)) printf("\nUsage: mount [usb-device-index] [name]\nNo arguments lists active mounts.\n");
         else command_mount(args);
     } else if (strcmp(cmd_lower, "unmount") == 0) {
-        command_unmount();
+        if (is_help_flag(args)) printf("\nUsage: unmount [name]\n");
+        else command_unmount(args);
+    } else if (strcmp(cmd_lower, "mountls") == 0) {
+        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: mountls <name>\n");
+        else command_mountls(args);
+    } else if (strcmp(cmd_lower, "mountcat") == 0) {
+        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: mountcat <name> <file>\n");
+        else command_mountcat(args);
+    } else if (strcmp(cmd_lower, "mountwrite") == 0) {
+        // Сырой input_buffer — текст регистрозависим. "mountwrite " = 11 символов.
+        if (input_buffer_index <= 11 || is_help_flag(args)) printf("\nUsage: mountwrite <name> <file> <text>\n");
+        else command_mountwrite(input_buffer + 11);
     } else if (strcmp(cmd_lower, "ifconfig") == 0) {
-        command_ifconfig(args);
+        if (is_help_flag(args)) printf("\nUsage: ifconfig [ip] [netmask] [gateway]\nNo arguments shows current configuration.\n");
+        else command_ifconfig(args);
     } else if (strcmp(cmd_lower, "ping") == 0) {
-        if (*args == '\0') printf("\nUsage: ping <ip> [count]\n");
+        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: ping <ip> [count]\n");
         else command_ping(args);
     } else if (strcmp(cmd_lower, "wget") == 0) {
         // Сырой input_buffer — путь и имя файла регистрозависимы.
         // "wget " = 5 символов включая пробел.
-        if (input_buffer_index <= 5) printf("\nUsage: wget <ip> <path> [output-filename]\n");
+        if (input_buffer_index <= 5 || is_help_flag(args)) printf("\nUsage: wget <ip> <path> [output-filename]\n");
         else command_wget(input_buffer + 5);
     } else {
-        printf("\nUnknown command: %s\n", input_buffer);
-        printf("Type 'help' for available commands.\n");
+        run_external_command(cmd_lower, args);
     }
 
     input_buffer_index = 0;
@@ -378,14 +471,15 @@ void show_prompt(void) {
 void shell_handle_tab(void) {
     static const char *commands[] = {
         "help", "clear", "reboot", "shutdown", "version",
-        "echo", "history", "status", "trap",
+        "echo", "history", "status", "free", "cpuload", "trap",
         "color", "colors", "fg", "bg", "reset",
         "pwd", "cd", "ls", "mkdir", "rm", "touch", "cat",
         "cp", "mv", "rename", "edit",
         "run", "runbg", "exec", "write", "beep", "mixer", "music",
         "kill", "wait", "ps", "df", "du", "devmode",
-        "whoami", "chmod", "chown", "useradd", "groupadd", "su",
+        "whoami", "chmod", "chown", "useradd", "groupadd", "su", "passwd",
         "usbinfo", "usbread", "usbwrite", "mount", "unmount",
+        "mountls", "mountcat", "mountwrite",
         "ifconfig", "ping", "wget",
         NULL
     };

@@ -9,6 +9,10 @@ int token_equals(const char* s, const char* word);
 int atoi(const char* str);
 int hex_to_int(const char* hex);
 
+// Единая проверка "это запрос -help/--help/-h" — общий конвент для всех
+// команд шелла (см. commands.h), в т.ч. будущих пакетных (v0.7).
+int is_help_flag(const char* args);
+
 // Базовые функции работы с памятью/строками (freestanding-ядро без libc:
 // это единственные их реализации во всём kernel/, всё остальное должно
 // подключать этот заголовок вместо своих локальных копий memset/memcpy/...).

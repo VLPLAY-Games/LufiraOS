@@ -1,5 +1,11 @@
 #pragma once
 
+// Конвент -help: любая команда, принимающая аргументы, должна распознавать
+// -help/--help/-h (см. is_help_flag() в lib/string.h) и печатать краткую
+// справку вместо выполнения — см. соответствующие ветки в
+// execute_command() (shell.c). Тот же конвент обязателен для будущих
+// пакетных команд (v0.7).
+
 // Утилиты
 int atoi(const char* str);
 int hex_to_int(const char* hex);
@@ -22,6 +28,8 @@ void command_version(void);
 void command_status(void);
 void command_trap(void);
 void command_echo(const char* args);
+void command_free(void);
+void command_cpuload(void);
 
 // Цвета
 void command_color(void);
@@ -68,13 +76,17 @@ void command_chown(const char* args);
 void command_useradd(const char* args);
 void command_groupadd(const char* args);
 void command_su(const char* args);
+void command_passwd(const char* args);
 
 // USB Mass Storage
 void command_usbinfo(void);
 void command_usbread(const char* args);
 void command_usbwrite(const char* args);
 void command_mount(const char* args);
-void command_unmount(void);
+void command_unmount(const char* args);
+void command_mountls(const char* args);
+void command_mountcat(const char* args);
+void command_mountwrite(const char* args);
 
 // Сеть
 void command_ifconfig(const char* args);

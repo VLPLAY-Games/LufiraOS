@@ -9,3 +9,6 @@
 void heap_init(void);
 void *kmalloc(size_t size);
 void kfree(void *ptr);
+
+// Сумма USED/FREE блоков кучи в байтах (для команды free).
+void heap_get_stats(uint64_t *used_out, uint64_t *free_out);

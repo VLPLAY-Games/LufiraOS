@@ -16,7 +16,12 @@ typedef struct {
     char username[32];
     uint32_t uid;
     uint32_t gid;
-    uint32_t password_hash;   // FNV-1a от пароля, см. users.c
+    // Соль + двойной FNV-1a (см. users.c) — некриптографический хэш,
+    // достаточный только против готовых радужных таблиц по паролю самому
+    // по себе (соль честно best-effort: pit_get_ticks(), не настоящая
+    // энтропия), а не против целевого перебора.
+    uint32_t password_salt;
+    uint32_t password_hash;
     char home[64];
     int in_use;
 } user_entry_t;
@@ -45,6 +50,16 @@ int users_check_password(const char *name, const char *password);
 // тогда сохраняется хэш пустой строки (пароль не требуется).
 int users_add(const char *name, uint32_t uid, uint32_t gid, const char *password, const char *home);
 int groups_add(const char *name, uint32_t gid);
+
+// Меняет пароль уже существующего пользователя (новая соль+хэш, строка в
+// /etc/passwd перезаписывается целиком — см. users_rewrite_passwd_file() в
+// users.c). Возвращает 0 при успехе, -1 если пользователь не найден.
+int users_set_password(const char *name, const char *new_password);
+
+// 1, если хранимый хэш root совпадает с хэшем сid-заводского пароля из
+// tools/seed/passwd ("toor") — используется kernel.c для предупреждения при
+// загрузке. 0 если root сменил пароль или не найден.
+int users_root_has_default_password(void);
 
 // Первый свободный id, начиная с 1000 (0-999 зарезервированы за системными
 // учётками, как root=0).

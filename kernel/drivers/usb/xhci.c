@@ -386,6 +386,17 @@ static uint64_t    xhci_erst_phys = 0;
 static uint64_t xhci_dma_scratch_phys = 0;
 static uint8_t *xhci_dma_scratch_virt = NULL;
 
+// Второй, больший DMA-буфер — только для batched MSD read/write (см.
+// xhci_msd_read_blocks()/write_blocks() ниже). CBW/CSW/control-передачи
+// энумерации по-прежнему используют xhci_dma_scratch (1 страница) — они
+// никогда не превышают её. 64KB = 16 физически ПОДРЯД идущих страниц
+// (pmm_alloc_contiguous_pages(), уже существует для RTL8139 RX-кольца) —
+// обычный pmm_alloc_page() такой гарантии не даёт.
+#define XHCI_MSD_BIG_SCRATCH_PAGES 16
+#define XHCI_MSD_BIG_SCRATCH_BYTES (XHCI_MSD_BIG_SCRATCH_PAGES * PAGE_SIZE)
+static uint64_t xhci_dma_scratch_big_phys = 0;
+static uint8_t *xhci_dma_scratch_big_virt = NULL;
+
 static xhci_slot_t xhci_slots[XHCI_MAX_SLOTS_SUPPORTED];
 static xhci_hid_device_t xhci_hid_devices[XHCI_MAX_HID_DEVICES];
 static int xhci_hid_device_count = 0;
@@ -966,9 +977,18 @@ static int xhci_bulk_transfer(xhci_slot_t *slot, xhci_ring_t *ring, uint8_t dci,
 static int xhci_msd_command(xhci_slot_t *slot, const uint8_t *cdb, uint8_t cdb_len,
                              void *data_buf, uint32_t data_len, int direction_in)
 {
+    // Стадия данных использует большой буфер (если он вообще есть — см.
+    // xhci_init()) при data_len выше PAGE_SIZE; CBW/CSW всегда маленький
+    // фиксированный buf ниже, их размер никогда не меняется.
+    uint8_t *data_scratch_virt = xhci_dma_scratch_virt;
+    uint64_t data_scratch_phys = xhci_dma_scratch_phys;
     if (data_len > PAGE_SIZE) {
-        printf("[XHCI] MSD: data_len %u too large\n", data_len);
-        return -1;
+        if (!xhci_dma_scratch_big_virt || data_len > XHCI_MSD_BIG_SCRATCH_BYTES) {
+            printf("[XHCI] MSD: data_len %u too large\n", data_len);
+            return -1;
+        }
+        data_scratch_virt = xhci_dma_scratch_big_virt;
+        data_scratch_phys = xhci_dma_scratch_big_phys;
     }
 
     uint32_t tag = xhci_msd_next_tag++;
@@ -990,16 +1010,16 @@ static int xhci_msd_command(xhci_slot_t *slot, const uint8_t *cdb, uint8_t cdb_l
     DLOG("[XHCI] MSD DEBUG: CBW sent OK\n");
 
     if (data_len > 0) {
-        if (!direction_in && data_buf) memcpy(xhci_dma_scratch_virt, data_buf, data_len);
+        if (!direction_in && data_buf) memcpy(data_scratch_virt, data_buf, data_len);
 
         xhci_ring_t *data_ring = direction_in ? &slot->msd_bulk_in_ring : &slot->msd_bulk_out_ring;
         uint8_t data_dci = direction_in ? (uint8_t)slot->msd_bulk_in_dci : (uint8_t)slot->msd_bulk_out_dci;
         DLOG("[XHCI] MSD DEBUG: data stage dci=%u len=%u dir_in=%d\n", data_dci, data_len, direction_in);
-        if (xhci_bulk_transfer(slot, data_ring, data_dci, xhci_dma_scratch_phys, data_len) != 0)
+        if (xhci_bulk_transfer(slot, data_ring, data_dci, data_scratch_phys, data_len) != 0)
             return -1;
         DLOG("[XHCI] MSD DEBUG: data stage OK\n");
 
-        if (direction_in && data_buf) memcpy(data_buf, xhci_dma_scratch_virt, data_len);
+        if (direction_in && data_buf) memcpy(data_buf, data_scratch_virt, data_len);
     }
 
     DLOG("[XHCI] MSD DEBUG: reading CSW (dci=%u)\n", slot->msd_bulk_in_dci);
@@ -1381,6 +1401,18 @@ void xhci_init(void) {
     xhci_dma_scratch_virt = (uint8_t *)phys_to_virt(dma_phys);
     memset(xhci_dma_scratch_virt, 0, PAGE_SIZE);
 
+    // Необязательный буфер — при неудаче просто не батчим (xhci_msd_command()
+    // ниже проверяет xhci_dma_scratch_big_virt и откатывается на маленький
+    // буфер с cap в PAGE_SIZE, как было раньше), а не валим всю инициализацию.
+    uint64_t big_phys = pmm_alloc_contiguous_pages(XHCI_MSD_BIG_SCRATCH_PAGES);
+    if (big_phys) {
+        xhci_dma_scratch_big_phys = big_phys;
+        xhci_dma_scratch_big_virt = (uint8_t *)phys_to_virt(big_phys);
+        memset(xhci_dma_scratch_big_virt, 0, XHCI_MSD_BIG_SCRATCH_BYTES);
+    } else {
+        printf("[XHCI] WARNING: no contiguous memory for batched MSD transfers, falling back to 1 block/transfer\n");
+    }
+
     reg_write32(xhci_op_base, XHCI_OP_CONFIG, xhci_max_slots);
 
     reg_write32(xhci_op_base, XHCI_OP_USBCMD,
@@ -1431,9 +1463,22 @@ int xhci_msd_get_info(int index, uint32_t *out_max_lba, uint32_t *out_block_size
     return 0;
 }
 
-int xhci_msd_read_block(int index, uint32_t lba, void *buf, uint32_t block_size) {
+// count блоков одной командой READ10/WRITE10 (реальный transfer-length —
+// 16-битное поле cdb[7..8], big-endian) через большой scratch-буфер
+// (xhci_dma_scratch_big_*, см. xhci_init()) — то, что раньше требовало
+// одного bulk-transfer/SCSI-команды НА КАЖДЫЙ 512-байтовый блок, теперь
+// делается пачками до XHCI_MSD_MAX_BATCH_BLOCKS за раз. Если большой буфер
+// не выделился при инициализации (редкий случай нехватки подряд идущих
+// страниц), xhci_msd_command() сам откатится на ограничение в PAGE_SIZE —
+// эти функции просто передают дальше настоящий data_len, ничего не решая
+// сами. Предел вынесен в xhci.h (XHCI_MSD_MAX_BATCH_BLOCKS) — вызывающие
+// вроде mount.c батчат свои собственные циклы по тому же числу.
+
+int xhci_msd_read_blocks(int index, uint32_t lba, uint32_t count, void *buf, uint32_t block_size) {
     xhci_slot_t *slot = xhci_msd_slot_for_index(index);
-    if (!slot || block_size == 0 || block_size > PAGE_SIZE) return -1;
+    if (!slot || block_size == 0 || count == 0 || count > XHCI_MSD_MAX_BATCH_BLOCKS) return -1;
+    uint64_t data_len = (uint64_t)count * block_size;
+    if (data_len > XHCI_MSD_BIG_SCRATCH_BYTES) return -1;
 
     uint8_t cdb[10];
     memset(cdb, 0, sizeof(cdb));
@@ -1442,14 +1487,17 @@ int xhci_msd_read_block(int index, uint32_t lba, void *buf, uint32_t block_size)
     cdb[3] = (uint8_t)(lba >> 16);
     cdb[4] = (uint8_t)(lba >> 8);
     cdb[5] = (uint8_t)lba;
-    cdb[8] = 1; // transfer length = 1 блок
+    cdb[7] = (uint8_t)(count >> 8);
+    cdb[8] = (uint8_t)count;
 
-    return xhci_msd_command(slot, cdb, sizeof(cdb), buf, block_size, 1);
+    return xhci_msd_command(slot, cdb, sizeof(cdb), buf, (uint32_t)data_len, 1);
 }
 
-int xhci_msd_write_block(int index, uint32_t lba, const void *buf, uint32_t block_size) {
+int xhci_msd_write_blocks(int index, uint32_t lba, uint32_t count, const void *buf, uint32_t block_size) {
     xhci_slot_t *slot = xhci_msd_slot_for_index(index);
-    if (!slot || block_size == 0 || block_size > PAGE_SIZE) return -1;
+    if (!slot || block_size == 0 || count == 0 || count > XHCI_MSD_MAX_BATCH_BLOCKS) return -1;
+    uint64_t data_len = (uint64_t)count * block_size;
+    if (data_len > XHCI_MSD_BIG_SCRATCH_BYTES) return -1;
 
     uint8_t cdb[10];
     memset(cdb, 0, sizeof(cdb));
@@ -1458,9 +1506,18 @@ int xhci_msd_write_block(int index, uint32_t lba, const void *buf, uint32_t bloc
     cdb[3] = (uint8_t)(lba >> 16);
     cdb[4] = (uint8_t)(lba >> 8);
     cdb[5] = (uint8_t)lba;
-    cdb[8] = 1;
+    cdb[7] = (uint8_t)(count >> 8);
+    cdb[8] = (uint8_t)count;
 
-    return xhci_msd_command(slot, cdb, sizeof(cdb), (void *)buf, block_size, 0);
+    return xhci_msd_command(slot, cdb, sizeof(cdb), (void *)buf, (uint32_t)data_len, 0);
+}
+
+int xhci_msd_read_block(int index, uint32_t lba, void *buf, uint32_t block_size) {
+    return xhci_msd_read_blocks(index, lba, 1, buf, block_size);
+}
+
+int xhci_msd_write_block(int index, uint32_t lba, const void *buf, uint32_t block_size) {
+    return xhci_msd_write_blocks(index, lba, 1, (void *)buf, block_size);
 }
 
 #define XHCI_POLL_MAX_EVENTS_PER_TICK 8

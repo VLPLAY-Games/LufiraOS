@@ -85,6 +85,11 @@ int token_equals(const char* s, const char* word) {
     return word[i] == '\0' && (s[i] == '\0' || s[i] == ' ' || s[i] == '\t');
 }
 
+int is_help_flag(const char* args) {
+    if (!args) return 0;
+    return token_equals(args, "-help") || token_equals(args, "--help") || token_equals(args, "-h");
+}
+
 int atoi(const char* str) {
     int result = 0, sign = 1;
     if (*str == '-') { sign = -1; str++; }

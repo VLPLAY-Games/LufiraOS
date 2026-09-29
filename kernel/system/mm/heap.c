@@ -176,6 +176,24 @@ void kfree(void *ptr) {
     heap_unlock(flags);
 }
 
+// Суммирует размеры FREE/USED блоков по списку (для команды free) — та же
+// цепочка block_header_t, что heap_dump() уже обходит для отладки.
+void heap_get_stats(uint64_t *used_out, uint64_t *free_out) {
+    uint64_t used = 0, free_bytes = 0;
+    uint64_t flags = heap_lock();
+
+    block_header_t *current = heap_start;
+    while (current) {
+        if (current->magic == HEAP_MAGIC_FREE) free_bytes += current->size;
+        else used += current->size;
+        current = current->next;
+    }
+
+    heap_unlock(flags);
+    if (used_out) *used_out = used;
+    if (free_out) *free_out = free_bytes;
+}
+
 // Вспомогательная функция для отладки (опционально)
 void heap_dump(void) {
     uint64_t flags = heap_lock();

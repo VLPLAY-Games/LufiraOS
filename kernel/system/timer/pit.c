@@ -71,9 +71,22 @@ void pit_wait_ms(uint32_t ms) {
 #define PREEMPT_TIMESLICE_TICKS 5
 static uint32_t preempt_countdown = PREEMPT_TIMESLICE_TICKS;
 
+// Грубая статистика загрузки CPU для команды cpuload — каждый тик относим
+// либо к простою (idle-процесс был текущим), либо к работе, плюс копим
+// то же самое персонально на current_process->cpu_ticks (см. process.h).
+static volatile uint64_t g_total_ticks = 0;
+static volatile uint64_t g_idle_ticks = 0;
+
+uint64_t pit_get_total_ticks(void) { return g_total_ticks; }
+uint64_t pit_get_idle_ticks(void) { return g_idle_ticks; }
+
 // Обработчик прерывания таймера
 void timer_irq_handler(interrupt_frame_t *frame) {
     pit_ticks++;
+
+    g_total_ticks++;
+    if (process_is_idle()) g_idle_ticks++;
+    if (current_process) current_process->cpu_ticks++;
 
     process_t *p = process_list;
 

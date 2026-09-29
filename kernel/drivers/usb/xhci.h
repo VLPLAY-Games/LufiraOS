@@ -57,3 +57,12 @@ int xhci_msd_device_count(void);
 int xhci_msd_get_info(int index, uint32_t *out_max_lba, uint32_t *out_block_size);
 int xhci_msd_read_block(int index, uint32_t lba, void *buf, uint32_t block_size);
 int xhci_msd_write_block(int index, uint32_t lba, const void *buf, uint32_t block_size);
+
+// count блоков (до XHCI_MSD_MAX_BATCH_BLOCKS = 64KB) за одну SCSI-команду/
+// bulk-передачу — на порядок быстрее count отдельных xhci_msd_read_block()/
+// write_block() при больших последовательных операциях (см.
+// kernel/shell/commands/mount.c, которое батчит свои собственные циклы по
+// тому же пределу).
+#define XHCI_MSD_MAX_BATCH_BLOCKS 128 // 128 * 512 = 65536
+int xhci_msd_read_blocks(int index, uint32_t lba, uint32_t count, void *buf, uint32_t block_size);
+int xhci_msd_write_blocks(int index, uint32_t lba, uint32_t count, const void *buf, uint32_t block_size);

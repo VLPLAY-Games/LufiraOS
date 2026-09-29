@@ -282,6 +282,61 @@ void command_groupadd(const char *args) {
     printf("\ngroupadd: created group '%s' (gid=%u)\n", groupname, gid);
 }
 
+// passwd <new-password> — меняет пароль ВЫЗЫВАЮЩЕГО, без повторного ввода
+// старого (тот же довод, что уже принят для su: current_process САМ И ЕСТЬ
+// уже аутентифицированная сессия). passwd -u <user> <new-password> — сброс
+// пароля ЛЮБОГО пользователя, только root (root может это и себе — просто
+// не обязан указывать -u). Видимый ввод пароля — то же сознательное
+// упрощение, что и у su (нет мид-командного маскированного ввода в шелле).
+void command_passwd(const char *args) {
+    if (!args || !*args) {
+        printf("\nUsage: passwd <new-password>\n");
+        printf("       passwd -u <username> <new-password>  (root only)\n");
+        return;
+    }
+
+    const char *p = skip_spaces(args);
+    if (p[0] == '-' && p[1] == 'u' && (p[2] == ' ' || p[2] == '\t' || p[2] == '\0')) {
+        if (current_process->uid != 0) {
+            printf("\npasswd: permission denied (only root can change another user's password)\n");
+            return;
+        }
+
+        char username[32], new_password[64];
+        const char *rest = take_token(p + 2, username, sizeof(username));
+        take_token(rest, new_password, sizeof(new_password));
+
+        if (username[0] == '\0') {
+            printf("\nUsage: passwd -u <username> <new-password>\n");
+            return;
+        }
+        if (users_lookup_by_name(username, NULL) != 0) {
+            printf("\npasswd: unknown user: %s\n", username);
+            return;
+        }
+        if (users_set_password(username, new_password) != 0) {
+            printf("\npasswd: failed to update password for %s\n", username);
+            return;
+        }
+        printf("\npasswd: password updated for %s\n", username);
+        return;
+    }
+
+    char new_password[64];
+    take_token(p, new_password, sizeof(new_password));
+
+    user_entry_t self;
+    if (users_lookup_by_uid(current_process->uid, &self) != 0) {
+        printf("\npasswd: current user not found in /etc/passwd\n");
+        return;
+    }
+    if (users_set_password(self.username, new_password) != 0) {
+        printf("\npasswd: failed to update password\n");
+        return;
+    }
+    printf("\npasswd: password updated\n");
+}
+
 // su <username> [password] — как cd мутирует cwd_inode напрямую, su мутирует
 // current_process->uid/gid напрямую (никакого отдельного syscall/сессии —
 // шелл САМ И ЕСТЬ current_process). root может su в кого угодно без пароля;

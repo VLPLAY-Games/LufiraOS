@@ -182,6 +182,9 @@ void _start(BootInfo* bi) {
             devmode_init();
             klog_init();
             users_init();
+            if (users_root_has_default_password()) {
+                printf("[SECURITY] root password is still the default - run 'passwd -u root <new>' to change it\n");
+            }
             klog("[BOOT] LufiraOS booting, devmode=%u", devmode_is_enabled());
         } else {
             LOG_DONE_FAIL("LufiraFS mount failed");
