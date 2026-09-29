@@ -30,6 +30,9 @@
 #define SYS_RMDIR    24
 #define SYS_UNLINK   25
 #define SYS_READDIR  26
+#define SYS_STATFS   27
+#define SYS_MEMINFO  28
+#define SYS_CPULOAD  29
 
 // Флаги для sys_open
 #define O_RDONLY    0
@@ -72,6 +75,36 @@
 #define ENOTDIR  20
 #define EINVAL   22
 #define ERANGE   34
+
+// Структуры для SYS_STATFS/SYS_MEMINFO/SYS_CPULOAD (v0.7, этап 1) — ровно
+// те же данные, что уже печатают kernel-native command_df()/command_free()/
+// command_cpuload() (kernel/shell/commands/{filesystem,system}.c) напрямую
+// из lufirafs.sb/pmm_get_*()/heap_get_stats()/pit_get_*(), только через
+// буфер в пользовательском пространстве вместо printf() внутри ядра —
+// первый шаг выноса du/df/free/cpuload в отдельные пакеты (v0.7 план).
+// Мирроятся байт-в-байт в libc/include/lufira/syscall.h, как и
+// vfs_dirent_t/struct lufira_dirent для SYS_READDIR выше.
+typedef struct {
+    uint32_t block_size;
+    uint32_t total_blocks;
+    uint32_t free_blocks;
+    uint32_t inode_count;
+    uint32_t free_inodes;
+} lufira_statfs_t;
+
+typedef struct {
+    uint64_t total_pages;      // физическая RAM, страницы по 4KB (pmm.c)
+    uint64_t used_pages;
+    uint64_t heap_total_bytes; // куча ядра (heap.c)
+    uint64_t heap_used_bytes;
+} lufira_meminfo_t;
+
+typedef struct {
+    uint64_t total_ticks;      // сырые счётчики PIT (pit.c) — сэмплирование
+    uint64_t idle_ticks;       // (два снимка + sleep между ними) делает сама
+                                // пользовательская программа, как и сегодня
+                                // делает kernel-native command_cpuload().
+} lufira_cpuload_t;
 
 // Потолок длины ЛЮБОЙ NUL-терминированной строки от пользователя (filename
 // для open/exec, path для chdir) — не даёт неверно терминированному буферу

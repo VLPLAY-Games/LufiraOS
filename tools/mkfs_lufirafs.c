@@ -265,7 +265,7 @@ static void cmd_mkdir(const char *path) {
     ensure_dir_path(path);
 }
 
-static void cmd_put(const char *host_file, const char *dest_path) {
+static void cmd_put(const char *host_file, const char *dest_path, uint32_t perm) {
     FILE *f = fopen(host_file, "rb");
     if (!f) { fprintf(stderr, "mkfs_lufirafs: cannot open %s\n", host_file); exit(1); }
     fseek(f, 0, SEEK_END);
@@ -293,7 +293,7 @@ static void cmd_put(const char *host_file, const char *dest_path) {
         inode.links_count = 1;
         inode.uid = 0;
         inode.gid = 0;
-        inode.perm = LUFIRAFS_DEFAULT_FILE_PERM;
+        inode.perm = perm;
         write_inode(file_ino, &inode);
         add_dirent(parent, name, file_ino);
     }
@@ -367,7 +367,7 @@ int main(int argc, char **argv) {
             "Usage:\n"
             "  %s format <image> <offset> <size>\n"
             "  %s mkdir  <image> <offset> <size> </dest/path>\n"
-            "  %s put    <image> <offset> <size> <host_file> </dest/path>\n",
+            "  %s put    <image> <offset> <size> <host_file> </dest/path> [octal-perm]\n",
             argv[0], argv[0], argv[0]);
         return 1;
     }
@@ -392,7 +392,13 @@ int main(int argc, char **argv) {
     } else if (strcmp(cmd, "put") == 0) {
         if (argc < 7) { fprintf(stderr, "mkfs_lufirafs: put needs <host_file> <dest_path>\n"); return 1; }
         load_region(image_path, offset, size);
-        cmd_put(argv[5], argv[6]);
+        // Опциональный 7-й аргумент — восьмеричные права нового файла
+        // (например 755 для исполняемых userspace-программ в /bin, v0.7
+        // план этап 1); по умолчанию — LUFIRAFS_DEFAULT_FILE_PERM (0644),
+        // как и раньше. Не трогает права уже существующего файла (put
+        // поверх существующего пути только перезаписывает содержимое).
+        uint32_t perm = (argc >= 8) ? (uint32_t)strtoul(argv[7], NULL, 8) : LUFIRAFS_DEFAULT_FILE_PERM;
+        cmd_put(argv[5], argv[6], perm);
         save_region(image_path, offset);
     } else {
         fprintf(stderr, "mkfs_lufirafs: unknown command '%s'\n", cmd);

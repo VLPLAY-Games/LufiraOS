@@ -43,6 +43,9 @@
 #define SYS_RMDIR    24
 #define SYS_UNLINK   25
 #define SYS_READDIR  26
+#define SYS_STATFS   27
+#define SYS_MEMINFO  28
+#define SYS_CPULOAD  29
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -186,4 +189,36 @@ struct lufira_dirent {
 
 static inline long sys_readdir(int fd, struct lufira_dirent *out) {
     return __syscall5(SYS_READDIR, fd, (long)out, 0, 0, 0);
+}
+
+// Мирроят lufira_statfs_t/lufira_meminfo_t/lufira_cpuload_t (kernel/system/
+// syscall/syscall.h) байт-в-байт — v0.7 этап 1 (вынос du/df/free/cpuload).
+struct lufira_statfs {
+    uint32_t block_size;
+    uint32_t total_blocks;
+    uint32_t free_blocks;
+    uint32_t inode_count;
+    uint32_t free_inodes;
+};
+
+struct lufira_meminfo {
+    uint64_t total_pages;
+    uint64_t used_pages;
+    uint64_t heap_total_bytes;
+    uint64_t heap_used_bytes;
+};
+
+struct lufira_cpuload {
+    uint64_t total_ticks;
+    uint64_t idle_ticks;
+};
+
+static inline long sys_statfs(struct lufira_statfs *out) {
+    return __syscall5(SYS_STATFS, (long)out, 0, 0, 0, 0);
+}
+static inline long sys_meminfo(struct lufira_meminfo *out) {
+    return __syscall5(SYS_MEMINFO, (long)out, 0, 0, 0, 0);
+}
+static inline long sys_cpuload(struct lufira_cpuload *out) {
+    return __syscall5(SYS_CPULOAD, (long)out, 0, 0, 0, 0);
 }

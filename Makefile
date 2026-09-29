@@ -43,6 +43,16 @@ LUFIRAFS_REGION_SIZE := $(shell echo $$(($(DISK_TOTAL_SIZE) - $(LUFIRAFS_ESP_SIZ
 # на образе ТОЛЬКО в debug-сборке (см. цель debug), обычный run их не видит.
 TEST_ELF_FILES := $(shell find test -name '*.elf' 2>/dev/null)
 
+# Userspace-программы (v0.7 план, этап 1: du/df/free/cpuload вынесены из
+# ядра в отдельные ELF поверх SYS_STATFS/SYS_MEMINFO/SYS_CPULOAD) — грузятся
+# в /bin на КАЖДОЙ сборке (в отличие от TEST_ELF_FILES выше), подхватываются
+# уже существующим PATH-fallback'ом шелла (run_external_command(),
+# kernel/shell/shell.c). Собраны вручную тем же gcc/ld-конвейером, что
+# test/c/*.elf (см. libc/crt0.S) — бинарники закоммичены как есть, никакого
+# отдельного Makefile-правила для их пересборки не заводится (тот же
+# принцип, что уже у TEST_ELF_FILES).
+USERSPACE_ELF_FILES := $(shell find userspace -name '*.elf' 2>/dev/null)
+
 REQUIRED_TOOLS := gcc ld objcopy nm truncate dd mkfs.fat mmd mcopy qemu-system-x86_64
 $(foreach tool,$(REQUIRED_TOOLS),\
     $(if $(shell which $(tool) 2>/dev/null),,\
@@ -234,6 +244,7 @@ $(BUILD_DIR)/disk.img: $(BUILD_DIR)/BOOTX64.EFI $(BUILD_DIR)/kernel.bin $(BUILD_
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /logs
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /etc
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /bin
+	$(foreach f,$(USERSPACE_ELF_FILES),$(BUILD_DIR)/mkfs_lufirafs put $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(f) /bin/$(notdir $(f)) 755;)
 	echo "Hello from LufiraOS!" > $(BUILD_DIR)/readme.txt
 	$(BUILD_DIR)/mkfs_lufirafs put $@ $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(BUILD_DIR)/readme.txt /readme.txt
 	rm -f $(BUILD_DIR)/readme.txt

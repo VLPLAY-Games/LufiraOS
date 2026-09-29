@@ -713,6 +713,68 @@ static uint64_t sys_readdir(uint64_t fd, uint64_t buf_ptr, uint64_t unused1,
     return (uint64_t)vfs_readdir((int)fd, (void *)buf_ptr);
 }
 
+// SYS_STATFS (27): buf_ptr -> lufira_statfs_t. То же самое, что уже читает
+// напрямую command_df() (kernel/shell/commands/filesystem.c) из
+// lufirafs.sb — первый выход этих полей за пределы ядра (v0.7, этап 1).
+static uint64_t sys_statfs(uint64_t buf_ptr, uint64_t unused1, uint64_t unused2,
+                           uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+
+    if (!current_process ||
+        !is_user_range_valid(current_process->page_table, buf_ptr, sizeof(lufira_statfs_t), 1))
+        return (uint64_t)-EFAULT;
+
+    lufira_statfs_t out;
+    out.block_size = lufirafs.sb.block_size;
+    out.total_blocks = lufirafs.sb.total_blocks;
+    out.free_blocks = lufirafs.sb.free_blocks;
+    out.inode_count = lufirafs.sb.inode_count;
+    out.free_inodes = lufirafs.sb.free_inodes;
+    memcpy((void *)buf_ptr, &out, sizeof(out));
+    return 0;
+}
+
+// SYS_MEMINFO (28): buf_ptr -> lufira_meminfo_t. То же, что command_free()
+// (system.c) — pmm_get_total_pages()/pmm_get_used_pages() (pmm.c) +
+// heap_get_stats() (heap.c), обе добавлены в 0.6.5 для той же команды.
+static uint64_t sys_meminfo(uint64_t buf_ptr, uint64_t unused1, uint64_t unused2,
+                            uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+
+    if (!current_process ||
+        !is_user_range_valid(current_process->page_table, buf_ptr, sizeof(lufira_meminfo_t), 1))
+        return (uint64_t)-EFAULT;
+
+    lufira_meminfo_t out;
+    out.total_pages = pmm_get_total_pages();
+    out.used_pages = pmm_get_used_pages();
+    uint64_t heap_used, heap_free;
+    heap_get_stats(&heap_used, &heap_free);
+    out.heap_total_bytes = heap_used + heap_free;
+    out.heap_used_bytes = heap_used;
+    memcpy((void *)buf_ptr, &out, sizeof(out));
+    return 0;
+}
+
+// SYS_CPULOAD (29): buf_ptr -> lufira_cpuload_t. Сырые тики PIT
+// (pit_get_total_ticks()/pit_get_idle_ticks(), pit.c) — вызывающая
+// сторона сама берёт два снимка с sys_msleep() между ними и считает %,
+// как уже делает kernel-native command_cpuload() (system.c).
+static uint64_t sys_cpuload(uint64_t buf_ptr, uint64_t unused1, uint64_t unused2,
+                            uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+
+    if (!current_process ||
+        !is_user_range_valid(current_process->page_table, buf_ptr, sizeof(lufira_cpuload_t), 1))
+        return (uint64_t)-EFAULT;
+
+    lufira_cpuload_t out;
+    out.total_ticks = pit_get_total_ticks();
+    out.idle_ticks = pit_get_idle_ticks();
+    memcpy((void *)buf_ptr, &out, sizeof(out));
+    return 0;
+}
+
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
 
 static syscall_fn_t syscall_table[256] = {
@@ -743,6 +805,9 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_RMDIR]   = sys_rmdir,
     [SYS_UNLINK]  = sys_unlink,
     [SYS_READDIR] = sys_readdir,
+    [SYS_STATFS]  = sys_statfs,
+    [SYS_MEMINFO] = sys_meminfo,
+    [SYS_CPULOAD] = sys_cpuload,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
