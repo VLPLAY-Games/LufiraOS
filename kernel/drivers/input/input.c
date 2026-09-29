@@ -9,6 +9,49 @@ static int mouse_x = 0;
 static int mouse_y = 0;
 static uint8_t mouse_buttons = 0;
 
+// ===== Кольцевой буфер console-ввода (см. комментарий у console_input_read()
+// в input.h) — v0.7 план, этап 5, под-этап 6. =====
+#define CONSOLE_INPUT_BUF_SIZE 256
+static volatile uint8_t console_input_buf[CONSOLE_INPUT_BUF_SIZE];
+static volatile int console_input_head = 0;
+static volatile int console_input_count = 0;
+// Процесс, заблокированный внутри console_input_read() в ожидании байта —
+// не список/очередь, а один слот: /dev/console сегодня читает не более
+// одного процесса одновременно (будущий shell.elf), как и pipe_t в этом
+// ядре тоже не поддерживает нескольких блокированных читателей разом.
+static process_t *console_input_waiter = NULL;
+
+static void console_input_push(uint8_t byte) {
+    if (console_input_count >= CONSOLE_INPUT_BUF_SIZE) return; // переполнение — молча роняем, как и реальный tty
+    console_input_buf[console_input_head] = byte;
+    console_input_head = (console_input_head + 1) % CONSOLE_INPUT_BUF_SIZE;
+    console_input_count++;
+
+    if (console_input_waiter) {
+        console_input_waiter->state = PROCESS_READY;
+        console_input_waiter = NULL;
+    }
+}
+
+int console_input_read(uint8_t *out, int max) {
+    if (max <= 0) return 0;
+
+    while (console_input_count == 0) {
+        console_input_waiter = current_process;
+        current_process->state = PROCESS_BLOCKED;
+        schedule();
+    }
+
+    int start = (console_input_head - console_input_count + CONSOLE_INPUT_BUF_SIZE) % CONSOLE_INPUT_BUF_SIZE;
+    int n = 0;
+    while (n < max && console_input_count > 0) {
+        out[n] = console_input_buf[(start + n) % CONSOLE_INPUT_BUF_SIZE];
+        n++;
+        console_input_count--;
+    }
+    return n;
+}
+
 // QEMU доставляет один и тот же keystroke сразу на PS/2 (IRQ1) и на USB HID
 // (опрашивается из timer_irq_handler(), с задержкой до ~10мс) — без
 // фильтрации один Enter превращался в два вызова shell_handle_enter()
@@ -31,6 +74,44 @@ static uint64_t last_key_tick = 0;
 void input_keyboard_event(int key) {
     if (key == 0) return;
 
+    // Дедупликация PS/2+USB HID — см. комментарий у KEY_DEBOUNCE_TICKS
+    // выше. Поднято ДО foreground_pid-гейта ниже (раньше было после), чтобы
+    // относиться одинаково к обоим потребителям этого события — и старому
+    // kernel-native шеллу (switch ниже), и новому console_input_push()
+    // (следующий блок): дубликат не должен просачиваться ни в тот, ни в
+    // другой. Видимое поведение старого шелла не меняется — тот всё равно
+    // получает событие только после гейта, как и раньше.
+    uint64_t now = pit_get_ticks();
+    int is_duplicate = (key == last_key && (now - last_key_tick) < KEY_DEBOUNCE_TICKS);
+    last_key = key;
+    last_key_tick = now;
+    if (is_duplicate) return;
+
+    // Параллельный путь в кольцевой буфер /dev/console (см. input.h) — для
+    // будущего shell.elf (v0.7 план, этап 5, под-этап 6), независимо от
+    // foreground_pid ниже: та переменная — особенность СЕГОДНЯШНЕГО
+    // kernel-native шелла (run/exec блокируют его собственный цикл), не
+    // имеет смысла для процесса, который блокируется на настоящем
+    // console_read(). Ctrl+Up/Down (скролл вьюпорта) и KEY_CTRL_C
+    // сознательно НЕ попадают в этот поток — первое просто разметка
+    // экрана, не часть строки ввода; второе станет настоящим SIGINT
+    // (следующий под-этап), не байтом.
+    switch (key) {
+        case KEY_LEFT_ARROW:
+        case KEY_RIGHT_ARROW:
+            console_input_push((uint8_t)key);
+            break;
+        case KEY_UP_ARROW:
+        case KEY_DOWN_ARROW:
+            if (!keyboard_ctrl_pressed()) console_input_push((uint8_t)key);
+            break;
+        case KEY_CTRL_C:
+            break;
+        default:
+            console_input_push((uint8_t)key);
+            break;
+    }
+
     // Пока на переднем плане реально исполняется run/exec (foreground_pid —
     // см. process.h/elf.c), шелл не должен ни печатать, ни отдавать команды
     // на выполнение: раньше ввод продолжал накапливаться и Enter взводил
@@ -42,13 +123,6 @@ void input_keyboard_event(int key) {
     // отложенно доигрывал устаревший ввод. Ctrl+C — единственное исключение:
     // это и есть штатный способ прервать foreground-процесс.
     if (foreground_pid != 0 && key != KEY_CTRL_C) return;
-
-    uint64_t now = pit_get_ticks();
-    if (key == last_key && (now - last_key_tick) < KEY_DEBOUNCE_TICKS) {
-        return;
-    }
-    last_key = key;
-    last_key_tick = now;
 
     switch (key) {
         case KEY_LEFT_ARROW:

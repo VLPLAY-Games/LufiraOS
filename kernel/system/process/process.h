@@ -3,6 +3,10 @@
 #include "lib/types.h"
 #include "system/cpu/tss.h"
 #include "fs/vfs/vfs.h"
+// lufira_ps_entry_t — для прототипа process_pslist() ниже (v0.7 план,
+// этап 5, под-этап 4). syscall.h не зависит от process.h, так что этот
+// include однонаправленный, без цикла.
+#include "system/syscall/syscall.h"
 
 #define KERNEL_HEAP_START       0xFFFF900000000000ULL  // Куча ядра
 #define KERNEL_STACK_AREA_START 0xFFFF880000000000ULL  // Область стеков
@@ -157,6 +161,17 @@ void process_sleep(uint64_t milliseconds);
 void process_ps(void);
 int process_kill(uint32_t pid);
 
+// SYS_PSLIST (30, v0.7 план этап 5 под-этап 4): та же прогулка по
+// process_list под irq_disable()/irq_enable(), что уже делают process_ps()
+// и command_cpuload() (system.c) внутри ядра — только пишет в out[] вместо
+// printf(). out — уже провалидированный указатель ПОЛЬЗОВАТЕЛЬСКОГО буфера
+// (проверка is_user_range_valid() — забота sys_pslist(), syscall.c; ядро
+// пишет туда напрямую под CR3 вызывающего процесса, тот же приём, что уже
+// у sys_readdir()/sys_statfs()). Возвращает число реально записанных
+// записей (0..max_count); живых процессов больше max_count в этой ОС быть
+// не может (MAX_PROCESSES выше — общий потолок process_create()).
+int process_pslist(lufira_ps_entry_t *out, uint32_t max_count);
+
 // Отправляет сигнал sig процессу pid и сразу применяет его действие по
 // умолчанию (см. SIGKILL/SIGTERM/SIGSTOP/SIGCONT выше): SIGKILL/SIGTERM
 // завершают процесс (exit_code = 128+sig, как в реальных шеллах),
@@ -164,6 +179,16 @@ int process_kill(uint32_t pid);
 // process_signal(pid, SIGKILL). Возвращает 0 при успехе, -1 если процесс
 // не найден (или сигнал неизвестен).
 int process_signal(uint32_t pid, int sig);
+
+// SYS_SET_FOREGROUND (31, v0.7 план этап 5 под-этап 6): даёт userspace
+// (будущему shell.elf) выставлять/снимать foreground_pid — то же поле,
+// которым уже сегодня пользуется kernel-native command_run() и
+// shell_handle_ctrl_c() (shell.c) для Ctrl+C. target_pid == 0 снимает
+// (всегда разрешено); иначе требует, чтобы target_pid был РЕАЛЬНЫМ
+// ребёнком caller_pid (p->ppid == caller_pid) — процесс не может назначить
+// foreground чужого, не своего процесса. Возвращает 0 при успехе, -1 если
+// target_pid не найден или не свой.
+int process_set_foreground(uint32_t caller_pid, uint32_t target_pid);
 
 // Немедленно убирает proc из списка планировщика (используется только для
 // отката недостроенного процесса, например если fork() не смог

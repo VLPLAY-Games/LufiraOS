@@ -15,10 +15,21 @@
 // этапа.
 //
 // Сборка — как у free.c/hello.c.
+//
+// Правка (v0.7 план, этап 5, под-этап 1 — попутная находка): SYS_OPEN
+// резолвит путь ВСЕГДА от корня (kernel/system/syscall/syscall.c), так что
+// голое sys_open(".", ...) открывало не текущий каталог процесса, а корень
+// целиком — "du" без аргумента молча показывал корень вместо реального cwd
+// всякий раз, когда тот не был "/". Тот же баг и то же лекарство, что уже
+// у cp/mv/ls (userspace/common/pathutil.h) — резолвим target через
+// SYS_GETCWD ДО первого sys_open(), один раз в main(); dir_total_blocks()
+// ниже сама строит дочерние пути join_path()'ом от уже абсолютного target,
+// так что саму рекурсию трогать не нужно.
 
 #include <stdio.h>
 #include <lufira/syscall.h>
 #include <string.h>
+#include "../common/pathutil.h"
 
 static uint32_t g_block_size = 4096;
 
@@ -72,10 +83,16 @@ static long dir_total_blocks(const char *path) {
 int main(int argc, char **argv) {
     const char *target = (argc >= 2) ? argv[1] : ".";
 
+    char abs_target[256];
+    if (resolve_path(target, abs_target, sizeof(abs_target)) < 0) {
+        printf("du: cannot resolve current directory\n");
+        return 1;
+    }
+
     struct lufira_statfs sfs;
     if (sys_statfs(&sfs) == 0 && sfs.block_size > 0) g_block_size = sfs.block_size;
 
-    long fd = sys_open(target, O_RDONLY, 0);
+    long fd = sys_open(abs_target, O_RDONLY, 0);
     if (fd < 0) {
         printf("du: '%s' not found\n", target);
         return 1;
@@ -89,7 +106,7 @@ int main(int argc, char **argv) {
     int is_dir = sys_readdir((int)fd, &probe) >= 0;
     sys_close((int)fd);
 
-    long total = is_dir ? dir_total_blocks(target) : file_blocks(target);
+    long total = is_dir ? dir_total_blocks(abs_target) : file_blocks(abs_target);
     if (total < 0) total = 0;
 
     unsigned long kb = ((unsigned long)total * g_block_size + 1023) / 1024;

@@ -33,6 +33,20 @@
 #define SYS_STATFS   27
 #define SYS_MEMINFO  28
 #define SYS_CPULOAD  29
+#define SYS_PSLIST   30
+// SYS_SET_FOREGROUND (31): pid (0 — снять). v0.7 план, этап 5, под-этап 6
+// (Ctrl+C). foreground_pid (process.h) уже существует и уже безопасно
+// используется shell_handle_ctrl_c() (kernel/shell/shell.c, отложенно из
+// timer_irq_handler() — см. комментарий у shell_ctrl_c_pending в shell.h)
+// для process_signal(foreground_pid, SIGINT) — сегодня его выставляет
+// только кернел-нативный command_run(). Этот syscall даёт то же самое
+// userspace-процессу (будущему shell.elf): fork() → SYS_SET_FOREGROUND(pid
+// ребёнка) → SYS_WAIT(pid) — если Ctrl+C убьёт ребёнка, SYS_WAIT вернётся
+// как обычно (тот же путь, что и при естественном завершении), никакого
+// отдельного уведомления не нужно. Разрешено выставлять только PID
+// СОБСТВЕННОГО ребёнка (process_set_foreground() проверяет ppid) — не
+// чужой процесс.
+#define SYS_SET_FOREGROUND 31
 
 // Флаги для sys_open
 #define O_RDONLY    0
@@ -105,6 +119,22 @@ typedef struct {
                                 // пользовательская программа, как и сегодня
                                 // делает kernel-native command_cpuload().
 } lufira_cpuload_t;
+
+// Одна запись снимка SYS_PSLIST (30) — v0.7 план, этап 5, под-этап 4: то же,
+// что process_ps() (process.c) уже печатает построчно из process_list, плюс
+// ppid/uid/cpu_ticks (те использует command_cpuload() для per-process
+// разбивки — process_t.cpu_ticks уже накапливается планировщиком, см.
+// комментарий у этого поля в process.h). state — сырое значение
+// process_state_t; имени состояния (process_state_name()) на этой стороне
+// нет, программа сама мапит числа в строки, см. userspace/user/ps.c.
+typedef struct {
+    uint32_t pid;
+    uint32_t ppid;
+    char name[32];
+    uint32_t state;
+    uint32_t uid;
+    uint64_t cpu_ticks;
+} lufira_ps_entry_t;
 
 // Потолок длины ЛЮБОЙ NUL-терминированной строки от пользователя (filename
 // для open/exec, path для chdir) — не даёт неверно терминированному буферу

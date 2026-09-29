@@ -520,6 +520,21 @@ static int elf_exec_internal(const void *elf_data,
         return -1;
     }
 
+    // process_create() всегда ставит cwd в корень (см. process.c) — верно
+    // для самого первого процесса (idle/shell), но не для run/runbg
+    // (command_run()/command_runbg(), kernel/shell/commands/*.c): та же
+    // проблема, что process_fork() уже решает для SYS_FORK (копирует
+    // cwd_inode/cwd_path родителя, process.c) — новый процесс здесь тоже
+    // логически "потомок" вызывающего (шелла), и должен унаследовать его
+    // текущий каталог, а не всегда стартовать в "/". elf_exec_replace()
+    // (do_exec()/command_exec()) этой проблемы не имело изначально — та
+    // переиспользует существующий proc, cwd в нём и так уже на месте
+    // (v0.7 план, этап 5, под-этап 3).
+    if (current_process) {
+        proc->cwd_inode = current_process->cwd_inode;
+        strcpy(proc->cwd_path, current_process->cwd_path);
+    }
+
     // Загружаем ELF
     void *entry = elf_load_to_process(
         elf_data,

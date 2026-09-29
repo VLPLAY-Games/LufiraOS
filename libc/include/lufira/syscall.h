@@ -46,6 +46,8 @@
 #define SYS_STATFS   27
 #define SYS_MEMINFO  28
 #define SYS_CPULOAD  29
+#define SYS_PSLIST   30
+#define SYS_SET_FOREGROUND 31
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -221,4 +223,34 @@ static inline long sys_meminfo(struct lufira_meminfo *out) {
 }
 static inline long sys_cpuload(struct lufira_cpuload *out) {
     return __syscall5(SYS_CPULOAD, (long)out, 0, 0, 0, 0);
+}
+
+// Мирроит lufira_ps_entry_t (kernel/system/syscall/syscall.h) байт-в-байт —
+// v0.7 план, этап 5, под-этап 4 ("ps").
+struct lufira_ps_entry {
+    uint32_t pid;
+    uint32_t ppid;
+    char name[32];
+    uint32_t state;
+    uint32_t uid;
+    uint64_t cpu_ticks;
+};
+
+// process_state_t (process.h) — значения state в struct lufira_ps_entry.
+#define LUFIRA_PROCESS_READY      0
+#define LUFIRA_PROCESS_RUNNING    1
+#define LUFIRA_PROCESS_BLOCKED    2
+#define LUFIRA_PROCESS_SLEEPING   3
+#define LUFIRA_PROCESS_TERMINATED 4
+#define LUFIRA_PROCESS_STOPPED    5
+
+static inline long sys_pslist(struct lufira_ps_entry *out, unsigned long max_count) {
+    return __syscall5(SYS_PSLIST, (long)out, (long)max_count, 0, 0, 0);
+}
+
+// pid == 0 снимает foreground (Ctrl+C больше никого не целит) — v0.7 план,
+// этап 5, под-этап 6. pid должен быть СОБСТВЕННЫМ ребёнком вызывающего
+// (ядро проверяет ppid, см. process_set_foreground()).
+static inline long sys_set_foreground(long pid) {
+    return __syscall5(SYS_SET_FOREGROUND, pid, 0, 0, 0, 0);
 }

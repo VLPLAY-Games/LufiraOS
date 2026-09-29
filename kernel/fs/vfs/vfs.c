@@ -2,6 +2,7 @@
 #include "system/mm/heap.h"
 #include "system/process/process.h"
 #include "drivers/console/console.h"
+#include "drivers/input/input.h"
 #include "lib/stddef.h"
 #include "lib/string.h"
 
@@ -87,14 +88,44 @@ inode_t* vfs_create_inode(uint32_t ino, file_type_t type,
 
 /* ========== КОНСОЛЬ ========== */
 
+// v0.7 план, этап 5, под-этап 6: настоящее блокирующее чтение — раньше
+// заглушка, всегда 0 (EOF немедленно). console_input_read() (drivers/input/
+// input.c) сама блокирует вызывающий процесс (PROCESS_BLOCKED + schedule()),
+// пока кольцевой буфер клавиатуры пуст, и сама же будит его обратно, когда
+// input_keyboard_event() кладёт туда байт (тем же приёмом, которым теперь и
+// pipe_read()/pipe_write() ниже явно будят друг друга).
 static int console_read(file_t *f, void *buf, size_t count) {
-    (void)f; (void)buf; (void)count;
-    return 0;
+    (void)f;
+    if (!buf || count == 0) return 0;
+    return console_input_read((uint8_t *)buf, (int)count);
+}
+
+// console_write() лочит EFLAGS.IF на всё время записи (тот же приём, что
+// уже heap_lock()/heap_unlock() в heap.c и elf_irq_save()/elf_irq_restore()
+// в elf.c: сохраняем реальное состояние, а не безусловный cli/sti — на
+// случай, если нас уже позвали из контекста, где прерывания и так
+// отключены) — иначе таймерный IRQ мог бы вклиниться ПОСРЕДИ цикла
+// put_char() ниже и передать CPU другому процессу, который тоже пишет в
+// консоль: без этой блокировки два процесса, реально пишущих одновременно,
+// байт-в-байт перемешивали вывод друг друга (обнаружено при регрессионном
+// прогоне v0.7, этап 5, под-этап 6 — два тестовых ELF, запущенных подряд
+// без задержки, дали "mmap1 OKatches OK" вместо двух разных строк).
+static inline uint64_t console_write_lock(void) {
+    uint64_t flags;
+    asm volatile("pushfq; popq %0" : "=r"(flags) :: "memory");
+    asm volatile("cli");
+    return flags;
+}
+
+static inline void console_write_unlock(uint64_t flags) {
+    asm volatile("push %0; popfq" : : "r"(flags) : "memory", "cc");
 }
 
 static int console_write(file_t *f, const void *buf, size_t count) {
     (void)f;
     if (!buf || count == 0) return 0;
+
+    uint64_t flags = console_write_lock();
 
     const char *str = (const char *)buf;
     int written = 0;
@@ -103,6 +134,8 @@ static int console_write(file_t *f, const void *buf, size_t count) {
         put_char(str[i]);
         written++;
     }
+
+    console_write_unlock(flags);
     return written;
 }
 
@@ -143,7 +176,27 @@ typedef struct pipe {
     uint32_t count;      // байт сейчас в буфере
     int readers;
     int writers;
+    // Процесс, заблокированный в pipe_read()/pipe_write() (не более одного
+    // с каждой стороны — тот же приём, что и у console_input_waiter,
+    // drivers/input/input.c). Раньше их не было вообще: current_process->
+    // state = PROCESS_BLOCKED; schedule(); ничего явно не будило обратно в
+    // PROCESS_READY — планировщик (schedule(), process.c) пропускает
+    // всё, что не PROCESS_READY, так что настоящий блокирующий сценарий
+    // (читатель дождался пустого буфера РАНЬШЕ, чем писатель успел
+    // записать) вешал бы читателя навсегда. Незаметно, потому что
+    // test/pipe_test.elf всегда пишет до того, как читает — обнаружено
+    // при работе над v0.7, этап 5, под-этап 6 (по аналогии с новым
+    // console_read()).
+    process_t *read_waiter;
+    process_t *write_waiter;
 } pipe_t;
+
+static void pipe_wake(process_t **waiter_slot) {
+    if (*waiter_slot) {
+        (*waiter_slot)->state = PROCESS_READY;
+        *waiter_slot = NULL;
+    }
+}
 
 static void pipe_free_if_orphaned(pipe_t *p) {
     if (p->readers == 0 && p->writers == 0) {
@@ -166,7 +219,9 @@ static int pipe_read(file_t *f, void *buf, size_t count) {
             }
             // Ждём данных: уступаем CPU, пока кто-то не запишет или не
             // закроет последний write-конец (тот же приём, что и в
-            // process_sleep()/process_wait()).
+            // process_sleep()/process_wait()) — pipe_write()/pipe_close_write()
+            // ниже явно будят нас обратно через pipe_wake(&p->read_waiter).
+            p->read_waiter = current_process;
             current_process->state = PROCESS_BLOCKED;
             schedule();
             continue;
@@ -176,6 +231,10 @@ static int pipe_read(file_t *f, void *buf, size_t count) {
         p->read_pos = (p->read_pos + 1) % p->size;
         p->count--;
         total++;
+
+        // Буфер только что освободил место — если писатель ждал именно
+        // этого (буфер был полон), пусть проверит своё условие снова.
+        pipe_wake(&p->write_waiter);
     }
 
     return (int)total;
@@ -194,6 +253,7 @@ static int pipe_write(file_t *f, const void *buf, size_t count) {
         }
 
         if (p->count == p->size) {
+            p->write_waiter = current_process;
             current_process->state = PROCESS_BLOCKED;
             schedule();
             continue;
@@ -203,6 +263,10 @@ static int pipe_write(file_t *f, const void *buf, size_t count) {
         p->write_pos = (p->write_pos + 1) % p->size;
         p->count++;
         total++;
+
+        // Буфер только что получил байт — если читатель ждал именно
+        // этого (буфер был пуст), пусть проверит своё условие снова.
+        pipe_wake(&p->read_waiter);
     }
 
     if (total == 0 && count > 0)
@@ -220,6 +284,10 @@ static int pipe_close_read(file_t *f) {
     pipe_t *p = (pipe_t *)(f->inode ? f->inode->private_data : NULL);
     if (p) {
         p->readers--;
+        // Писатель мог быть заблокирован именно на readers==0 ("сломанная
+        // труба") — теперь это условие могло стать истинным, пусть
+        // перепроверит.
+        pipe_wake(&p->write_waiter);
         pipe_free_if_orphaned(p);
     }
     return 0;
@@ -229,6 +297,10 @@ static int pipe_close_write(file_t *f) {
     pipe_t *p = (pipe_t *)(f->inode ? f->inode->private_data : NULL);
     if (p) {
         p->writers--;
+        // Читатель мог быть заблокирован в ожидании данных именно ПОТОМУ,
+        // что writers > 0 — теперь, когда это могло стать false (EOF),
+        // пусть перепроверит своё условие вместо вечного сна.
+        pipe_wake(&p->read_waiter);
         pipe_free_if_orphaned(p);
     }
     return 0;
@@ -283,6 +355,8 @@ int vfs_pipe(int fds[2]) {
     p->count = 0;
     p->readers = 1;
     p->writers = 1;
+    p->read_waiter = NULL;
+    p->write_waiter = NULL;
 
     int read_fd = alloc_fd();
     file_t *rf = (read_fd >= 0) ? alloc_file() : NULL;

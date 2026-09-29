@@ -118,6 +118,23 @@ static int64_t validate_user_string(uint64_t pml4_phys, uint64_t addr, uint64_t 
 // array_ptr==0 трактуется как argc=0, а не ошибка. Возвращает NULL при любой
 // другой ошибке (плохой указатель, больше MAX_EXEC_ARGS элементов, слишком
 // длинная строка) — без частично выделенного состояния.
+//
+// ВАЖНО для вызывающих SYS_EXEC/SYS_FORK+SYS_EXEC из userspace (v0.7 план,
+// этап 5, под-этап 6 — найдено при написании первого прямого вызывателя
+// SYS_EXEC вне кернел-нативного шелла): is_user_range_valid() ниже
+// проверяет ФИКСИРОВАННЫЙ диапазон (MAX_EXEC_ARGS+1)*8 байт от array_ptr,
+// а не только до фактического NULL-терминатора — так дешевле (не нужно
+// сначала безопасно прочитать переменную длину, чтобы узнать, сколько
+// проверять). Небольшой argv[] как ЛОКАЛЬНАЯ переменная на стеке (а не
+// static/global) может оказаться слишком близко к верху 16KB
+// пользовательского стека (USER_STACK_SIZE, process.h) — тогда этот
+// фиксированный диапазон вылетает за пределы замапленной страницы и
+// is_user_range_valid() честно возвращает отказ (-EFAULT), даже если
+// реальный, короткий argv[] с NULL-терминатором сам по себе целиком в
+// пределах маппинга. Единственный практичный способ обойти это на стороне
+// вызывающего — держать argv[]/envp[] в static/global памяти (.data/.bss,
+// свой собственный маппинг с большим запасом), а не в кадре стека — так и
+// стоит делать будущему shell.elf.
 static char **copy_user_string_array(uint64_t pml4_phys, uint64_t array_ptr) {
     if (array_ptr == 0) {
         char **empty = (char **)kmalloc(sizeof(char*));
@@ -775,6 +792,36 @@ static uint64_t sys_cpuload(uint64_t buf_ptr, uint64_t unused1, uint64_t unused2
     return 0;
 }
 
+// SYS_PSLIST (30): buf_ptr -> lufira_ps_entry_t[max_count], max_count —
+// снимок ВСЕХ живых процессов одним вызовом (process_pslist(), process.c) —
+// v0.7 план, этап 5, под-этап 4 ("ps"), единственная новая точка входа во
+// всём этапе. max_count == 0 — вырожденный, но валидный случай (узнать
+// нечего, буфер не нужен); is_user_range_valid() тогда не зовём вовсе,
+// т.к. buf_ptr в этом случае может быть и NULL.
+static uint64_t sys_pslist(uint64_t buf_ptr, uint64_t max_count, uint64_t unused1,
+                           uint64_t unused2, uint64_t unused3) {
+    (void)unused1; (void)unused2; (void)unused3;
+
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (max_count == 0) return 0;
+    if (!is_user_range_valid(current_process->page_table, buf_ptr,
+                              max_count * sizeof(lufira_ps_entry_t), 1))
+        return (uint64_t)-EFAULT;
+
+    return (uint64_t)process_pslist((lufira_ps_entry_t *)buf_ptr, (uint32_t)max_count);
+}
+
+// SYS_SET_FOREGROUND (31): pid (0 — снять). См. комментарий в syscall.h —
+// v0.7 план, этап 5, под-этап 6.
+static uint64_t sys_set_foreground(uint64_t pid, uint64_t unused1, uint64_t unused2,
+                                   uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+
+    if (!current_process) return (uint64_t)-EFAULT;
+    int res = process_set_foreground(current_process->pid, (uint32_t)pid);
+    return (res == 0) ? 0 : (uint64_t)-1;
+}
+
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
 
 static syscall_fn_t syscall_table[256] = {
@@ -808,6 +855,8 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_STATFS]  = sys_statfs,
     [SYS_MEMINFO] = sys_meminfo,
     [SYS_CPULOAD] = sys_cpuload,
+    [SYS_PSLIST]  = sys_pslist,
+    [SYS_SET_FOREGROUND] = sys_set_foreground,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========

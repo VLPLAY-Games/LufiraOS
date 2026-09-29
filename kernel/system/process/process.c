@@ -535,8 +535,15 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     proc->gid = current_process ? current_process->gid : 0;
     proc->cpu_ticks = 0;
 
+    // memset ПЕРЕД копированием, а не только "proc->name[31] = 0" — иначе
+    // хвост буфера после конца короткого имени (например "shell" — 5 из 32
+    // байт) остаётся чем попало из-под kmalloc() (не гарантированно
+    // нулевым, см. malloc.c), что молча "утекает" наружу через любой код,
+    // читающий name как честную NUL-терминированную строку байт за байтом
+    // дальше самого имени — нашлось на SYS_PSLIST (v0.7 план, этап 5,
+    // под-этап 4): userspace/user/ps.c читал этот хвост как часть имени.
+    memset(proc->name, 0, sizeof(proc->name));
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
-    proc->name[31] = '\0';
 
     // Собственная fd-таблица процесса со свежими stdin/stdout/stderr
     // (консоль). Реального наследования fd родителя здесь нет — это
@@ -895,8 +902,12 @@ int process_commit_exec(process_t *proc,
     // identity процесса, кроме случая setuid-бита на исполняемом файле,
     // которого в этой минимальной реализации нет вообще (см. process.h).
 
+    // memset — та же причина, что и в process_create() выше: без него, если
+    // НОВОЕ имя короче старого (напр. exec() с "somereallylongprogram" на
+    // "sh"), хвост буфера донёс бы обрывок СТАРОГО имени, а не просто пустой
+    // хвост.
+    memset(proc->name, 0, sizeof(proc->name));
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
-    proc->name[31] = '\0';
 
     return 0;
 }
@@ -1162,6 +1173,30 @@ void process_ps(void)
     irq_enable();
 }
 
+int process_pslist(lufira_ps_entry_t *out, uint32_t max_count) {
+    irq_disable();
+
+    uint32_t written = 0;
+    process_t *p = process_list;
+    if (p) {
+        process_t *start = p;
+        do {
+            if (written >= max_count) break;
+            out[written].pid = p->pid;
+            out[written].ppid = p->ppid;
+            memcpy(out[written].name, p->name, sizeof(out[written].name));
+            out[written].state = (uint32_t)p->state;
+            out[written].uid = p->uid;
+            out[written].cpu_ticks = p->cpu_ticks;
+            written++;
+            p = p->next;
+        } while (p && p != start);
+    }
+
+    irq_enable();
+    return (int)written;
+}
+
 // Общая часть SIGKILL/SIGTERM (единственная разница между ними в этом
 // ядре — только в exit_code, т.к. пользовательских обработчиков сигналов
 // нет и оба в итоге просто завершают процесс).
@@ -1264,6 +1299,28 @@ int process_signal(uint32_t pid, int sig)
 int process_kill(uint32_t pid)
 {
     return process_signal(pid, SIGKILL);
+}
+
+int process_set_foreground(uint32_t caller_pid, uint32_t target_pid)
+{
+    if (target_pid == 0) {
+        foreground_pid = 0;
+        return 0;
+    }
+
+    if (!process_list) return -1;
+    process_t *p = process_list;
+    process_t *start = p;
+    do {
+        if (p->pid == target_pid) {
+            if (p->ppid != caller_pid) return -1;
+            foreground_pid = target_pid;
+            return 0;
+        }
+        p = p->next;
+    } while (p && p != start);
+
+    return -1;
 }
 
 // Раскладка кадра регистров, который syscall_entry.S сохраняет на
