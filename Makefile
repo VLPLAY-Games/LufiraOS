@@ -268,13 +268,21 @@ run: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs
 $(BUILD_DIR)/usbstick.img:
 	dd if=/dev/zero of=$@ bs=1024 count=8192 status=none
 
-debug: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs $(BUILD_DIR)/usbstick.img
+debug: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs
 	echo "1" > $(BUILD_DIR)/devmode.flag
 	$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(BUILD_DIR)/devmode.flag /system/devmode.flag
 	rm -f $(BUILD_DIR)/devmode.flag
 	@printf "  $(BBLUE)▸$(RESET) Staging test binaries into /tests...\n"
 	$(BUILD_DIR)/mkfs_lufirafs mkdir $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /tests
 	$(foreach f,$(TEST_ELF_FILES),$(BUILD_DIR)/mkfs_lufirafs put $(BUILD_DIR)/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) $(f) /tests/$(notdir $(f));)
+	@printf "  $(BBLUE)▸$(RESET) Building usbstick.img (8 MB, FAT12)...\n"
+	rm -f $(BUILD_DIR)/usbstick.img
+	dd if=/dev/zero of=$(BUILD_DIR)/usbstick.img bs=1024 count=8192 status=none
+	mkfs.fat -F 12 $(BUILD_DIR)/usbstick.img
+	mmd -i $(BUILD_DIR)/usbstick.img ::/TESTDIR
+	echo "Hello from batched USB MSD test" > /tmp/hosttest.txt
+	mcopy -i $(BUILD_DIR)/usbstick.img /tmp/hosttest.txt ::/HOSTTEST.TXT
+	mdir -i $(BUILD_DIR)/usbstick.img ::/
 	qemu-system-x86_64 \
 		-bios /usr/share/ovmf/OVMF.fd \
 		-drive file=$(BUILD_DIR)/disk.img,format=raw,if=ide,index=0 \
@@ -282,7 +290,7 @@ debug: $(BUILD_DIR)/disk.img $(BUILD_DIR)/mkfs_lufirafs $(BUILD_DIR)/usbstick.im
 		-device qemu-xhci,id=xhci -device usb-kbd -device usb-mouse \
 		-drive if=none,id=usbstick,file=$(BUILD_DIR)/usbstick.img,format=raw \
 		-device usb-storage,bus=xhci.0,drive=usbstick \
-		-d cpu_reset,guest_errors -D $(BUILD_DIR)/qemu_debug.log
+		-d int,cpu_reset,guest_errors -D $(BUILD_DIR)/qemu_debug.log
 
 monitor: $(BUILD_DIR)/disk.img $(BUILD_DIR)/usbstick.img
 	qemu-system-x86_64 \
