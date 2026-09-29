@@ -212,6 +212,13 @@ $(BUILD_DIR)/mkfs_lufirafs: tools/mkfs_lufirafs.c $(KERNEL_DIR)/fs/lufirafs/lufi
 	@printf "  $(BCYAN)CC(host)$(RESET) $(DIM)$<$(RESET)\n"
 	$(CC) -O2 -Wall -o $@ $<
 
+# Хостовый упаковщик .lpg (v0.7 план, этап 2) — не входит в зависимости
+# disk.img (установка пакетов ВО ВРЕМЯ сборки образа — это этап 4), собран
+# отдельным правилом для ручной проверки ("make build/lpg_pack").
+$(BUILD_DIR)/lpg_pack: tools/lpg_pack.c tools/lpg_format.h
+	@printf "  $(BCYAN)CC(host)$(RESET) $(DIM)$<$(RESET)\n"
+	$(CC) -O2 -Wall -Wextra -o $@ $<
+
 # Диск — два региона без таблицы разделов (bootloader грузит в RAM ВЕСЬ
 # диск одним куском начиная с LBA 0, см. LUFIRAFS_ESP_SIZE в
 # lufirafs_format.h): первые LUFIRAFS_ESP_SIZE байт — маленький ESP,
