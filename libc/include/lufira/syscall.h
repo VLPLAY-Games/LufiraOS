@@ -48,6 +48,12 @@
 #define SYS_CPULOAD  29
 #define SYS_PSLIST   30
 #define SYS_SET_FOREGROUND 31
+#define SYS_SU 32
+#define SYS_MOUNT 33
+#define SYS_UNMOUNT 34
+#define SYS_REBOOT 35
+#define SYS_SHUTDOWN 36
+#define SYS_DEVMODE 37
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -253,4 +259,38 @@ static inline long sys_pslist(struct lufira_ps_entry *out, unsigned long max_cou
 // (ядро проверяет ppid, см. process_set_foreground()).
 static inline long sys_set_foreground(long pid) {
     return __syscall5(SYS_SET_FOREGROUND, pid, 0, 0, 0, 0);
+}
+
+// 0 при успехе (меняет uid/gid вызывающего процесса), иначе -errno
+// (-ENOENT — нет такого пользователя, -EPERM — неверный пароль). Пароль
+// проверяется В ЯДРЕ — root проходит без пароля, остальным он обязателен.
+static inline long sys_su(const char *username, const char *password) {
+    return __syscall5(SYS_SU, (long)username, (long)password, 0, 0, 0);
+}
+
+// Монтирует usb-устройство usb_index как FAT под префиксом prefix
+// ("/mnt/usb0") — обычные open/read/write/mkdir/unlink/readdir начинают
+// видеть файлы под этим префиксом (только корневой уровень флешки — см.
+// комментарий у SYS_MOUNT в kernel/system/syscall/syscall.h). >=0 при
+// успехе, иначе -errno-подобный код оттуда же.
+static inline long sys_mount(const char *prefix, long usb_index) {
+    return __syscall5(SYS_MOUNT, (long)prefix, usb_index, 0, 0, 0);
+}
+
+static inline long sys_unmount(const char *prefix) {
+    return __syscall5(SYS_UNMOUNT, (long)prefix, 0, 0, 0, 0);
+}
+
+// Требуют root; не возвращаются при успехе (-errno при неудаче).
+static inline long sys_reboot(void) {
+    return __syscall5(SYS_REBOOT, 0, 0, 0, 0, 0);
+}
+
+static inline long sys_shutdown(void) {
+    return __syscall5(SYS_SHUTDOWN, 0, 0, 0, 0, 0);
+}
+
+// mode: 0 — прочитать состояние (возвращает 0/1), 1 — включить, 2 — выключить.
+static inline long sys_devmode(long mode) {
+    return __syscall5(SYS_DEVMODE, mode, 0, 0, 0, 0);
 }

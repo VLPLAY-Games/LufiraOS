@@ -60,6 +60,22 @@ static void mark_fat_sector_dirty(fat_fs_t *fs, uint32_t cluster) {
 
 /* ======== Инициализация FAT с выделением dirty‑map ======== */
 
+// НАЙДЕННЫЙ БАГ (v0.7, этап 5, под-этап 6 продолжение — "VFS-интеграция
+// монтирования"): fat_mkdir()/fat_rm()/fat_create_file()/fat_write_file()/
+// fat_truncate_file() раньше сами звали fat_sync(fs) в конце. fat_sync()
+// жёстко пишет через disk_write_sectors() — это ATA-диск САМОЙ LufiraFS,
+// а fat_init() во всём дереве вызывается ТОЛЬКО из mount.c для USB-флешек
+// (grep подтверждает — других вызывающих нет). Значит эти 5 внутренних
+// fat_sync() всегда писали FAT-метаданные USB-флешки по LBA, ПЕРЕСЧИТАННЫМ
+// от начала флешки, НА РЕАЛЬНЫЙ СИСТЕМНЫЙ ДИСК — то есть тихо портили
+// LufiraFS при первом же fat_create_file()/fat_write_file() на смонтированной
+// флешке (mountwrite уже наступал бы на эти грабли). mount.c's собственный
+// header-комментарий ошибочно утверждает, что fat_sync()/fat_flush() "не
+// используются" — это было верно для ПРЯМЫХ вызовов, но не для вызовов
+// через эти 5 функций. Исправление: убрать внутренние fat_sync(fs) отсюда,
+// синхронизация — ответственность вызывающего (тот же принцип, что у
+// lufirafs_write()/lufirafs_sync() в VFS-обвязке LufiraFS) — см.
+// fat_mount.c, который синхронизирует явно и правильно, на USB.
 int fat_init(fat_fs_t *fs, void *image, uint32_t image_size) {
     if (!image || image_size < 512) return -1;
     fs->image = (uint8_t*)image;
@@ -682,8 +698,6 @@ int fat_mkdir(fat_fs_t *fs,
         next_entry->name[0] = 0x00;
     }
 
-    fat_sync(fs);
-
     return 0;
 }
 
@@ -855,8 +869,6 @@ int fat_rm(fat_fs_t *fs,
 
     fat_mark_sector_dirty(fs, parent_lba);
 
-    fat_sync(fs);
-
     return 0;
 }
 
@@ -889,8 +901,6 @@ int fat_create_file(fat_fs_t *fs, uint32_t parent_cluster, const char *name) {
 
     if (next_entry && next_entry->name[0] != 0x00)
         next_entry->name[0] = 0x00;
-
-    fat_sync(fs);
 
     return 0;
 }
@@ -1021,8 +1031,6 @@ int fat_write_file(fat_fs_t *fs, const char *filename, const void *buffer, uint3
         (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
     fat_mark_sector_dirty(fs, dir_lba);
 
-    fat_sync(fs);
-
     return 0;
 }
 
@@ -1101,8 +1109,6 @@ int fat_append_file(fat_fs_t *fs, const char *filename, const void *buffer, uint
     uint32_t dir_lba = fs->root_dir_start +
         (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
     fat_mark_sector_dirty(fs, dir_lba);
-
-    fat_sync(fs);
 
     return 0;
 }

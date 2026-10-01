@@ -261,7 +261,9 @@ This document covers only the kernel-space libraries in `kernel/lib/`, used inte
 - **`libc/src/malloc.c`** – arena-based `malloc`/`free`, built entirely on `mmap()`/`munmap()` (see [`11_memory_management.md`](11_memory_management.md)).
 - **`libc/src/printf.c`** and **`libc/include/string.h`/`string.c`** – a small `printf` and a `string.h` subset.
 
-It is compiled and linked as a completely separate toolchain pass from the kernel (freestanding, non-PIE, no red zone — see the header comment in `libc/crt0.S` for the exact flags) and has no build-system automation yet (test programs under `test/c/` are built manually and committed prebuilt, matching this project's existing convention for `test/*.asm`). It is not documented section-by-section here since it's a distinct, userspace-only component; read the source directly for details.
+It is compiled and linked as a completely separate toolchain pass from the kernel (freestanding, non-PIE, no red zone — see the header comment in `libc/crt0.S` for the exact flags). It is not documented section-by-section here since it's a distinct, userspace-only component; read the source directly for details.
+
+Kernel/libc test programs (previously `test/*.asm` and `test/c/*.c`, built manually and committed prebuilt) have moved to the separate `lufira-tests` repository, which builds them from source and publishes a release archive that `LufiraOS-Builder`'s `debug` command fetches and unpacks into the image (v0.7 plan, stage 7).
 
 ---
 

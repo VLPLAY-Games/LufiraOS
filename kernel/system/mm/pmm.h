@@ -12,9 +12,14 @@ typedef struct {
     uint64_t Attribute;
 } EFI_MEMORY_DESCRIPTOR;
 
-// Инициализация PMM: передаётся карта памяти и информация о ядре
+// Инициализация PMM: передаётся карта памяти, информация о ядре и
+// ДОПОЛНИТЕЛЬНЫЙ регион, который нужно зарезервировать точно так же, как
+// kernel_base/kernel_size (reserved_base==0 — ничего резервировать, кроме
+// ядра). Используется для bi->FATImageBase — см. подробный комментарий в
+// pmm.c у места, где он резервируется.
 void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
-              uint64_t kernel_base, uint64_t kernel_size);
+              uint64_t kernel_base, uint64_t kernel_size,
+              uint64_t reserved_base, uint64_t reserved_size);
 
 // Выделить одну физическую страницу (возвращает физический адрес, 0 при ошибке)
 uint64_t pmm_alloc_page(void);

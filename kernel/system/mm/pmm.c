@@ -28,7 +28,8 @@ static inline int bitmap_test(uint64_t page) {
 
 // Первый проход: подсчёт максимального числа страниц и выбор места для bitmap
 void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
-              uint64_t kernel_base, uint64_t kernel_size)
+              uint64_t kernel_base, uint64_t kernel_size,
+              uint64_t reserved_base, uint64_t reserved_size)
 {
     uint8_t *map = (uint8_t*)memory_map;
     uint64_t desc_count = map_size / desc_size;
@@ -195,6 +196,35 @@ void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
         bitmap_set(kernel_start_page + p);
 
     // =====================================================
+    // РЕЗЕРВ ОБРАЗА ДИСКА В RAM (bi->FATImageBase)
+    // =====================================================
+    //
+    // Бутлоадер грузит ВЕСЬ диск (ESP + LufiraFS) одним куском в RAM через
+    // UEFI AllocatePages(AllocateAnyPages, EfiLoaderData, ...) (см.
+    // boot/loaders/fat_loader.c) — а LufiraFS (lufirafs.c) потом читает и
+    // пишет прямо в эту память как в единственный источник правды (fs->image),
+    // без какого-либо отдельного кеша. Раньше pmm_init() ничего не знал об
+    // этом регионе и резервировал только kernel_base/kernel_size — если UEFI
+    // память под эту аллокацию попадала в карту как EfiConventionalMemory
+    // (или если прошивка переиспользовала адреса, которые сама же разметила
+    // неточно), pmm_alloc_page() рано или поздно выдавал процессу физическую
+    // страницу, которая на самом деле являлась частью образа ФС на диске.
+    // Процесс писал в "свою" страницу как ни в чём не бывало — а на самом
+    // деле тихо портил LufiraFS прямо в памяти: случайные inode/dirent/блоки
+    // переставали совпадать с тем, что там должно быть. Воспроизводилось как
+    // "lufirafs_lookup() вдруг не находит существующий файл" после
+    // достаточного числа подряд идущих fork()+exec() (каждый клонирует/дерево
+    // строит много новых страниц, так и добирались до этого региона). Фикс —
+    // тот же приём, что уже есть для kernel_base/kernel_size: резервируем
+    // явно, раз и навсегда, до первого же pmm_alloc_page().
+    if (reserved_base && reserved_size) {
+        uint64_t reserved_start_page = reserved_base / PAGE_SIZE;
+        uint64_t reserved_pages = (reserved_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        for (uint64_t p = 0; p < reserved_pages; p++)
+            bitmap_set(reserved_start_page + p);
+    }
+
+    // =====================================================
     // ПОДСЧЁТ USED PAGES
     // =====================================================
 
@@ -236,6 +266,35 @@ uint64_t pmm_alloc_page(void) {
     uint64_t flags = pmm_lock();
 
     for (uint64_t i = next_free_page; i < total_pages; i++) {
+
+        if (!bitmap_test(i)) {
+
+            bitmap_set(i);
+            used_pages++;
+
+            next_free_page = i + 1;
+
+            pmm_unlock(flags);
+            return i * PAGE_SIZE;
+        }
+    }
+
+    // Дошли до конца битмапа, не найдя свободного бита — это НЕ значит,
+    // что свободных страниц нет вообще: next_free_page только растёт и
+    // никогда не возвращается назад, так что все страницы, которые
+    // pmm_free_page() успела освободить НИЖЕ прежнего next_free_page, этим
+    // циклом просто ни разу не были осмотрены повторно. Без оборота здесь
+    // любой код, который много раз подряд что-то выделяет и тут же
+    // освобождает (классический случай — fork()+exec() в шелле: глубокое
+    // клонирование адресного пространства при fork() и его же освобождение
+    // при exec()), раз за разом толкает next_free_page вперёд и никогда не
+    // возвращает уже свободную память обратно в оборот — пока watermark не
+    // упрётся в total_pages и pmm_alloc_page() не начнёт молча возвращать 0
+    // при ещё половине физической памяти, реально свободной. Один
+    // дополнительный проход по "хвосту" ниже прежнего watermark (начиная с
+    // 512 — страницы 0..511 зарезервированы навсегда, см. pmm_init())
+    // решает это раз и навсегда.
+    for (uint64_t i = 512; i < next_free_page; i++) {
 
         if (!bitmap_test(i)) {
 
@@ -292,6 +351,20 @@ void pmm_free_page(uint64_t phys) {
     if (page >= total_pages) return;
 
     uint64_t flags = pmm_lock();
+    // Страховка от двойного free(): bitmap_clear() на уже свободном бите
+    // сама по себе безвредна (идемпотентна), но used_pages-- БЕЗ этой
+    // проверки всё равно продолжал бы уменьшаться при каждом повторном
+    // вызове — счётчик расходился бы с реальным состоянием битмапа (нашлось
+    // при отладке free_user_address_space()/clone_address_space_deep():
+    // настоящий баг уже исправлен, но дешёвая защита от будущих таких же
+    // ошибок того стоит — иначе следующий подобный баг снова будет не
+    // диагностировать по used_pages, а маскироваться под "ещё полно
+    // свободной памяти", пока pmm_alloc_page() не начнёт возвращать 0 на
+    // самом деле пустом битмапе).
+    if (!bitmap_test(page)) {
+        pmm_unlock(flags);
+        return;
+    }
     bitmap_clear(page);
     used_pages--;
     pmm_unlock(flags);

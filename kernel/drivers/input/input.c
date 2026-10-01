@@ -75,27 +75,19 @@ void input_keyboard_event(int key) {
     if (key == 0) return;
 
     // Дедупликация PS/2+USB HID — см. комментарий у KEY_DEBOUNCE_TICKS
-    // выше. Поднято ДО foreground_pid-гейта ниже (раньше было после), чтобы
-    // относиться одинаково к обоим потребителям этого события — и старому
-    // kernel-native шеллу (switch ниже), и новому console_input_push()
-    // (следующий блок): дубликат не должен просачиваться ни в тот, ни в
-    // другой. Видимое поведение старого шелла не меняется — тот всё равно
-    // получает событие только после гейта, как и раньше.
+    // выше: дубликат не должен просачиваться ни в ring buffer ниже, ни в
+    // Ctrl+C/scroll-обработку в конце функции.
     uint64_t now = pit_get_ticks();
     int is_duplicate = (key == last_key && (now - last_key_tick) < KEY_DEBOUNCE_TICKS);
     last_key = key;
     last_key_tick = now;
     if (is_duplicate) return;
 
-    // Параллельный путь в кольцевой буфер /dev/console (см. input.h) — для
-    // будущего shell.elf (v0.7 план, этап 5, под-этап 6), независимо от
-    // foreground_pid ниже: та переменная — особенность СЕГОДНЯШНЕГО
-    // kernel-native шелла (run/exec блокируют его собственный цикл), не
-    // имеет смысла для процесса, который блокируется на настоящем
-    // console_read(). Ctrl+Up/Down (скролл вьюпорта) и KEY_CTRL_C
+    // Кольцевой буфер /dev/console (см. input.h) — то, что реально читает
+    // shell.elf через SYS_READ. Ctrl+Up/Down (скролл вьюпорта) и KEY_CTRL_C
     // сознательно НЕ попадают в этот поток — первое просто разметка
-    // экрана, не часть строки ввода; второе станет настоящим SIGINT
-    // (следующий под-этап), не байтом.
+    // экрана, не часть строки ввода; второе доставляется как настоящий
+    // SIGINT через shell_ctrl_c_pending (см. конец функции), не байтом.
     switch (key) {
         case KEY_LEFT_ARROW:
         case KEY_RIGHT_ARROW:
@@ -112,80 +104,59 @@ void input_keyboard_event(int key) {
             break;
     }
 
-    // Пока на переднем плане реально исполняется run/exec (foreground_pid —
-    // см. process.h/elf.c), шелл не должен ни печатать, ни отдавать команды
-    // на выполнение: раньше ввод продолжал накапливаться и Enter взводил
-    // shell_command_pending даже в это время, а выполнялся он лишь позже,
-    // когда shell_task() снова окажется в своём цикле (после завершения
-    // foreground-процесса) — то есть команда стартовала не тогда и не в
-    // том состоянии, в котором её набирали, и внешне выглядело так, будто
-    // "шелл работает параллельно с exec", хотя на самом деле просто
-    // отложенно доигрывал устаревший ввод. Ctrl+C — единственное исключение:
-    // это и есть штатный способ прервать foreground-процесс.
-    if (foreground_pid != 0 && key != KEY_CTRL_C) return;
-
-    switch (key) {
-        case KEY_LEFT_ARROW:
-            if (console_is_scrolled())
-                console_scroll_to_bottom();
-
-            shell_handle_left_arrow();
-            return;
-
-        case KEY_RIGHT_ARROW:
-            if (console_is_scrolled())
-                console_scroll_to_bottom();
-
-            shell_handle_right_arrow();
-            return;
-
-        case KEY_UP_ARROW:
-            if (keyboard_ctrl_pressed()) {
-                console_scroll_up();
-                return;
-            }
-
-            if (console_is_scrolled())
-                console_scroll_to_bottom();
-
-            shell_handle_up_arrow();
-            return;
-
-        case KEY_DOWN_ARROW:
-            if (keyboard_ctrl_pressed()) {
-                console_scroll_down();
-                return;
-            }
-
-            if (console_is_scrolled())
-                console_scroll_to_bottom();
-
-            shell_handle_down_arrow();
-            return;
-        case '\t':  // Tab!
-            shell_handle_tab();
-            return;
-
-        case KEY_CTRL_C:
-            if (console_is_scrolled())
-                console_scroll_to_bottom();
-
-            // Не вызываем shell_handle_ctrl_c() отсюда напрямую — см.
-            // подробный комментарий у shell_ctrl_c_pending в shell.h.
-            shell_ctrl_c_pending = 1;
-            return;
-    }
-
-    if (key == '\n') {
-        shell_handle_enter();
+    // НАЙДЕННЫЙ БАГ (v0.7 план, этап 5, под-этап 6 продолжение — репорт
+    // пользователя: "буква дублируется на экране, но не дублируется по
+    // логике"): здесь раньше стоял ПОЛНЫЙ диспетчер к shell_handle_*()
+    // (kernel/shell/shell.c) — мёртвому кернел-native шеллу. shell_task()
+    // удалена, shell_run_pending_command() нигде не вызывается, но ЭТОТ
+    // диспетчер, в отличие от них, вызывался ПРЯМО ОТСЮДА, на каждое
+    // нажатие клавиши, независимо от shell_task(). shell_handle_char()/
+    // shell_handle_backspace()/shell_refresh_input_line() и т.д. рисуют
+    // ПРЯМО на экране через put_char_graphic() по СВОИМ собственным
+    // command_start_x/command_start_y/current_line/cursor_position_in_line
+    // (статические переменные в shell.c) — координаты, выставленные один
+    // раз (или никогда не выставленные, оставшиеся 0) и никогда не
+    // синхронизированные с current_x/current_y настоящей консоли, которые
+    // использует новый shell.elf через SYS_WRITE на /dev/console. Итог:
+    // каждая набранная буква рисовалась ДВАЖДЫ — один раз правильно (через
+    // ring buffer -> shell.elf -> sys_write -> console_write -> put_char,
+    // на настоящей текущей позиции курсора) и один раз призрачно (через
+    // этот мёртвый путь, всегда в одном и том же старом месте у верха
+    // экрана, что и описал пользователь скриншотом) — НЕ дублируясь в
+    // логике, потому что мёртвый путь никогда не трогает line[]/len
+    // userspace-шелла, только пиксели.
+    //
+    // foreground_pid-гейт (раньше "if (foreground_pid != 0 && key !=
+    // KEY_CTRL_C) return;") тоже был специфичен для старого шелла
+    // (запрещал ему рисовать/исполнять, пока run/exec уже исполняется на
+    // переднем плане) — новому shell.elf он не нужен: пока его дочерний
+    // процесс foreground, сам shell.elf блокирован в SYS_WAIT и не читает
+    // /dev/console вовсе, значит ввод просто копится в ring buffer до его
+    // следующего SYS_READ, как и положено.
+    //
+    // Что осталось легитимным и перенесено ниже без изменений:
+    //  - Ctrl+Up/Down — скролл вьюпорта истории консоли (console_scroll_*),
+    //    отдельная от шелла функция, не исполнение команд.
+    //  - Ctrl+C — взводит shell_ctrl_c_pending для реального вызова
+    //    shell_handle_ctrl_c() из timer_irq_handler() (см. подробный
+    //    комментарий у shell_ctrl_c_pending в shell.h) — ЭТОТ механизм
+    //    живой: именно на нём держится SYS_SET_FOREGROUND/Ctrl+C для
+    //    shell.elf (v0.7 план, этап 5, под-этап 6, фаза 2).
+    if (key == KEY_UP_ARROW && keyboard_ctrl_pressed()) {
+        console_scroll_up();
         return;
     }
-    if (key == '\b') {
-        shell_handle_backspace();
+    if (key == KEY_DOWN_ARROW && keyboard_ctrl_pressed()) {
+        console_scroll_down();
         return;
     }
+    if (key == KEY_CTRL_C) {
+        if (console_is_scrolled())
+            console_scroll_to_bottom();
 
-    shell_handle_char(key);
+        shell_ctrl_c_pending = 1;
+        return;
+    }
 }
 
 void input_mouse_event(int dx, int dy, uint8_t buttons) {

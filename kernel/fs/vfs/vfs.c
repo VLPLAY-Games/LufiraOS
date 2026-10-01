@@ -5,6 +5,7 @@
 #include "drivers/input/input.h"
 #include "lib/stddef.h"
 #include "lib/string.h"
+#include "fs/fat/fat_mount.h"
 
 extern int vfs_open_lufirafs(const char *path, int flags);
 
@@ -121,17 +122,56 @@ static inline void console_write_unlock(uint64_t flags) {
     asm volatile("push %0; popfq" : : "r"(flags) : "memory", "cc");
 }
 
+// Управляющие последовательности для /dev/console (v0.7 план, этап 5,
+// под-этап 6: "проще, но менее гибко" вариант из плана — не настоящий
+// ANSI (эта ОС не обещает совместимости с внешними терминалами, только
+// сама с собой, тот же дух, что и .lpg/lufirafs — свой простой формат
+// вместо готового стандарта). ESC (0x1B), затем однобайтовая команда:
+//   ESC 'f' <color>              — set_foreground_color (0..15)
+//   ESC 'b' <color>              — set_background_color (0..15)
+//   ESC 'p' <x_hi><x_lo><y_hi><y_lo> — set_cursor_position (big-endian u16)
+//   ESC 'c'                      — clear_screen
+// Каждая последовательность должна укладываться ЦЕЛИКОМ в один sys_write()
+// (парсер не хранит состояние между вызовами) — ровно так их и собирает
+// userspace/common/console.h.
 static int console_write(file_t *f, const void *buf, size_t count) {
     (void)f;
     if (!buf || count == 0) return 0;
 
     uint64_t flags = console_write_lock();
 
-    const char *str = (const char *)buf;
+    const uint8_t *str = (const uint8_t *)buf;
     int written = 0;
-    for (size_t i = 0; i < count; i++) {
+    size_t i = 0;
+    while (i < count) {
         if (str[i] == '\0') break;
-        put_char(str[i]);
+
+        if (str[i] == 0x1B && i + 1 < count) {
+            char cmd = (char)str[i + 1];
+            if (cmd == 'f' && i + 2 < count) {
+                set_foreground_color((ConsoleColor)str[i + 2]);
+                i += 3; written += 3; continue;
+            }
+            if (cmd == 'b' && i + 2 < count) {
+                set_background_color((ConsoleColor)str[i + 2]);
+                i += 3; written += 3; continue;
+            }
+            if (cmd == 'p' && i + 5 < count) {
+                uint32_t x = ((uint32_t)str[i + 2] << 8) | str[i + 3];
+                uint32_t y = ((uint32_t)str[i + 4] << 8) | str[i + 5];
+                set_cursor_position(x, y);
+                i += 6; written += 6; continue;
+            }
+            if (cmd == 'c') {
+                clear_screen();
+                i += 2; written += 2; continue;
+            }
+            // Незнакомая/обрезанная команда — печатаем ESC как обычный
+            // символ, не застреваем.
+        }
+
+        put_char((char)str[i]);
+        i++;
         written++;
     }
 
@@ -438,6 +478,18 @@ int vfs_open(const char *path, int flags)
         return -1;
 
     /*
+     * Смонтированный FAT (/mnt/...) — ПЕРЕД LufiraFS: примонтированный
+     * путь должен перекрывать то, что там было раньше, как в любой
+     * настоящей ОС (v0.7 план, этап 5, под-этап 6, VFS-интеграция
+     * монтирования — см. fat_mount.h). -2 значит "path не под монтированием",
+     * тогда просто продолжаем как раньше.
+     */
+    {
+        int fat_fd = vfs_fat_open(path, flags);
+        if (fat_fd != -2) return fat_fd;
+    }
+
+    /*
      * LufiraFS сначала.
      */
     int fd =
@@ -483,6 +535,11 @@ int vfs_open_at(uint32_t base_inode, const char *path, int flags)
     if (!path || !*path)
         return -1;
 
+    if (path[0] == '/') {
+        int fat_fd = vfs_fat_open(path, flags);
+        if (fat_fd != -2) return fat_fd;
+    }
+
     int fd = vfs_lufirafs_open_at(base_inode, path, flags);
     if (fd >= 0)
         return fd;
@@ -513,14 +570,37 @@ int vfs_close(int fd) {
         f->ops->close(f);
     }
 
+    // f (сам file_t*) — ОДИН общий объект на все fd, которые на него
+    // указывают: fork() копирует fd_table РОДИТЕЛЯ ребёнку присваиванием
+    // всей структуры (process_fork(), process.c) — "child->fd_table =
+    // parent->fd_table" копирует МАССИВ УКАЗАТЕЛЕЙ, а не сами file_t —
+    // так что files[i] что у родителя, что у ребёнка указывает на ОДИН И
+    // ТОТ ЖЕ file_t (тот же приём и у vfs_dup2()). free_file(f) раньше
+    // вызывался здесь БЕЗУСЛОВНО, при закрытии ЛЮБОГО из этих fd — то
+    // есть первый же process_exit() любого форкнутого ребёнка (child
+    // закрывает унаследованные stdin/stdout/stderr через
+    // free_process_resources()) освобождал РОДИТЕЛЬСКИЙ (например, у
+    // самого шелла) file_t прямо у него из-под ног, хотя тот как ни в чём
+    // не бывало продолжал на него указывать — классическая double-free/
+    // use-after-free, которая на практике проявлялась как шелл,
+    // ломающийся намертво после нескольких подряд fork()+exec() команд
+    // (куча потихоньку перевыделяла освобождённую память под что-то
+    // другое, и "чужой" file_t начинал указывать на мусор). f->inode уже
+    // учитывает это через ref_count (vfs_dup_fd() увеличивает его при
+    // каждом дублировании fd) — используем тот же счётчик, чтобы
+    // освободить f ТОЛЬКО когда закрывается последняя ссылка на него.
+    int last_ref = 1;
     if (f->inode) {
         f->inode->ref_count--;
-        if (f->inode->ref_count <= 0) {
+        last_ref = (f->inode->ref_count <= 0);
+        if (last_ref) {
             kfree(f->inode);
         }
     }
 
-    free_file(f);
+    if (last_ref) {
+        free_file(f);
+    }
     current_fd_table->files[fd] = NULL;
     current_fd_table->count--;
     return 0;
@@ -630,6 +710,13 @@ int vfs_create(const char *path)
     if (!path || !*path)
         return -1;
 
+    int fat_fd = vfs_fat_open(path, O_CREAT | O_RDONLY);
+    if (fat_fd != -2) {
+        if (fat_fd < 0) return -1;
+        vfs_close(fat_fd);
+        return 0;
+    }
+
     return vfs_lufirafs_create(path);
 }
 
@@ -638,6 +725,9 @@ int vfs_mkdir(const char *path)
 {
     if (!path || !*path)
         return -1;
+
+    int r = vfs_fat_mkdir(path);
+    if (r != -2) return r;
 
     return vfs_lufirafs_mkdir(path);
 }
@@ -648,6 +738,9 @@ int vfs_unlink(const char *path)
     if (!path || !*path)
         return -1;
 
+    int r = vfs_fat_unlink(path);
+    if (r != -2) return r;
+
     return vfs_lufirafs_unlink(path);
 }
 
@@ -656,6 +749,9 @@ int vfs_rmdir(const char *path)
 {
     if (!path || !*path)
         return -1;
+
+    int r = vfs_fat_unlink(path);
+    if (r != -2) return r;
 
     return vfs_lufirafs_unlink(path);
 }
@@ -706,6 +802,9 @@ inode_t* vfs_lookup(const char *path)
     if (!path || !*path)
         return NULL;
 
+    inode_t *fat_inode = vfs_fat_lookup(path);
+    if (fat_inode) return fat_inode;
+
     return vfs_lufirafs_lookup(path);
 }
 
@@ -714,6 +813,11 @@ int vfs_mkdir_at(uint32_t base_inode, const char *path)
 {
     if (!path || !*path)
         return -1;
+
+    if (path[0] == '/') {
+        int r = vfs_fat_mkdir(path);
+        if (r != -2) return r;
+    }
 
     return vfs_lufirafs_mkdir_at(base_inode, path);
 }
@@ -724,6 +828,11 @@ int vfs_rmdir_at(uint32_t base_inode, const char *path)
     if (!path || !*path)
         return -1;
 
+    if (path[0] == '/') {
+        int r = vfs_fat_unlink(path);
+        if (r != -2) return r;
+    }
+
     return vfs_lufirafs_unlink_at(base_inode, path);
 }
 
@@ -732,6 +841,11 @@ int vfs_unlink_at(uint32_t base_inode, const char *path)
 {
     if (!path || !*path)
         return -1;
+
+    if (path[0] == '/') {
+        int r = vfs_fat_unlink(path);
+        if (r != -2) return r;
+    }
 
     return vfs_lufirafs_unlink_at(base_inode, path);
 }
@@ -742,6 +856,15 @@ int vfs_create_at(uint32_t base_inode, const char *path)
     if (!path || !*path)
         return -1;
 
+    if (path[0] == '/') {
+        int fat_fd = vfs_fat_open(path, O_CREAT | O_RDONLY);
+        if (fat_fd != -2) {
+            if (fat_fd < 0) return -1;
+            vfs_close(fat_fd);
+            return 0;
+        }
+    }
+
     return vfs_lufirafs_create_at(base_inode, path);
 }
 
@@ -750,6 +873,11 @@ inode_t* vfs_lookup_at(uint32_t base_inode, const char *path)
 {
     if (!path || !*path)
         return NULL;
+
+    if (path[0] == '/') {
+        inode_t *fat_inode = vfs_fat_lookup(path);
+        if (fat_inode) return fat_inode;
+    }
 
     return vfs_lufirafs_lookup_at(base_inode, path);
 }

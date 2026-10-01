@@ -12,7 +12,6 @@
 #include "drivers/sound/ac97.h"
 #include "drivers/usb/xhci.h"
 #include "net/net.h"
-#include "shell/shell.h"
 #include "system/cpu/gdt.h"
 #include "system/cpu/idt.h"
 #include "system/cpu/tss.h"
@@ -26,6 +25,8 @@
 #include "system/devmode/devmode.h"
 #include "system/klog/klog.h"
 #include "system/users/users.h"
+#include "system/elf/elf.h"
+#include "lib/string.h"
 #include "log.h"
 
 
@@ -87,12 +88,24 @@ static void draw_shell_watermark(void) {
     draw_text_tilted("LufiraOS", 10, 4, 2, RGB_DARK_GRAY);
 }
 
-static void shell_task(void) {
+// v0.7 план, этап 5, под-этап 6: шелл теперь настоящий userspace ELF
+// (/bin/shell.elf) вместо кернел-функции shell_task() (удалена) — читает
+// файл СЫРЫМИ примитивами LufiraFS (lufirafs_lookup()/lufirafs_read()), а
+// не через vfs_open(): на самом первом вызове (из _start(), до создания
+// хоть одного процесса) current_process/current_fd_table, на которые
+// опирается VFS, ещё не существуют. Та же последовательность действий,
+// что elf_exec_internal(..., background=1) (elf.c) делает для run/runbg,
+// только инлайнена здесь, чтобы сразу получить готовый process_t* и
+// выставить is_shell/cwd на нём самом, а не через отдельный проход по
+// process_list после.
+static process_t *spawn_shell_process(void) {
     // shell_is_respawn=1 значит: это не первая загрузка, а пересоздание
-    // после того, как exec подменил собой предыдущий процесс "shell", и та
-    // программа затем завершилась (см. respawn_shell_if_needed() в
-    // process.c). В этом случае вступительный баннер не печатаем — иначе
-    // это слишком явно выглядело бы как перезагрузка системы.
+    // после того, как предыдущий /bin/shell.elf завершился (крашнулся,
+    // "exit", или его убил Ctrl+C как foreground-процесс — см.
+    // respawn_shell_if_needed() в process.c, которая взводит этот флаг
+    // ДО вызова этой функции). В этом случае вступительный баннер не
+    // печатаем — иначе это слишком явно выглядело бы как перезагрузка
+    // системы.
     if (shell_is_respawn) {
         shell_is_respawn = 0;
     } else {
@@ -105,24 +118,71 @@ static void shell_task(void) {
         set_foreground_color(LOG_COLOR_INFO);
     }
 
-    show_prompt();
-    draw_cursor();
-
-    while (1) {
-        asm volatile("sti");
-        asm volatile("hlt");
-        // Выполняем команду, взведённую shell_handle_enter() (если Enter
-        // был нажат за это ожидание), ПОКА прерывания ещё разрешены — см.
-        // подробный комментарий у shell_handle_enter()/
-        // shell_run_pending_command() в shell.c: команда может блокирующе
-        // ждать тиков PIT (pit_wait_ms() — сетевые ping/wget и т.п.), а это
-        // требует, чтобы таймерное прерывание могло сработать, что
-        // невозможно, если исполнять её прямо изнутри обработчика
-        // прерывания (как было раньше).
-        shell_run_pending_command();
-        asm volatile("cli");     // Запретить прерывания перед schedule
-        schedule();              // Передать управление другим процессам
+    const char *path = "/bin/shell.elf";
+    uint32_t ino;
+    if (lufirafs_lookup(&lufirafs, lufirafs.sb.root_inode, path, &ino) != 0) {
+        printf("[KERNEL] FATAL: %s not found\n", path);
+        return NULL;
     }
+
+    lufirafs_inode_t inode;
+    if (lufirafs_read_inode(&lufirafs, ino, &inode) != 0 || inode.size == 0) {
+        printf("[KERNEL] FATAL: %s unreadable\n", path);
+        return NULL;
+    }
+
+    uint8_t *buf = (uint8_t *)kmalloc(inode.size);
+    if (!buf) {
+        printf("[KERNEL] FATAL: out of memory loading %s\n", path);
+        return NULL;
+    }
+    if (lufirafs_read(&lufirafs, ino, 0, buf, inode.size) != (int)inode.size) {
+        printf("[KERNEL] FATAL: short read on %s\n", path);
+        kfree(buf);
+        return NULL;
+    }
+
+    process_t *proc = process_create("shell", NULL);
+    if (!proc) {
+        printf("[KERNEL] FATAL: process_create failed for shell\n");
+        kfree(buf);
+        return NULL;
+    }
+
+    // process_create() всегда ставит cwd в корень — верно для самого
+    // первого запуска, но при респауне логичнее унаследовать cwd
+    // умиравшего шелла (current_process в этот момент — он же), тем же
+    // приёмом, что уже elf_exec_internal() использует для run/runbg.
+    if (current_process) {
+        proc->cwd_inode = current_process->cwd_inode;
+        strcpy(proc->cwd_path, current_process->cwd_path);
+    }
+
+    void *entry = elf_load_to_process(buf, inode.size, proc, "shell");
+    if (!entry) {
+        printf("[KERNEL] FATAL: failed to load %s\n", path);
+        proc->state = PROCESS_TERMINATED;
+        kfree(buf);
+        return NULL;
+    }
+    proc->context.rip = (uint64_t)entry;
+
+    uint64_t new_rsp, argv_addr, envp_addr;
+    if (build_exec_stack(proc->page_table, proc->stack_base, NULL, NULL,
+                          &new_rsp, &argv_addr, &envp_addr) != 0) {
+        printf("[KERNEL] FATAL: build_exec_stack failed for shell\n");
+        proc->state = PROCESS_TERMINATED;
+        kfree(buf);
+        return NULL;
+    }
+    proc->context.rsp = new_rsp;
+    proc->context.rdi = 0;
+    proc->context.rsi = argv_addr;
+    proc->context.rdx = envp_addr;
+
+    kfree(buf);
+    proc->is_shell = 1;
+    return proc;
 }
 
 __attribute__((section(".text.prologue")))
@@ -158,9 +218,14 @@ void _start(BootInfo* bi) {
     pic_remap();
     LOG_DONE_OK("PIC remapped");
 
-    // ВАЖНО: сначала PMM, потом PAGING, потом HEAP
+    // ВАЖНО: сначала PMM, потом PAGING, потом HEAP. reserved_base/reserved_size —
+    // весь диск, который бутлоадер грузит в RAM одним куском (bi->FATImageBase,
+    // AllocatePages(..., EfiLoaderData, ...) в boot/loaders/fat_loader.c) —
+    // см. подробный комментарий у pmm_init() в pmm.c про то, почему это
+    // раньше НЕ резервировалось и к чему это приводило.
     pmm_init(bi->MemoryMap, bi->MemoryMapSize, bi->MemoryMapDescriptorSize,
-                bi->KernelBase, bi->KernelSize);
+                bi->KernelBase, bi->KernelSize,
+                bi->FATImageBase, bi->FATImageSize);
     paging_init(bi);
     
     // Heap теперь статический - инициализируем сразу
@@ -284,9 +349,12 @@ void _start(BootInfo* bi) {
         clear_entire_screen();
     }
 
-    process_set_shell_entry(shell_task);
-    process_t *shell_proc = process_create("shell", shell_task);
-    if (shell_proc) shell_proc->is_shell = 1;
+    process_set_shell_spawner(spawn_shell_process);
+    process_t *shell_proc = spawn_shell_process();
+    if (!shell_proc) {
+        printf("[KERNEL] FATAL: could not start /bin/shell.elf — halting\n");
+        while (1) asm volatile("hlt");
+    }
 
     while (1) {
         asm volatile("sti");

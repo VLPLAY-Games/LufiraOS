@@ -152,7 +152,16 @@ process_t* process_create(const char *name, void (*entry)(void));
 // "shell", когда текущий is_shell-процесс завершится (см. is_shell в
 // process_t выше). Вызывается один раз из kernel.c сразу после самого
 // первого process_create("shell", ...).
-void process_set_shell_entry(void (*entry)(void));
+// v0.7 план, этап 5, под-этап 6: шелл теперь настоящий userspace ELF
+// (/bin/shell.elf), а не кернел-функция — регистрируемый callback
+// возвращает уже полностью подготовленный (process_create + ELF загружен +
+// стек/argv собраны) process_t*, а не просто указатель на функцию для
+// process_create(name, entry). is_shell выставляет сам spawner. NULL при
+// ошибке (файл не найден/не загрузился) — respawn_shell_if_needed() тогда
+// просто не восстанавливает шелл (система остаётся без интерактивного
+// приглашения, что лучше отражает реальную проблему, чем тихий откат на
+// старый kernel-native путь, которого больше нет).
+void process_set_shell_spawner(process_t *(*spawner)(void));
 void process_exit(int exit_code);
 void schedule(void);
 void switch_to_process(process_t *next);

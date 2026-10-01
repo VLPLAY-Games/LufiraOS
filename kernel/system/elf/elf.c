@@ -138,12 +138,27 @@ static int map_page_in_space(uint64_t pml4_phys,
 
         uint64_t *new_pt = (uint64_t *)phys_to_virt(new_pt_phys);
 
+        // PAGE_IDENTITY_SHARED (paging.h) — ЭТА копия huge-page-split-логики
+        // (параллельная paging.c: map_page()/map_page_in_pml4(), см. подробный
+        // комментарий там же и у free_user_address_space()) не выставляла
+        // этот бит, хотя их результат читает ОДИН И ТОТ ЖЕ
+        // free_user_address_space() — тот принимал все 512 "ещё нетронутых"
+        // identity-записей, появившихся ЗДЕСЬ (elf_load_to_process() грузит
+        // ELF-сегменты именно через эту функцию, т.е. на КАЖДОМ exec'е), за
+        // настоящие личные страницы процесса и honestly pmm_free_page()'ил
+        // их по одной — а это физически та же самая, разделяемая со ВСЕЙ
+        // системой identity-память (см. build_identity_pdpt(), paging.c).
+        // Раз из общего пула она так "освобождалась", pmm_alloc_page() рано
+        // или поздно отдавал её же под что-то совсем другое — и затем
+        // следующий такой же exec() пытался освободить её ПОВТОРНО (поймано
+        // detector'ом pmm_free_page() как double-free на вторую же "ls").
         for (int j = 0; j < 512; j++) {
             new_pt[j] =
                 (phys_2m + j * PAGE_SIZE) |
                 orig_flags |
                 PAGE_PRESENT |
-                PAGE_USER;
+                PAGE_USER |
+                PAGE_IDENTITY_SHARED;
         }
 
         /*

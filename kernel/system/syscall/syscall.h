@@ -48,6 +48,55 @@
 // чужой процесс.
 #define SYS_SET_FOREGROUND 31
 
+// SYS_SU (32): username_ptr, password_ptr — заменяет мёртвый
+// kernel-native command_su() (kernel/shell/commands/users.c, недостижим
+// после перехода на shell.elf) настоящим syscall'ом, т.к. shell.elf — уже
+// не сам ядро, и менять current_process->uid/gid напрямую из userspace
+// нельзя. Проверка пароля ВНУТРИ ядра (не доверяем userspace звать это
+// только "после успешной проверки") — root (uid==0) может стать кем
+// угодно без пароля, иначе users_check_password() обязателен. При успехе
+// мутирует current_process->uid/gid (никакого отдельного syscall/сессии —
+// шелл сам и есть current_process, как и раньше). cwd НЕ трогает — cd в
+// домашнюю папку делает сам shell.elf после успешного вызова (см. builtin
+// su в userspace/base/shell.c) — это уже новое поведение по сравнению со
+// старым command_su (которое cwd никогда не меняло).
+#define SYS_SU 32
+
+// SYS_MOUNT (33): prefix_ptr ("/mnt/usb0" и т.п.), usb_index — v0.7 план,
+// этап 5, под-этап 6 (VFS-интеграция монтирования). Монтирует указанное
+// USB MSD устройство как FAT под заданным VFS-путём: обычные open/read/
+// write/mkdir/unlink/readdir (SYS_OPEN и т.д.) начинают видеть файлы под
+// этим префиксом напрямую, без отдельных mount-специфичных syscall'ов —
+// см. kernel/fs/fat/fat_mount.h про границы (только корневой уровень
+// каждого монтирования) и про real-time синк на флешку после каждой
+// записи. Возвращает >=0 (слот) при успехе; при ошибке — один из
+// отрицательных кодов vfs_fat_mount() (см. fat_mount.c): -1 плохой
+// префикс, -2 префикс уже занят, -3 нет свободных слотов (максимум 2),
+// -4 нет такого USB-устройства, -5 неподдерживаемый размер блока, -6
+// устройство слишком большое, -7 не хватило памяти, -8 ошибка чтения,
+// -9 не FAT.
+#define SYS_MOUNT 33
+
+// SYS_UNMOUNT (34): prefix_ptr. Синкает "грязные" секторы на флешку и
+// снимает монтирование. 0 при успехе, -1 если такого монтирования нет.
+#define SYS_UNMOUNT 34
+
+// SYS_REBOOT (35) / SYS_SHUTDOWN (36) — v0.7 план, этап 5, продолжение
+// ("как можно больше команд из ядра в пакеты"): переносят command_reboot()/
+// command_shutdown() (kernel/shell/commands/system.c, мёртвый код) в
+// настоящие syscall'ы. Требуют root (uid==0) — необратимое действие для
+// всей системы. Синкают LufiraFS (lufirafs_flush()) перед собственно
+// reset/shutdown, как и делал старый command_reboot()/command_shutdown().
+// Не возвращаются при успехе.
+#define SYS_REBOOT 35
+#define SYS_SHUTDOWN 36
+
+// SYS_DEVMODE (37): 0 — прочитать состояние (возвращает 0/1), 1 —
+// включить, 2 — выключить. Тонкая обёртка над devmode_set()/
+// devmode_is_enabled() (devmode.h) — то же самое, что раньше делал
+// мёртвый command_devmode().
+#define SYS_DEVMODE 37
+
 // Флаги для sys_open
 #define O_RDONLY    0
 #define O_WRONLY    1

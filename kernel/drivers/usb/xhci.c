@@ -666,7 +666,31 @@ static int xhci_wait_for_event_impl(uint32_t want_type, uint64_t want_ptr,
         printf("[XHCI] WARNING: event ring guard limit hit, giving up this wait\n");
       no_new_event:
         if (want_ptr == 0) return -1; // usb_poll(): "сейчас ничего нет" — не ошибка
-        pit_wait_ms(1);
+
+        // НАЙДЕННЫЙ БАГ (v0.7, этап 5, под-этап 6 — VFS-интеграция
+        // монтирования, первый вызыватель этого синхронного пути НЕ из
+        // кернел-native кода): pit_wait_ms() ждёт продвижения pit_ticks
+        // через hlt, а pit_ticks продвигает только таймерный IRQ. Раньше
+        // этот синхронный путь звался ТОЛЬКО из кернел-native кода (boot-
+        // time энумерация устройств, kernel/shell/commands/mount.c), где
+        // прерывания всегда были включены — никто не замечал, что сам
+        // pit_wait_ms() ниже не гарантирует этого сам. Теперь он же зовётся
+        // из SYS_MOUNT (syscall.c) — а IA32_FMASK (syscall_init(), syscall.c)
+        // маскирует EFLAGS.IF на вход в ЛЮБОЙ syscall. Результат: hlt внутри
+        // pit_wait_ms() ждёт прерывание, которое никогда не придёт —
+        // наглухо зависший процесс (подтверждено: info registers показывает
+        // HLT=1, RIP неподвижен). Фикс — тот же приём save/restore EFLAGS.IF,
+        // что у console_write_lock()/console_write_unlock() (vfs.c), только
+        // в обратную сторону: временно ВКЛЮЧАЕМ прерывания на время ожидания
+        // одного тика, затем возвращаем ровно то, что было у вызывающего
+        // (boot-time путь не заметит разницы — там и так было включено).
+        {
+            uint64_t saved_flags;
+            asm volatile("pushfq; popq %0" : "=r"(saved_flags) :: "memory");
+            asm volatile("sti");
+            pit_wait_ms(1);
+            asm volatile("push %0; popfq" : : "r"(saved_flags) : "memory", "cc");
+        }
     }
     return -1;
 }

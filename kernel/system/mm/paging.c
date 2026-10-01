@@ -8,6 +8,10 @@
 
 typedef uint64_t pt_entry_t;
 
+// Тот же код типа памяти, что и в pmm.c (EFI_MEMORY_DESCRIPTOR.Type) — см.
+// комментарий у его использования ниже, в paging_init().
+#define EfiConventionalMemory 7
+
 // Указатели на таблицы страниц ядра
 static pt_entry_t *kernel_pml4 = NULL;
 static pt_entry_t *kernel_pdpt = NULL;
@@ -109,8 +113,24 @@ void paging_init(BootInfo* bi) {
     uint64_t desc_count = bi->MemoryMapSize / desc_size;
     uint64_t max_phys = 0;
 
+    // ВАЖНО: только EfiConventionalMemory (как и pmm_init(), pmm.c — тот же
+    // самый фильтр) — без него этот скан цеплял и высокие MMIO/reserved
+    // регионы из карты памяти (PCI64-окно OVMF, ACPI-таблицы и т.п.,
+    // которые реальным RAM не являются), раздувая max_phys до значений в
+    // десятки-сотни GB при 256MB РЕАЛЬНОЙ памяти у VM. mem_gb упирался в
+    // потолок (512) и build_identity_pdpt() строила identity-карту на
+    // 512 GB вместо ~1 — а clone_low_identity_map() (process_create(),
+    // process.c) и clone_address_space_deep() (process_fork()) потом на
+    // КАЖДОМ создании/форке процесса честно копировали все эти 512
+    // "призрачных" GB-регионов (ни один из которых не соответствует
+    // настоящей памяти), выделяя и копируя по странице на каждый —
+    // ~500-1500 физических страниц churn'а за один fork()+exec(), что и
+    // приводило к исчерпанию PMM после полутора-двух сотен подряд идущих
+    // команд шелла, несмотря на то что сам churn был формально
+    // сбалансирован (alloc и free парно).
     for (uint64_t i = 0; i < desc_count; i++) {
         EFI_MEMORY_DESCRIPTOR *d = (EFI_MEMORY_DESCRIPTOR*)(map + i * desc_size);
+        if (d->Type != EfiConventionalMemory) continue;
         uint64_t end = d->PhysicalStart + d->NumberOfPages * PAGE_SIZE;
         if (end > max_phys) max_phys = end;
     }
@@ -147,9 +167,15 @@ int map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
         uint64_t pt_phys = pmm_alloc_page();
         if (!pt_phys) return -1;
 
+        // Все 512 записей здесь — ещё нерасщеплённая identity-память (та же
+        // физическая страница, что виртуальный адрес), пока ниже под
+        // PT_INDEX(virt) одну из них не перезапишут под конкретный запрос
+        // вызывающего — помечаем ИХ ВСЕ как общие, чтобы
+        // free_user_address_space() знал, что их нельзя отдавать обратно в
+        // pmm (см. PAGE_IDENTITY_SHARED, paging.h).
         pt_entry_t *pt = (pt_entry_t*)phys_to_virt(pt_phys);
         for (int i = 0; i < 512; i++) {
-            pt[i] = paddr_to_entry(phys_base + i * PAGE_SIZE, pde_flags);
+            pt[i] = paddr_to_entry(phys_base + i * PAGE_SIZE, pde_flags | PAGE_IDENTITY_SHARED);
         }
 
         pd_table[pd_idx] = paddr_to_entry(pt_phys, pde_flags);
@@ -186,9 +212,11 @@ int map_page_in_pml4(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t 
         uint64_t pt_phys = pmm_alloc_page();
         if (!pt_phys) return -1;
 
+        // См. тот же комментарий в map_page() выше — PAGE_IDENTITY_SHARED
+        // на все 512, пока одну из них не перезапишут под PT_INDEX(virt).
         pt_entry_t *pt = (pt_entry_t*)phys_to_virt(pt_phys);
         for (int i = 0; i < 512; i++) {
-            pt[i] = paddr_to_entry(phys_base + i * PAGE_SIZE, pde_flags);
+            pt[i] = paddr_to_entry(phys_base + i * PAGE_SIZE, pde_flags | PAGE_IDENTITY_SHARED);
         }
 
         pd_table[pd_idx] = paddr_to_entry(pt_phys, pde_flags);
@@ -365,11 +393,22 @@ void clone_low_identity_map(uint64_t dest_pml4_phys) {
 // identity-копия ядра, освобождать нельзя — см. PAGE_HUGE-ветку ниже), а
 // после расщепления такой huge-страницы под конкретный адрес процесса
 // соответствующая PT содержит смесь: одна запись — реальная страница
-// процесса, остальные 511 — нетронутые identity-копии. Различаем их
-// геометрически: у нетронутой identity-записи leaf_phys == leaf_virt, у
-// настоящей pmm_alloc_page()-страницы это совпадение практически невозможно
-// — ложный "пропуск" здесь лишь небольшая утечка, никогда не порча чужой
-// памяти.
+// процесса, остальные 511 — нетронутые identity-копии (PAGE_IDENTITY_SHARED,
+// проставляется в map_page()/map_page_in_pml4() при расщеплении — см.
+// paging.h). Раньше вместо явного бита использовалось сравнение
+// leaf_phys==leaf_virt ("у нетронутой identity-записи физический адрес
+// совпадает с виртуальным, у настоящей pmm_alloc_page()-страницы это
+// совпадение практически невозможно") — но это было верно только пока
+// pmm_alloc_page() монотонно шёл вперёд и никогда не выдавал НИЗКИЕ
+// физические адреса повторно. Как только появился оборот битмапа (см.
+// pmm_alloc_page(), pmm.c) — клонированная fork()'ом копия такой
+// "identity" PT (clone_address_space_deep(), process.c, копирует ВСЕ 512
+// записей в НОВЫЕ физические страницы, включая эти 511 "обёрнутых") вполне
+// может получить от pmm_alloc_page() низкий физический адрес, случайно
+// совпадающий с виртуальным — и тогда эта СОБСТВЕННАЯ, уже ни с кем не
+// общая страница ребёнка никогда не освобождалась бы: постоянная утечка
+// ~2MB на каждый fork()+exec(), в точности то, что и наблюдалось. Явный бит
+// не зависит от numeric coincidence вообще.
 void free_user_address_space(uint64_t pml4_phys) {
     pt_entry_t *pml4 = (pt_entry_t*)phys_to_virt(pml4_phys);
     if (!pml4) return;
@@ -397,19 +436,12 @@ void free_user_address_space(uint64_t pml4_phys) {
 
                 uint64_t pt_phys = pd[pd_idx] & 0x000FFFFFFFFFF000ULL;
                 pt_entry_t *pt = (pt_entry_t*)phys_to_virt(pt_phys);
-                uint64_t region_base = ((uint64_t)pml4_idx << 39) |
-                                        ((uint64_t)pdpt_idx << 30) |
-                                        ((uint64_t)pd_idx   << 21);
 
                 for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
                     if (!(pt[pt_idx] & PAGE_PRESENT)) continue;
+                    if (pt[pt_idx] & PAGE_IDENTITY_SHARED) continue;
+
                     uint64_t leaf_phys = pt[pt_idx] & 0x000FFFFFFFFFF000ULL;
-
-                    if (pml4_idx == 0) {
-                        uint64_t leaf_virt = region_base | ((uint64_t)pt_idx << 12);
-                        if (leaf_phys == leaf_virt) continue;
-                    }
-
                     pmm_free_page(leaf_phys);
                 }
                 pmm_free_page(pt_phys);

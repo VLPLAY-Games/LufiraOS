@@ -19,10 +19,10 @@ process_t *process_list = NULL;
 process_t *current_process = NULL;
 volatile uint32_t foreground_pid = 0;
 volatile int shell_is_respawn = 0;
-static void (*shell_entry_fn)(void) = NULL;
+static process_t *(*shell_spawner_fn)(void) = NULL;
 
-void process_set_shell_entry(void (*entry)(void)) {
-    shell_entry_fn = entry;
+void process_set_shell_spawner(process_t *(*spawner)(void)) {
+    shell_spawner_fn = spawner;
 }
 
 // Пересоздаёт процесс "shell", если завершающийся процесс был is_shell —
@@ -30,14 +30,21 @@ void process_set_shell_entry(void (*entry)(void)) {
 // process_exit() и terminate_process_by_signal() ДО возможного
 // switch_to_process()/schedule() ниже, чтобы новый шелл сразу же оказался
 // валидным READY-кандидатом для этого же самого переключения.
+//
+// shell_is_respawn взводится ЗДЕСЬ, до вызова spawner'а — тот (kernel.c,
+// spawn_shell_process()) сам его читает, чтобы решить, печатать ли
+// вступительный баннер, и сам же сбрасывает обратно в 0 (раньше это делал
+// shell_task(), теперь баннер печатается ДО загрузки /bin/shell.elf, а не
+// из его собственного кода).
 static void respawn_shell_if_needed(process_t *dying) {
-    if (!dying->is_shell || !shell_entry_fn)
+    if (!dying->is_shell || !shell_spawner_fn)
         return;
 
-    process_t *respawned = process_create("shell", shell_entry_fn);
-    if (respawned) {
-        respawned->is_shell = 1;
-        shell_is_respawn = 1;
+    shell_is_respawn = 1;
+    process_t *respawned = shell_spawner_fn();
+    if (!respawned) {
+        shell_is_respawn = 0;
+        printf("[PROCESS] FATAL: failed to respawn shell\n");
     }
 }
 uint64_t current_kernel_rsp = 0; // Глобальная переменная для asm
@@ -265,7 +272,17 @@ static uint64_t clone_address_space_deep(uint64_t src_pml4_phys) {
                         continue;
 
                     uint64_t src_phys = src_pt[pt_idx] & 0x000FFFFFFFFFF000ULL;
-                    uint64_t flags = src_pt[pt_idx] & (0xFFFULL | PAGE_NX);
+                    // PAGE_IDENTITY_SHARED снимается явно: у родителя эта
+                    // запись могла быть нетронутой identity-копией (общий
+                    // физический кадр ядра, см. map_page_in_pml4()), но
+                    // memcpy() ниже кладёт её содержимое в СОБСТВЕННУЮ,
+                    // только что выделенную физическую страницу ребёнка —
+                    // то есть для него это уже не общая память, а обычное
+                    // личное содержимое, которое его же free_user_address_space()
+                    // обязан освободить при завершении (иначе на каждый
+                    // fork() эти страницы навсегда терялись бы для pmm —
+                    // см. подробный разбор у PAGE_IDENTITY_SHARED, paging.h).
+                    uint64_t flags = src_pt[pt_idx] & (0xFFFULL | PAGE_NX) & ~(uint64_t)PAGE_IDENTITY_SHARED;
 
                     uint64_t new_phys = pmm_alloc_page();
                     if (!new_phys) return 0;
@@ -1392,6 +1409,33 @@ uint64_t process_fork(uint64_t frame_ptr) {
     // адресным пространством выше.
     child->stack_base = parent->stack_base;
     child->stack_size = parent->stack_size;
+
+    // process_create() выше (через vfs_init_fd_table()) уже успел завести
+    // ребёнку-плейсхолдеру СОБСТВЕННЫЕ свежие stdin/stdout/stderr (3 новых
+    // file_t+inode, см. vfs_init_fd_table()) — ровно как и для
+    // placeholder_pml4 выше, это тоже просто черновик, который сейчас
+    // целиком заменяется родительской таблицей. Без явного закрытия здесь
+    // эти 3 file_t/inode просто теряются (их указатели в
+    // child->fd_table.files[0..2] через мгновение перезатрутся
+    // присваиванием ниже) — ни один vfs_close() по ним никогда не
+    // вызывается, значит alloc_file()/vfs_create_inode() их уже не
+    // освобождают НИКОГДА. Было видно по free_file()'у, что в
+    // file_table[256] раз за разом копились ровно 3 "осиротевших" записи с
+    // ino=101/102/103 (ref_count=1) на каждый fork() — через ~85
+    // последовательных fork()+exec() (как при обычной работе шелла)
+    // system-wide таблица на 256 файлов оказывалась забита целиком, и
+    // alloc_file() начинал возвращать NULL уже для НАСТОЯЩИХ открытий
+    // (/bin/<cmd>.elf), что выглядело как случайная порча ФС. closes здесь
+    // временно подменяют current_fd_table на плейсхолдер — тот же приём,
+    // что и в free_process_resources().
+    {
+        fd_table_t *saved = current_fd_table;
+        current_fd_table = &child->fd_table;
+        for (int i = 0; i < MAX_FD_PER_PROCESS; i++) {
+            if (current_fd_table->files[i]) vfs_close(i);
+        }
+        current_fd_table = saved;
+    }
 
     // fd-таблица: родитель и ребёнок получают собственные fd, но
     // указывающие на ОДНИ И ТЕ ЖЕ открытые file_t/inode — как и должно

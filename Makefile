@@ -132,7 +132,8 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/fs/vfs/vfs.c \
 	$(KERNEL_DIR)/fs/lufirafs/lufirafs.c \
 	$(KERNEL_DIR)/fs/lufirafs/lufirafs_vfs.c \
-	$(KERNEL_DIR)/fs/fat/fat.c
+	$(KERNEL_DIR)/fs/fat/fat.c \
+	$(KERNEL_DIR)/fs/fat/fat_mount.c
 
 KERNEL_ASM_SOURCES := \
     $(KERNEL_DIR)/system/cpu/interrupts.S \

@@ -12,6 +12,9 @@
 #include "fs/vfs/vfs.h"
 #include "fs/lufirafs/lufirafs.h"
 #include "system/devmode/devmode.h"
+#include "system/users/users.h"
+#include "fs/fat/fat_mount.h"
+#include "system/acpi/acpi.h"
 
 extern lufirafs_t lufirafs;
 
@@ -213,10 +216,14 @@ static uint64_t sys_exit(uint64_t exit_code, uint64_t unused1, uint64_t unused2,
     (void)unused3;
     (void)unused4;
     
-    printf("\n[%u] Exit(%u)\n", 
-           current_process ? current_process->pid : 0, 
-           (uint32_t)exit_code);
-    
+    // "[pid] Exit(code)" — только в devmode (DLOG), чтобы не засорять вывод
+    // обычному пользователю: shell.elf сам печатает код выхода программы,
+    // когда это реально нужно (например wait), это сообщение — чисто
+    // отладочное, видно каждый раз, когда ЛЮБОЙ процесс завершается.
+    DLOG("\n[%u] Exit(%u)\n",
+         current_process ? current_process->pid : 0,
+         (uint32_t)exit_code);
+
     process_exit((int)exit_code);
     while (1) __asm__("hlt");
     return 0;
@@ -657,6 +664,17 @@ static uint64_t sys_mkdir(uint64_t path_ptr, uint64_t mode, uint64_t unused1,
     if (slen == 0) return (uint64_t)-EINVAL;
     const char *path = (const char *)path_ptr;
 
+    // Смонтированный FAT — ДО всех проверок прав на LufiraFS: путь вообще
+    // не существует как lufirafs-inode, lufirafs_resolve_parent() ниже
+    // всегда вернёт -ENOENT для него (найдено при тестировании VFS-
+    // интеграции монтирования, v0.7 план, этап 5, под-этап 6 — mkdir.elf
+    // звал именно SYS_MKDIR, а не vfs_mkdir()/vfs_mkdir_at() напрямую, так
+    // что более ранний фикс в vfs.c сюда просто не доходил).
+    if (path[0] == '/') {
+        int r = vfs_fat_mkdir(path);
+        if (r != -2) return (r == 0) ? 0 : (uint64_t)-1;
+    }
+
     // Право на создание записи проверяется на РОДИТЕЛЬСКОЙ директории
     // (write+exec), не на самом path — его ещё не существует. Тот же
     // паттерн, что уже используется в SYS_OPEN-е для O_CREAT выше.
@@ -687,6 +705,12 @@ static uint64_t sys_remove(uint64_t path_ptr, int is_rmdir) {
     if (slen < 0) return (uint64_t)-EFAULT;
     if (slen == 0) return (uint64_t)-EINVAL;
     const char *path = (const char *)path_ptr;
+
+    // Смонтированный FAT — см. тот же комментарий в sys_mkdir() выше.
+    if (path[0] == '/') {
+        int r = vfs_fat_unlink(path);
+        if (r != -2) return (r == 0) ? 0 : (uint64_t)-1;
+    }
 
     uint32_t parent;
     char leaf[LUFIRAFS_MAX_NAME + 1];
@@ -822,6 +846,105 @@ static uint64_t sys_set_foreground(uint64_t pid, uint64_t unused1, uint64_t unus
     return (res == 0) ? 0 : (uint64_t)-1;
 }
 
+// SYS_SU (32): см. комментарий в syscall.h. username ограничен 32 байтами
+// (размер username[] в user_entry_t) — более длинная строка без '\0' в
+// этом диапазоне честно отбраковывается validate_user_string() как
+// невалидная, искать её по users_lookup_by_name() смысла нет.
+static uint64_t sys_su(uint64_t username_ptr, uint64_t password_ptr, uint64_t unused1,
+                       uint64_t unused2, uint64_t unused3) {
+    (void)unused1; (void)unused2; (void)unused3;
+
+    if (!current_process) return (uint64_t)-EFAULT;
+
+    int64_t ulen = validate_user_string(current_process->page_table, username_ptr, 32);
+    if (ulen <= 0) return (uint64_t)-EFAULT;
+    int64_t plen = validate_user_string(current_process->page_table, password_ptr, USER_STRING_MAX);
+    if (plen < 0) return (uint64_t)-EFAULT;
+
+    const char *username = (const char *)username_ptr;
+    const char *password = (const char *)password_ptr;
+
+    user_entry_t u;
+    if (users_lookup_by_name(username, &u) != 0) return (uint64_t)-ENOENT;
+
+    if (current_process->uid != 0 && !users_check_password(username, password))
+        return (uint64_t)-EPERM;
+
+    current_process->uid = u.uid;
+    current_process->gid = u.gid;
+    return 0;
+}
+
+// SYS_MOUNT (33) / SYS_UNMOUNT (34): см. комментарии в syscall.h. Просто
+// тонкие обёртки — вся логика (включая проверку usb-устройства, чтение
+// образа, real-time синк после записи) уже в vfs_fat_mount()/
+// vfs_fat_unmount() (fat_mount.c), т.к. её нужно звать и из vfs.c (open/
+// mkdir/unlink на уже смонтированном пути), не только отсюда.
+static uint64_t sys_mount(uint64_t prefix_ptr, uint64_t usb_index, uint64_t unused1,
+                          uint64_t unused2, uint64_t unused3) {
+    (void)unused1; (void)unused2; (void)unused3;
+    if (!current_process) return (uint64_t)-EFAULT;
+
+    int64_t slen = validate_user_string(current_process->page_table, prefix_ptr, USER_STRING_MAX);
+    if (slen <= 0) return (uint64_t)-EFAULT;
+
+    int res = vfs_fat_mount((int)usb_index, (const char *)prefix_ptr);
+    return (uint64_t)(int64_t)res;
+}
+
+static uint64_t sys_unmount(uint64_t prefix_ptr, uint64_t unused1, uint64_t unused2,
+                            uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+
+    int64_t slen = validate_user_string(current_process->page_table, prefix_ptr, USER_STRING_MAX);
+    if (slen <= 0) return (uint64_t)-EFAULT;
+
+    int res = vfs_fat_unmount((const char *)prefix_ptr);
+    return (uint64_t)(int64_t)res;
+}
+
+// SYS_REBOOT (35) / SYS_SHUTDOWN (36) — см. комментарии в syscall.h.
+// Прямой перенос command_reboot()/command_shutdown() (kernel/shell/
+// commands/system.c, мёртвый код) без изменений в самой логике сброса —
+// только root и синк диска гейтятся тут, а не в выводе на консоль (тот
+// был смыслом для интерактивного шелла, не для syscall'а).
+static uint64_t sys_reboot(uint64_t unused1, uint64_t unused2, uint64_t unused3,
+                           uint64_t unused4, uint64_t unused5) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4; (void)unused5;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (current_process->uid != 0) return (uint64_t)-EPERM;
+
+    lufirafs_flush(&lufirafs);
+    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64));
+    __asm__ volatile ("outw %0, %1" : : "a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
+    return (uint64_t)-1; // не должны сюда дойти, если сброс сработал
+}
+
+static uint64_t sys_shutdown(uint64_t unused1, uint64_t unused2, uint64_t unused3,
+                             uint64_t unused4, uint64_t unused5) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4; (void)unused5;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (current_process->uid != 0) return (uint64_t)-EPERM;
+
+    lufirafs_flush(&lufirafs);
+    acpi_shutdown();
+    return (uint64_t)-1; // ACPI shutdown не сработал
+}
+
+// SYS_DEVMODE (37): mode (0=прочитать, 1=включить, 2=выключить) — см.
+// комментарий в syscall.h.
+static uint64_t sys_devmode(uint64_t mode, uint64_t unused1, uint64_t unused2,
+                            uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    switch (mode) {
+        case 0: return (uint64_t)devmode_is_enabled();
+        case 1: return (devmode_set(1) == 0) ? 0 : (uint64_t)-1;
+        case 2: return (devmode_set(0) == 0) ? 0 : (uint64_t)-1;
+        default: return (uint64_t)-EINVAL;
+    }
+}
+
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
 
 static syscall_fn_t syscall_table[256] = {
@@ -857,6 +980,12 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_CPULOAD] = sys_cpuload,
     [SYS_PSLIST]  = sys_pslist,
     [SYS_SET_FOREGROUND] = sys_set_foreground,
+    [SYS_SU] = sys_su,
+    [SYS_MOUNT] = sys_mount,
+    [SYS_UNMOUNT] = sys_unmount,
+    [SYS_REBOOT] = sys_reboot,
+    [SYS_SHUTDOWN] = sys_shutdown,
+    [SYS_DEVMODE] = sys_devmode,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
