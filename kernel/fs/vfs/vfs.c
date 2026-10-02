@@ -131,6 +131,11 @@ static inline void console_write_unlock(uint64_t flags) {
 //   ESC 'b' <color>              — set_background_color (0..15)
 //   ESC 'p' <x_hi><x_lo><y_hi><y_lo> — set_cursor_position (big-endian u16)
 //   ESC 'c'                      — clear_screen
+//   ESC 'l'                      — move_cursor_left (НЕ '\b': тот стирает
+//                                   символ под курсором, см. put_char() —
+//                                   это просто перемещение самого символа
+//                                   подчёркивания, экранный текст не трогает)
+//   ESC 'r'                      — move_cursor_right (тот же дух, что 'l')
 // Каждая последовательность должна укладываться ЦЕЛИКОМ в один sys_write()
 // (парсер не хранит состояние между вызовами) — ровно так их и собирает
 // userspace/common/console.h.
@@ -164,6 +169,14 @@ static int console_write(file_t *f, const void *buf, size_t count) {
             }
             if (cmd == 'c') {
                 clear_screen();
+                i += 2; written += 2; continue;
+            }
+            if (cmd == 'l') {
+                move_cursor_left();
+                i += 2; written += 2; continue;
+            }
+            if (cmd == 'r') {
+                move_cursor_right();
                 i += 2; written += 2; continue;
             }
             // Незнакомая/обрезанная команда — печатаем ESC как обычный

@@ -332,7 +332,7 @@ void _start(BootInfo* bi) {
         LOG_STATUS_LINE("Console", 1, "READY");
         LOG_STATUS_LINE("Keyboard", keyboard_is_initialized(), keyboard_is_initialized() ? "READY" : "NOT FOUND");
         LOG_STATUS_LINE("Mouse", mouse_is_initialized(), mouse_is_initialized() ? "READY" : "NOT FOUND");
-        LOG_STATUS_LINE("Syscalls", 1, "ACTIVE (27 syscalls)");
+        LOG_STATUS_LINE("Syscalls", 1, "ACTIVE (45 syscalls)");
         LOG_STATUS_LINE("VFS", 1, "READY");
 
         set_foreground_color(STATUS_READY);

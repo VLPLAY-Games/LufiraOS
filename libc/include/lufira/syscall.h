@@ -54,6 +54,13 @@
 #define SYS_REBOOT 35
 #define SYS_SHUTDOWN 36
 #define SYS_DEVMODE 37
+#define SYS_USERADD 38
+#define SYS_GROUPADD 39
+#define SYS_PASSWD 40
+#define SYS_USB_COUNT 41
+#define SYS_USB_INFO 42
+#define SYS_USB_READ 43
+#define SYS_USB_WRITE 44
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -293,4 +300,48 @@ static inline long sys_shutdown(void) {
 // mode: 0 — прочитать состояние (возвращает 0/1), 1 — включить, 2 — выключить.
 static inline long sys_devmode(long mode) {
     return __syscall5(SYS_DEVMODE, mode, 0, 0, 0, 0);
+}
+
+// Root-only. group == NULL — своя группа с именем username (как настоящий
+// Linux useradd по умолчанию). 0 при успехе, иначе -errno-подобный код
+// (см. комментарий у SYS_USERADD в kernel/system/syscall/syscall.h).
+static inline long sys_useradd(const char *username, const char *password, const char *group) {
+    return __syscall5(SYS_USERADD, (long)username, (long)password, (long)group, 0, 0);
+}
+
+// Root-only.
+static inline long sys_groupadd(const char *groupname) {
+    return __syscall5(SYS_GROUPADD, (long)groupname, 0, 0, 0, 0);
+}
+
+// username == NULL — сменить свой собственный пароль (без проверки прав).
+// Ненулевой username — сброс пароля ЛЮБОГО пользователя, root-only.
+static inline long sys_passwd(const char *username, const char *new_password) {
+    return __syscall5(SYS_PASSWD, (long)username, (long)new_password, 0, 0, 0);
+}
+
+// Байт-в-байт зеркало lufira_usb_info_t (kernel/system/syscall/syscall.h).
+struct lufira_usb_info {
+    uint32_t max_lba;
+    uint32_t block_size;
+};
+
+static inline long sys_usb_count(void) {
+    return __syscall5(SYS_USB_COUNT, 0, 0, 0, 0, 0);
+}
+
+static inline long sys_usb_info(long index, struct lufira_usb_info *out) {
+    return __syscall5(SYS_USB_INFO, index, (long)out, 0, 0, 0);
+}
+
+// buf_size должен быть >= block_size реального устройства (см. sys_usb_info()),
+// иначе -EINVAL. Возвращает число прочитанных/записанных байт при успехе.
+static inline long sys_usb_read(long index, unsigned long lba, void *buf, unsigned long buf_size) {
+    return __syscall5(SYS_USB_READ, index, (long)lba, (long)buf, (long)buf_size, 0);
+}
+
+// Root-only (прямая запись по LBA необратима) — см. комментарий у
+// SYS_USB_WRITE в kernel/system/syscall/syscall.h.
+static inline long sys_usb_write(long index, unsigned long lba, const void *buf, unsigned long buf_size) {
+    return __syscall5(SYS_USB_WRITE, index, (long)lba, (long)buf, (long)buf_size, 0);
 }

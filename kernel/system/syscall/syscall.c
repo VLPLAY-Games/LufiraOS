@@ -15,6 +15,7 @@
 #include "system/users/users.h"
 #include "fs/fat/fat_mount.h"
 #include "system/acpi/acpi.h"
+#include "drivers/usb/xhci.h"
 
 extern lufirafs_t lufirafs;
 
@@ -487,6 +488,24 @@ static uint64_t sys_getcwd(uint64_t buffer, uint64_t size,
 // commands/filesystem.c), но на current_process->cwd_*, а не на
 // шелл-глобалах (которые теперь и есть эти же поля, см. shell.h), и с
 // проверкой указателя вместо прямого разыменования.
+// Смонтированный FAT (/mnt/...) в cwd — у него нет настоящего lufirafs-
+// inode (см. fat_mount.h), так что cwd_inode не может хранить на него
+// ссылку как обычно. LUFIRAFS_FAT_MOUNT_CWD_INODE — заведомо невалидный
+// номер инода (lufirafs_read_inode()/lufirafs_lookup() отвергают любой
+// ino > sb.inode_count, а реальных инодов на 16MB-образе всегда разы
+// меньше UINT32_MAX), безопасный как часовой: случайная относительная
+// операция (mkdir/lufirafs_lookup и т.п.) с ним просто вернёт ENOENT, а
+// не прочитает мусор. Источник истины при этом — cwd_path (строка),
+// ровно как и для настоящего lufirafs-cwd.
+#define LUFIRAFS_FAT_MOUNT_CWD_INODE 0xFFFFFFFFu
+
+// SYS_CHDIR (15): path — см. комментарий у pathutil.h (userspace/common/
+// pathutil.h): "cd" — единственная команда, которая отправляет сюда СЫРОЙ
+// (возможно относительный) аргумент пользователя, не склеенный заранее с
+// cwd (все остальные пакеты сначала резолвят путь в абсолютный через
+// resolve_path()+SYS_GETCWD). Поэтому, в отличие от sys_mkdir()/sys_remove()
+// выше, здесь нужно самим обрабатывать и случай "уже стоим в смонтированном
+// FAT, относительный '..'".
 static uint64_t sys_chdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
                           uint64_t unused3, uint64_t unused4) {
     (void)unused1;
@@ -501,6 +520,77 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
     if (slen == 0) return (uint64_t)-EINVAL;
 
     const char *path = (const char *)path_ptr;
+
+    // Смонтированный FAT — ДО LufiraFS, тот же приоритет, что уже у
+    // vfs_open()/sys_mkdir()/sys_remove() (см. их комментарии): найдено
+    // при живом тестировании ("mount 0 /mnt/a" успевает, но "cd /mnt/a"
+    // отвечает ENOENT) — sys_chdir() был единственным путём, который так
+    // и не получил этот фикс при VFS-интеграции монтирования.
+    if (path[0] == '/') {
+        struct inode *fat_inode = vfs_fat_lookup(path);
+        if (fat_inode) {
+            int is_dir = (fat_inode->type == FT_DIRECTORY);
+            if (fat_inode->private_data) kfree(fat_inode->private_data);
+            kfree(fat_inode);
+            if (!is_dir) return (uint64_t)-ENOTDIR;
+
+            int n = 0;
+            while (path[n] && n < (int)sizeof(current_process->cwd_path) - 1) {
+                current_process->cwd_path[n] = path[n];
+                n++;
+            }
+            current_process->cwd_path[n] = '\0';
+            current_process->cwd_inode = LUFIRAFS_FAT_MOUNT_CWD_INODE;
+            return 0;
+        }
+    }
+
+    // ".."/"." из уже смонтированного FAT (нет настоящего lufirafs-inode,
+    // которому можно было бы задать такой относительный вопрос) — строим
+    // родительский путь прямо из cwd_path и уходим в обычную lufirafs-ветку
+    // ниже с ним вместо исходного относительного path.
+    if (current_process->cwd_inode == LUFIRAFS_FAT_MOUNT_CWD_INODE) {
+        if (strcmp(path, ".") == 0) return 0;
+
+        if (strcmp(path, "..") != 0) return (uint64_t)-ENOENT;
+
+        char parent[sizeof(current_process->cwd_path)];
+        int len = (int)strlen(current_process->cwd_path);
+        int last_slash = -1;
+        for (int i = 0; i < len; i++) if (current_process->cwd_path[i] == '/') last_slash = i;
+
+        if (last_slash <= 0) {
+            parent[0] = '/'; parent[1] = '\0';
+        } else {
+            int i = 0;
+            for (; i < last_slash; i++) parent[i] = current_process->cwd_path[i];
+            parent[i] = '\0';
+        }
+
+        // "mount" регистрирует только сам префикс (vfs_fat_mount()), а не
+        // создаёт его родителя в lufirafs — найдено тем же живым
+        // тестированием: "mount 0 /mnt/a" без предварительного "mkdir /mnt"
+        // (ничего этого не требует) оставляет "/mnt" вообще не
+        // существующим в lufirafs. Раз пользователь уже пришёл "снаружи"
+        // (строка "/mnt/a" была так или иначе набрана), откат на корень —
+        // безопасный и предсказуемый край, лучше чем ENOENT на самое
+        // обычное действие "выйти из флешки".
+        uint32_t new_inode = lufirafs.sb.root_inode;
+        lufirafs_lookup(&lufirafs, lufirafs.sb.root_inode, parent, &new_inode);
+
+        lufirafs_inode_t inode;
+        if (lufirafs_read_inode(&lufirafs, new_inode, &inode) != 0 ||
+            inode.mode != LUFIRAFS_MODE_DIR)
+            new_inode = lufirafs.sb.root_inode;
+
+        if (lufirafs_get_path(&lufirafs, new_inode, current_process->cwd_path,
+                              sizeof(current_process->cwd_path)) != 0) {
+            current_process->cwd_path[0] = '/';
+            current_process->cwd_path[1] = '\0';
+        }
+        current_process->cwd_inode = new_inode;
+        return 0;
+    }
 
     uint32_t new_inode;
     if (lufirafs_lookup(&lufirafs, current_process->cwd_inode, path, &new_inode) != 0)
@@ -945,6 +1035,201 @@ static uint64_t sys_devmode(uint64_t mode, uint64_t unused1, uint64_t unused2,
     }
 }
 
+// Ограниченное копирование строки (ёмкость dest_size, последний байт
+// всегда под '\0') — своя копия copy_bounded() из users.c (тоже static,
+// не экспортирована).
+static void copy_bounded_path(char *dest, const char *src, int dest_size) {
+    int i = 0;
+    while (i < dest_size - 1 && src[i]) { dest[i] = src[i]; i++; }
+    dest[i] = '\0';
+}
+
+// Создаёт /home (если его ещё нет) и /home/<username> внутри него, owner —
+// сам новый пользователь, perm 0700 — своя копия ensure_home_dir() из
+// kernel/shell/commands/users.c (мёртвый код, не трогается и не
+// экспортирует свои статические хелперы — тот же приём, что уже у
+// fat_mount.c с mount.c). При любой неудаче тихо откатывается на "/".
+static void syscall_ensure_home_dir(uint32_t uid, uint32_t gid, const char *username,
+                                     char *out_home, int out_home_size) {
+    uint32_t home_root_ino;
+    if (lufirafs_lookup(&lufirafs, lufirafs.sb.root_inode, "/home", &home_root_ino) != 0) {
+        if (lufirafs_create(&lufirafs, lufirafs.sb.root_inode, "home", LUFIRAFS_MODE_DIR,
+                             0, 0, LUFIRAFS_DEFAULT_DIR_PERM, &home_root_ino) != 0) {
+            copy_bounded_path(out_home, "/", out_home_size);
+            return;
+        }
+        lufirafs_sync(&lufirafs);
+    }
+
+    uint32_t user_home_ino;
+    if (lufirafs_lookup(&lufirafs, home_root_ino, username, &user_home_ino) != 0) {
+        if (lufirafs_create(&lufirafs, home_root_ino, username, LUFIRAFS_MODE_DIR,
+                             uid, gid, 0700, &user_home_ino) != 0) {
+            copy_bounded_path(out_home, "/", out_home_size);
+            return;
+        }
+        lufirafs_sync(&lufirafs);
+    }
+
+    int pos = 0;
+    const char *prefix = "/home/";
+    while (prefix[pos] && pos < out_home_size - 1) { out_home[pos] = prefix[pos]; pos++; }
+    int i = 0;
+    while (username[i] && pos < out_home_size - 1) { out_home[pos++] = username[i++]; }
+    out_home[pos] = '\0';
+}
+
+// SYS_USERADD (38): username_ptr, password_ptr, group_ptr (0 — своя группа
+// с именем пользователя). Root-only. См. комментарий в syscall.h.
+static uint64_t sys_useradd(uint64_t username_ptr, uint64_t password_ptr, uint64_t group_ptr,
+                            uint64_t unused1, uint64_t unused2) {
+    (void)unused1; (void)unused2;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (current_process->uid != 0) return (uint64_t)-EPERM;
+
+    int64_t ulen = validate_user_string(current_process->page_table, username_ptr, USER_STRING_MAX);
+    if (ulen <= 0) return (uint64_t)-EFAULT;
+    int64_t plen = validate_user_string(current_process->page_table, password_ptr, USER_STRING_MAX);
+    if (plen < 0) return (uint64_t)-EFAULT;
+
+    const char *username = (const char *)username_ptr;
+    const char *password = (const char *)password_ptr;
+    const char *groupname = NULL;
+    if (group_ptr != 0) {
+        int64_t glen = validate_user_string(current_process->page_table, group_ptr, USER_STRING_MAX);
+        if (glen < 0) return (uint64_t)-EFAULT;
+        if (glen > 0) groupname = (const char *)group_ptr;
+    }
+
+    if (users_lookup_by_name(username, NULL) == 0) return (uint64_t)-1; // уже существует
+
+    uint32_t gid;
+    if (groupname) {
+        group_entry_t g;
+        if (groups_lookup_by_name(groupname, &g) != 0) return (uint64_t)-ENOENT;
+        gid = g.gid;
+    } else {
+        gid = groups_next_free_gid();
+        if (groups_add(username, gid) != 0) return (uint64_t)-1;
+    }
+
+    uint32_t uid = users_next_free_uid();
+    char home[64];
+    syscall_ensure_home_dir(uid, gid, username, home, sizeof(home));
+
+    if (users_add(username, uid, gid, password, home) != 0) return (uint64_t)-1;
+    return 0;
+}
+
+// SYS_GROUPADD (39): groupname_ptr. Root-only.
+static uint64_t sys_groupadd(uint64_t groupname_ptr, uint64_t unused1, uint64_t unused2,
+                             uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (current_process->uid != 0) return (uint64_t)-EPERM;
+
+    int64_t glen = validate_user_string(current_process->page_table, groupname_ptr, USER_STRING_MAX);
+    if (glen <= 0) return (uint64_t)-EFAULT;
+
+    const char *groupname = (const char *)groupname_ptr;
+    if (groups_lookup_by_name(groupname, NULL) == 0) return (uint64_t)-1; // уже существует
+
+    uint32_t gid = groups_next_free_gid();
+    return (groups_add(groupname, gid) == 0) ? 0 : (uint64_t)-1;
+}
+
+// SYS_PASSWD (40): username_ptr (0 — свой собственный пароль, без проверки
+// прав), new_password_ptr. Ненулевой username_ptr — root-only.
+static uint64_t sys_passwd(uint64_t username_ptr, uint64_t new_password_ptr, uint64_t unused1,
+                           uint64_t unused2, uint64_t unused3) {
+    (void)unused1; (void)unused2; (void)unused3;
+    if (!current_process) return (uint64_t)-EFAULT;
+
+    int64_t plen = validate_user_string(current_process->page_table, new_password_ptr, USER_STRING_MAX);
+    if (plen < 0) return (uint64_t)-EFAULT;
+    const char *new_password = (const char *)new_password_ptr;
+
+    const char *target_name;
+    char self_name[32];
+    if (username_ptr == 0) {
+        user_entry_t self;
+        if (users_lookup_by_uid(current_process->uid, &self) != 0) return (uint64_t)-ENOENT;
+        copy_bounded_path(self_name, self.username, sizeof(self_name));
+        target_name = self_name;
+    } else {
+        if (current_process->uid != 0) return (uint64_t)-EPERM;
+        int64_t ulen = validate_user_string(current_process->page_table, username_ptr, USER_STRING_MAX);
+        if (ulen <= 0) return (uint64_t)-EFAULT;
+        target_name = (const char *)username_ptr;
+        if (users_lookup_by_name(target_name, NULL) != 0) return (uint64_t)-ENOENT;
+    }
+
+    return (users_set_password(target_name, new_password) == 0) ? 0 : (uint64_t)-1;
+}
+
+// SYS_USB_COUNT (41) / SYS_USB_INFO (42) / SYS_USB_READ (43) / SYS_USB_WRITE
+// (44) — см. комментарии в syscall.h. Тонкие обёртки над xhci_msd_*()
+// (xhci.h) — прямой перенос command_usbinfo()/usbread()/usbwrite()
+// (kernel/shell/commands/usb.c, мёртвый код), уже проверенных на
+// безопасность (те же функции используются fat_mount.c для монтирования).
+static uint64_t sys_usb_count(uint64_t unused1, uint64_t unused2, uint64_t unused3,
+                              uint64_t unused4, uint64_t unused5) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4; (void)unused5;
+    return (uint64_t)xhci_msd_device_count();
+}
+
+static uint64_t sys_usb_info(uint64_t index, uint64_t out_ptr, uint64_t unused1,
+                             uint64_t unused2, uint64_t unused3) {
+    (void)unused1; (void)unused2; (void)unused3;
+    if (!current_process ||
+        !is_user_range_valid(current_process->page_table, out_ptr, sizeof(lufira_usb_info_t), 1))
+        return (uint64_t)-EFAULT;
+
+    lufira_usb_info_t out;
+    if (xhci_msd_get_info((int)index, &out.max_lba, &out.block_size) != 0)
+        return (uint64_t)-ENOENT;
+
+    memcpy((void *)out_ptr, &out, sizeof(out));
+    return 0;
+}
+
+static uint64_t sys_usb_read(uint64_t index, uint64_t lba, uint64_t buf_ptr, uint64_t buf_size,
+                             uint64_t unused1) {
+    (void)unused1;
+    if (!current_process) return (uint64_t)-EFAULT;
+
+    uint32_t max_lba, block_size;
+    if (xhci_msd_get_info((int)index, &max_lba, &block_size) != 0) return (uint64_t)-ENOENT;
+    if (lba > max_lba) return (uint64_t)-EINVAL;
+    if (buf_size < block_size) return (uint64_t)-EINVAL;
+
+    if (!is_user_range_valid(current_process->page_table, buf_ptr, block_size, 1))
+        return (uint64_t)-EFAULT;
+
+    if (xhci_msd_read_block((int)index, (uint32_t)lba, (void *)buf_ptr, block_size) != 0)
+        return (uint64_t)-1;
+    return (uint64_t)block_size;
+}
+
+static uint64_t sys_usb_write(uint64_t index, uint64_t lba, uint64_t buf_ptr, uint64_t buf_size,
+                              uint64_t unused1) {
+    (void)unused1;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (current_process->uid != 0) return (uint64_t)-EPERM; // см. комментарий в syscall.h
+
+    uint32_t max_lba, block_size;
+    if (xhci_msd_get_info((int)index, &max_lba, &block_size) != 0) return (uint64_t)-ENOENT;
+    if (lba > max_lba) return (uint64_t)-EINVAL;
+    if (buf_size < block_size) return (uint64_t)-EINVAL;
+
+    if (!is_user_range_valid(current_process->page_table, buf_ptr, block_size, 0))
+        return (uint64_t)-EFAULT;
+
+    if (xhci_msd_write_block((int)index, (uint32_t)lba, (const void *)buf_ptr, block_size) != 0)
+        return (uint64_t)-1;
+    return (uint64_t)block_size;
+}
+
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
 
 static syscall_fn_t syscall_table[256] = {
@@ -986,6 +1271,13 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_REBOOT] = sys_reboot,
     [SYS_SHUTDOWN] = sys_shutdown,
     [SYS_DEVMODE] = sys_devmode,
+    [SYS_USERADD] = sys_useradd,
+    [SYS_GROUPADD] = sys_groupadd,
+    [SYS_PASSWD] = sys_passwd,
+    [SYS_USB_COUNT] = sys_usb_count,
+    [SYS_USB_INFO] = sys_usb_info,
+    [SYS_USB_READ] = sys_usb_read,
+    [SYS_USB_WRITE] = sys_usb_write,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========

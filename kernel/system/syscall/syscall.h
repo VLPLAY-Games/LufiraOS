@@ -97,6 +97,45 @@
 // мёртвый command_devmode().
 #define SYS_DEVMODE 37
 
+// SYS_USERADD (38): username_ptr, password_ptr, group_ptr (0 — своей
+// группы с именем пользователя нет, завести новую с тем же именем, как
+// настоящий Linux useradd по умолчанию). Root-only. Тонкая обёртка над
+// users_add()/groups_add() (users.h, оба уже пишут и файл, и g_users[]/
+// g_groups[] в памяти атомарно) — перенос command_useradd() (kernel/shell/
+// commands/users.c, мёртвый код) без изменения самой логики, кроме
+// создания домашнего каталога (своя копия ensure_home_dir() прямо в
+// syscall.c — тот файл мёртвый и не экспортирует свои статические
+// хелперы, см. тот же приём уже у fat_mount.c с mount.c).
+#define SYS_USERADD 38
+
+// SYS_GROUPADD (39): groupname_ptr. Root-only. Тонкая обёртка над
+// groups_add().
+#define SYS_GROUPADD 39
+
+// SYS_PASSWD (40): username_ptr (0 — сменить свой собственный пароль, без
+// проверки прав — current_process уже аутентифицирован), new_password_ptr.
+// Ненулевой username_ptr — сброс пароля ЛЮБОГО пользователя, root-only.
+#define SYS_PASSWD 40
+
+// SYS_USB_COUNT (41): без аргументов — число найденных USB mass storage
+// устройств (xhci_msd_device_count()).
+#define SYS_USB_COUNT 41
+
+// SYS_USB_INFO (42): index, out_ptr (struct lufira_usb_info{max_lba,
+// block_size} — см. ниже). -1 если такого устройства нет.
+#define SYS_USB_INFO 42
+
+// SYS_USB_READ (43): index, lba, buf_ptr, buf_size (должен быть >= реального
+// block_size устройства, иначе -EINVAL — тот же приём, что уже у SYS_MEMINFO/
+// SYS_STATFS с размером структуры). Читает ОДИН блок.
+#define SYS_USB_READ 43
+
+// SYS_USB_WRITE (44): index, lba, buf_ptr, buf_size — пишет ОДИН блок.
+// Root-only (в отличие от чтения) — прямая запись по LBA на реальное
+// устройство необратима и может повредить файловую систему, смонтированную
+// тем же устройством через SYS_MOUNT.
+#define SYS_USB_WRITE 44
+
 // Флаги для sys_open
 #define O_RDONLY    0
 #define O_WRONLY    1
@@ -184,6 +223,13 @@ typedef struct {
     uint32_t uid;
     uint64_t cpu_ticks;
 } lufira_ps_entry_t;
+
+// SYS_USB_INFO (42) — зеркало xhci_msd_get_info() (xhci.h), байт-в-байт
+// мирроится в libc/include/lufira/syscall.h, как и структуры выше.
+typedef struct {
+    uint32_t max_lba;
+    uint32_t block_size;
+} lufira_usb_info_t;
 
 // Потолок длины ЛЮБОЙ NUL-терминированной строки от пользователя (filename
 // для open/exec, path для chdir) — не даёт неверно терминированному буферу
