@@ -1,14 +1,58 @@
 #include "string.h"
 
+// Обе функции ниже копируют/заполняют словами (8 байт), когда могут, а не
+// побайтово — найдено живым тестированием gfx_present() (console.c,
+// v0.8-мост, пункт 2): побайтовый memcpy() framebuffer-размера (несколько
+// МБ) внутри pit_timer_handler() (под cli, см. console_tick_present())
+// занимал заметную долю секунды КАЖДЫЙ раз, когда экран "грязный" — на
+// практике ощущалось как зависание всей системы (следующий таймерный тик
+// не мог прийти, пока предыдущий не отпустит cli). Выравнивание — только
+// ПРЕФИКС до первого 8-байтного адреса, остаток словами, хвост < 8 байт
+// обратно по байту — классический приём, без него word-доступ к
+// невыровненному адресу либо падает, либо (здесь, SSE/без -mgeneral-regs-
+// only уже не актуально) просто медленнее.
 void* memset(void* s, int c, size_t n) {
     unsigned char* p = (unsigned char*)s;
-    while (n--) *p++ = (unsigned char)c;
+    unsigned char byte = (unsigned char)c;
+
+    while (n > 0 && ((uintptr_t)p & 7)) { *p++ = byte; n--; }
+
+    if (n >= 8) {
+        uint64_t word = (uint64_t)byte * 0x0101010101010101ULL;
+        uint64_t *pw = (uint64_t*)p;
+        size_t words = n / 8;
+        for (size_t i = 0; i < words; i++) pw[i] = word;
+        p += words * 8;
+        n -= words * 8;
+    }
+
+    while (n--) *p++ = byte;
     return s;
 }
 
 void* memcpy(void* dest, const void* src, size_t n) {
     unsigned char* d = (unsigned char*)dest;
     const unsigned char* s = (const unsigned char*)src;
+
+    // Словами копируем, только если оба указателя выравниваются на 8
+    // ОДИНАКОВО (общий случай — framebuffer/kmalloc'нутая память почти
+    // всегда хотя бы 8-байтно выровнена сама по себе) — иначе откатываемся
+    // на честный побайтовый путь на всю длину, не пытаясь исхитриться с
+    // разным сдвигом src/dest.
+    if ((((uintptr_t)d ^ (uintptr_t)s) & 7) == 0) {
+        while (n > 0 && ((uintptr_t)d & 7)) { *d++ = *s++; n--; }
+
+        if (n >= 8) {
+            uint64_t *dw = (uint64_t*)d;
+            const uint64_t *sw = (const uint64_t*)s;
+            size_t words = n / 8;
+            for (size_t i = 0; i < words; i++) dw[i] = sw[i];
+            d += words * 8;
+            s += words * 8;
+            n -= words * 8;
+        }
+    }
+
     while (n--) *d++ = *s++;
     return dest;
 }

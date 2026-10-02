@@ -39,3 +39,8 @@ uint8_t input_mouse_get_buttons(void);
 // приходит байт (у pipe такого пробуждения нет вообще — см. отдельно
 // заведённую задачу на этот счёт).
 int console_input_read(uint8_t *out, int max);
+
+// Небольшой read()-очередь без блокировки — для SYS_POLL (v0.8-мост,
+// пункт 3, syscall.c/vfs.c) — проверить "есть ли что почитать прямо
+// сейчас", не уходя в PROCESS_BLOCKED, как делает console_input_read().
+int console_input_has_data(void);

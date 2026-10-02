@@ -7,6 +7,7 @@
 #include "system/mm/heap.h"
 #include "system/mm/pmm.h"
 #include "system/mm/paging.h"
+#include "system/mm/shm.h"
 #include "lib/stddef.h"
 #include "lib/string.h"
 #include "fs/vfs/vfs.h"
@@ -337,6 +338,16 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     uint64_t aligned_len = (length + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     uint64_t num_pages = aligned_len / PAGE_SIZE;
 
+    // v0.8-мост, пункт 4: MAP_SHARED был объявлен в ABI, но раньше вообще
+    // не проверялся — любой mmap() вёл себя как MAP_PRIVATE. Область,
+    // отмеченная им, переживает fork() алиасингом физических страниц (а не
+    // копированием), см. clone_address_space_deep() (process.c) и реестр
+    // в shm.c. MAX_SHARED_REGION_PAGES — тот же потолок, что и у shm.c,
+    // проверяем заранее, чтобы не делать лишнюю работу.
+    int want_shared = (flags & MAP_SHARED) != 0;
+    if (want_shared && num_pages > MAX_SHARED_REGION_PAGES)
+        return (uint64_t)-EINVAL;
+
     int slot = -1;
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         if (current_process->mmap_regions[i].length == 0) { slot = i; break; }
@@ -350,7 +361,9 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     uint64_t page_flags = PAGE_PRESENT | PAGE_USER;
     if (prot & PROT_WRITE) page_flags |= PAGE_WRITE;
     if (!(prot & PROT_EXEC)) page_flags |= PAGE_NX;
+    if (want_shared) page_flags |= PAGE_MMAP_SHARED;
 
+    uint64_t shared_pages[MAX_SHARED_REGION_PAGES];
     uint64_t mapped;
     for (mapped = 0; mapped < num_pages; mapped++) {
         uint64_t phys = pmm_alloc_page();
@@ -365,21 +378,40 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         // Анонимная память обязана приходить обнулённой (POSIX-семантика,
         // на неё будет полагаться malloc() будущей libc).
         memset((void*)virt, 0, PAGE_SIZE);
+        if (want_shared) shared_pages[mapped] = phys;
     }
 
     if (mapped < num_pages) {
         // Не хватило физической памяти на часть запроса — откатываем то,
-        // что уже успели замаппить (unmap_page() сама же освобождает и
-        // физическую страницу), а не оставляем недостроенный регион.
+        // что уже успели замаппить. PAGE_MMAP_SHARED уже мог быть
+        // выставлен на эти PTE (page_flags выше), но shm_create() ещё не
+        // звали — unmap_page() (paging.c) в этом случае корректно
+        // откатывается на обычный pmm_free_page() (shm_find_region_by_page()
+        // ничего не найдёт, региона ещё не существует).
         for (uint64_t i = 0; i < mapped; i++) {
             unmap_page(base + i * PAGE_SIZE);
         }
         return (uint64_t)-1;
     }
 
+    int shared_id = -1;
+    if (want_shared) {
+        shared_id = shm_create(shared_pages, num_pages);
+        if (shared_id < 0) {
+            // Реестр shm.c переполнен — то же самое, что "некуда записать
+            // новый регион" чуть выше, только обнаруживается позже (после
+            // того, как страницы уже выделены) — откатываем ровно так же.
+            for (uint64_t i = 0; i < num_pages; i++) {
+                unmap_page(base + i * PAGE_SIZE);
+            }
+            return (uint64_t)-1;
+        }
+    }
+
     current_process->next_mmap_addr += aligned_len;
     current_process->mmap_regions[slot].addr = base;
     current_process->mmap_regions[slot].length = aligned_len;
+    current_process->mmap_regions[slot].shared_id = shared_id;
 
     return base;
 }
@@ -1230,6 +1262,72 @@ static uint64_t sys_usb_write(uint64_t index, uint64_t lba, uint64_t buf_ptr, ui
     return (uint64_t)block_size;
 }
 
+// SYS_POLL (45) — см. подробный комментарий в syscall.h. Опрос с шагом в
+// один тик (process_sleep(10), уже существующий блокирующий примитив —
+// тот же, что и у SYS_SLEEP) вместо честного пробуждения по событию.
+#define LUFIRA_POLL_MAX_NFDS 64
+
+static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
+                         uint64_t unused1, uint64_t unused2) {
+    (void)unused1; (void)unused2;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (nfds == 0) return 0;
+    if (nfds > LUFIRA_POLL_MAX_NFDS) return (uint64_t)-EINVAL;
+
+    size_t bytes = (size_t)nfds * sizeof(lufira_pollfd_t);
+    if (!is_user_range_valid(current_process->page_table, fds_ptr, bytes, 1))
+        return (uint64_t)-EFAULT;
+
+    lufira_pollfd_t *fds = (lufira_pollfd_t *)fds_ptr;
+    int64_t timeout = (int64_t)timeout_ms; // <0 = ждать неограниченно
+    uint64_t elapsed_ms = 0;
+
+    for (;;) {
+        int ready = 0;
+        for (uint64_t i = 0; i < nfds; i++) {
+            int revents = 0;
+            if (vfs_poll_check(fds[i].fd, fds[i].events, &revents) != 0) revents = 0;
+            fds[i].revents = revents;
+            if (revents) ready++;
+        }
+        if (ready > 0) return (uint64_t)ready;
+        if (timeout == 0) return 0;
+        if (timeout > 0 && elapsed_ms >= (uint64_t)timeout) return 0;
+
+        process_sleep(10);
+        elapsed_ms += 10;
+    }
+}
+
+// SYS_SIGACTION (46) — см. комментарий в syscall.h. SIGINT/SIGTERM/SIGALRM
+// (последний — для SYS_ALARM, v0.8-мост, пункт 6).
+static uint64_t sys_sigaction(uint64_t sig, uint64_t handler_ptr, uint64_t unused1,
+                              uint64_t unused2, uint64_t unused3) {
+    (void)unused1; (void)unused2; (void)unused3;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (sig != SIGINT && sig != SIGTERM && sig != SIGALRM) return (uint64_t)-EINVAL;
+
+    current_process->signal_handlers[sig] = handler_ptr;
+    return 0;
+}
+
+// SYS_ALARM (48) — см. комментарий в syscall.h. Один тик = 10мс
+// (PIT_FREQUENCY), тот же округляющий приём, что и у SYS_SLEEP.
+static uint64_t sys_alarm(uint64_t milliseconds, uint64_t unused1, uint64_t unused2,
+                          uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+
+    if (milliseconds == 0) {
+        current_process->alarm_tick = 0; // снять уже взведённый, если был
+        return 0;
+    }
+
+    uint64_t ticks = (milliseconds + 9) / 10;
+    current_process->alarm_tick = pit_get_ticks() + ticks;
+    return 0;
+}
+
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
 
 static syscall_fn_t syscall_table[256] = {
@@ -1278,6 +1376,9 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_USB_INFO] = sys_usb_info,
     [SYS_USB_READ] = sys_usb_read,
     [SYS_USB_WRITE] = sys_usb_write,
+    [SYS_POLL] = sys_poll,
+    [SYS_SIGACTION] = sys_sigaction,
+    [SYS_ALARM] = sys_alarm,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
@@ -1316,17 +1417,39 @@ void syscall_init(void) {
 uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_t arg2,
                          uint64_t arg3, uint64_t arg4, uint64_t arg5,
                          uint64_t frame_ptr) {
+    uint64_t result;
+
     // SYS_FORK — особый случай: ему нужен указатель на весь сохранённый
     // кадр регистров (rip/rflags/callee-saved), а не только 5 обычных
     // аргументов, поэтому он обрабатывается до общей таблицы диспетчера.
     if (syscall_num == SYS_FORK) {
-        return process_fork(frame_ptr);
+        result = process_fork(frame_ptr);
     }
-
-    if (syscall_num >= 256 || !syscall_table[syscall_num]) {
+    // SYS_SIGRETURN — тот же повод, что у SYS_FORK выше: process_sigreturn()
+    // (process.c) переписывает сохранённый кадр напрямую, а не просто
+    // возвращает значение через обычные 5 аргументов.
+    else if (syscall_num == SYS_SIGRETURN) {
+        result = process_sigreturn(frame_ptr);
+    }
+    else if (syscall_num >= 256 || !syscall_table[syscall_num]) {
         printf("[SYSCALL] Unknown: %u\n", (uint32_t)syscall_num);
-        return (uint64_t)-1;
+        result = (uint64_t)-1;
+    }
+    else {
+        result = syscall_table[syscall_num](arg1, arg2, arg3, arg4, arg5);
     }
 
-    return syscall_table[syscall_num](arg1, arg2, arg3, arg4, arg5);
+    // v0.8-мост, пункт 5 (SYS_SIGACTION) — доставка отложенного сигнала,
+    // ЗДЕСЬ, а не в планировщике (switch_to_process()): frame_ptr в этой
+    // самой точке ВСЕГДА настоящая ring3-точка возврата ИМЕННО этого
+    // syscall'а (её же строит syscall_entry.S на каждый вход, какой бы
+    // синхронный или заблокировавшийся на время syscall ни был) — в
+    // отличие от process_t.context, который может застать процесс где
+    // угодно В СЕРЕДИНЕ кернела (внутри schedule(), например) — попытка
+    // подменить ЕГО напрямую на обработчик уже проверена живым
+    // тестированием и падает в page fault (см. подробный комментарий у
+    // process_sigreturn(), откуда этот подход и был перенесён сюда).
+    process_deliver_pending_signal(frame_ptr);
+
+    return result;
 }

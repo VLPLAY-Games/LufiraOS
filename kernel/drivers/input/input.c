@@ -33,6 +33,10 @@ static void console_input_push(uint8_t byte) {
     }
 }
 
+int console_input_has_data(void) {
+    return console_input_count > 0;
+}
+
 int console_input_read(uint8_t *out, int max) {
     if (max <= 0) return 0;
 

@@ -3,6 +3,8 @@
 #include "lib/stddef.h"
 #include "console.h"
 #include "lib/colors.h"
+#include "lib/string.h"
+#include "system/mm/heap.h"
 
 static void clear_console_line(uint32_t y);
 
@@ -11,6 +13,11 @@ uint32_t current_x = 0;
 uint32_t current_y = 0;
 uint32_t screen_width_chars = 0;
 uint32_t screen_height_chars = 0;
+// framebuffer — то, во что реально пишут put_pixel() и весь остальной
+// код (graphics2d.c и т.д.). До console_enable_double_buffering() это
+// прямо hw-framebuffer (как раньше); после — back buffer в RAM, а
+// hw_framebuffer (ниже) хранит настоящий адрес для gfx_present(). См.
+// подробный комментарий у double buffering ниже (v0.8-мост, пункт 2).
 uint32_t* framebuffer = NULL;
 uint32_t current_color = 0xFFFFFF;
 uint32_t current_bg_color = 0x000000;
@@ -18,6 +25,77 @@ uint32_t pixels_per_scan_line = 0;
 uint32_t screen_width_pixels = 0;
 uint32_t screen_height_pixels = 0;
 uint32_t pixel_format = 0;
+
+// ==================== ДВОЙНАЯ БУФЕРИЗАЦИЯ ====================
+//
+// v0.8-мост, пункт 2. До этого put_pixel() писал прямо в MMIO
+// (hw-framebuffer) на каждый вызов — для одного символа это терпимо, но
+// любая многопиксельная операция (gfx_fill_rect/draw_line/blit из
+// graphics2d.c, нужные будущему WM) рисовала бы видимо построчно/по
+// пикселю, да ещё и через потенциально некэшируемую MMIO-память на
+// каждый пиксель.
+//
+// Включается НЕ сразу в initialize_console() (слишком рано: heap_init()
+// тогда ещё не отработал, kmalloc() недоступен), а отдельным вызовом
+// console_enable_double_buffering() из kernel.c — после того, как уже
+// тикает таймер (см. вызов в kernel.c сразу после sti/irq_enable).
+// Специально НЕ раньше: до этой точки все боковые сообщения загрузки
+// (LOG_PENDING/LOG_DONE_OK и т.п.) по-прежнему идут прямо в hw-буфер —
+// если ядро зависнет/упадёт где-то в этом окне, экран всё ещё покажет
+// РЕАЛЬНОЕ последнее состояние, а не кадр, который некому было бы
+// отправить на экран (таймера, который гонит gfx_present(), ещё нет).
+//
+// Flush — через "грязный" флаг, а не на каждый put_pixel()/печатаемый
+// символ: console_tick_present() (вызывается из pit_timer_handler(),
+// pit.c, рядом с update_cursor()) копирует back buffer в hw-буфер ОДИН
+// РАЗ ЗА ТИК (100 Гц = максимум раз в 10мс), и только если что-то
+// реально изменилось с прошлого раза. Чем сразу presentить на каждый
+// put_pixel() (как сделал бы самый наивный вариант) — тот же принцип,
+// что и у gfx_fill_rect() в graphics2d.c, который тоже не зовёт put_pixel()
+// там, где может писать строку сразу: амортизировать стоимость кадра на
+// весь батч операций, а не на каждый пиксель.
+static uint32_t *hw_framebuffer = NULL;
+static int double_buffering_enabled = 0;
+static int fb_dirty = 0;
+
+void console_enable_double_buffering(void) {
+    if (double_buffering_enabled || !framebuffer) return;
+
+    size_t fb_bytes = (size_t)pixels_per_scan_line * screen_height_pixels * sizeof(uint32_t);
+    uint32_t *back = (uint32_t *)kmalloc(fb_bytes);
+    if (!back) return; // не хватило памяти — остаёмся в режиме прямой записи
+
+    memcpy(back, framebuffer, fb_bytes); // framebuffer тут ещё = hw-буфер
+    hw_framebuffer = framebuffer;
+    framebuffer = back;
+    double_buffering_enabled = 1;
+}
+
+// Копирует back buffer в hw-буфер целиком, безусловно — вызывать только
+// когда реально нужно (gfx_present()) или когда fb_dirty уже проверен
+// (console_tick_present()).
+void gfx_present(void) {
+    if (!double_buffering_enabled) return;
+    size_t fb_bytes = (size_t)pixels_per_scan_line * screen_height_pixels * sizeof(uint32_t);
+    memcpy(hw_framebuffer, framebuffer, fb_bytes);
+    fb_dirty = 0;
+}
+
+// Вызывается из pit_timer_handler() на каждый тик (pit.c) — присутствует
+// ТОЛЬКО если что-то рисовали с прошлого тика, иначе no-op (не тратит
+// память/CPU на memcpy всего кадра 100 раз в секунду вхолостую).
+void console_tick_present(void) {
+    if (double_buffering_enabled && fb_dirty) gfx_present();
+}
+
+// Для вызывающих, которые пишут в framebuffer[] напрямую, в обход
+// put_pixel() (gfx_fill_rect()/gfx_blit() в graphics2d.c — построчно
+// через указатель/memcpy ради скорости, см. их же комментарии) — иначе
+// их изменения просто не попадут на экран до следующего put_pixel()
+// где-нибудь ещё.
+void console_mark_dirty(void) {
+    fb_dirty = 1;
+}
 
 // Переменные для мигающего курсора
 int cursor_visible = 1;
@@ -210,18 +288,31 @@ static int interrupts_enabled(void) {
     return (int)((rflags >> 9) & 1ULL);
 }
 
-// Преобразование цвета из RGB в BGR если нужно
+// Преобразование цвета RGB (как его пишет остальной код: (R<<16)|(G<<8)|B,
+// "0xRRGGBB") в формат, который реально ожидает framebuffer — pixel_format
+// приходит из BootInfo уже нормализованным загрузчиком (boot/system/
+// graphics.c) до 0 (PixelRedGreenBlueReserved8BitPerColor — байт 0 по
+// адресу = Red) или 1 (PixelBlueGreenRedReserved8BitPerColor — байт 0 =
+// Blue), см. bootinfo.h.
+//
+// Ветка была закомментирована (return color всегда), а когда её впервые
+// включили здесь (v0.8-мост, пункт 1) и проверили живьём в QEMU —
+// "логический красный" оказался синим. Причина: условие в закомментированной
+// версии было перепутано местами. На little-endian x86 запись uint32_t
+// v=(R<<16)|(G<<8)|B кладёт в память байт0=B, байт1=G, байт2=R — то есть
+// БЕЗ swap'а эта запись уже соответствует PixelBlueGreenRedReserved...
+// (байт0=Blue), а не Red-первому формату, как могло бы показаться по
+// названию "RGB". Значит swap нужен ровно для pixel_format==0, а не ==1.
 uint32_t convert_color(uint32_t color) {
-    // if (pixel_format == 0) {
-    //     return color; // RGB формат
-    // } else {
-    //     // BGR формат: преобразуем RGB в BGR
-    //     uint8_t r = (color >> 16) & 0xFF;
-    //     uint8_t g = (color >> 8) & 0xFF;
-    //     uint8_t b = color & 0xFF;
-    //     return (b << 16) | (g << 8) | r;
-    // }
-    return color;
+    if (pixel_format == 1) {
+        return color; // байт0=Blue — (R<<16)|(G<<8)|B уже в этом порядке
+    } else {
+        // байт0=Red — меняем местами R и B
+        uint8_t r = (color >> 16) & 0xFF;
+        uint8_t g = (color >> 8) & 0xFF;
+        uint8_t b = color & 0xFF;
+        return (b << 16) | (g << 8) | r;
+    }
 }
 
 // Инициализация 256-цветной палитры
@@ -311,6 +402,7 @@ void initialize_console(BootInfo* bi) {
 void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
     if (x >= screen_width_pixels || y >= screen_height_pixels) return;
     framebuffer[y * pixels_per_scan_line + x] = color;
+    fb_dirty = 1; // см. "ДВОЙНАЯ БУФЕРИЗАЦИЯ" выше — до enable безобиден (gfx_present()/console_tick_present() сами no-op без неё)
 }
 
 // Получение имени цвета
@@ -575,9 +667,10 @@ void clear_entire_screen(void) {
             framebuffer[y * pixels_per_scan_line + x] = current_bg_color;
         }
     }
+    fb_dirty = 1; // пишет framebuffer[] напрямую, в обход put_pixel()
     current_x = 0;
     current_y = 0;
-    
+
     // Восстанавливаем курсор
     if (cursor_enabled && cursor_visible) {
         draw_cursor();
@@ -1182,6 +1275,7 @@ static void framebuffer_shift_up(uint32_t lines) {
             framebuffer[y * pixels_per_scan_line + x] = current_bg_color;
         }
     }
+    fb_dirty = 1; // пишет framebuffer[] напрямую, в обход put_pixel()
 }
 
 static void framebuffer_shift_down(uint32_t lines) {
@@ -1207,6 +1301,7 @@ static void framebuffer_shift_down(uint32_t lines) {
             framebuffer[y * pixels_per_scan_line + x] = current_bg_color;
         }
     }
+    fb_dirty = 1; // пишет framebuffer[] напрямую, в обход put_pixel()
 }
 
 

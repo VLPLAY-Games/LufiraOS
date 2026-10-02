@@ -91,6 +91,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/lib/cpu.c \
 	$(KERNEL_DIR)/drivers/pci/pci.c \
     $(KERNEL_DIR)/drivers/console/console.c \
+    $(KERNEL_DIR)/drivers/console/graphics2d.c \
     $(KERNEL_DIR)/drivers/keyboard/keyboard.c \
     $(KERNEL_DIR)/drivers/mouse/mouse.c \
     $(KERNEL_DIR)/drivers/disk/disk.c \
@@ -121,6 +122,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/system/mm/pmm.c \
     $(KERNEL_DIR)/system/mm/paging.c \
     $(KERNEL_DIR)/system/mm/heap.c \
+    $(KERNEL_DIR)/system/mm/shm.c \
     $(KERNEL_DIR)/system/acpi/acpi.c \
 	$(KERNEL_DIR)/system/timer/pit.c \
     $(KERNEL_DIR)/system/process/process.c \

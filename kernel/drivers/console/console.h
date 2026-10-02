@@ -44,6 +44,19 @@ extern uint32_t color_palette_256[];
 
 // Прототипы функций
 void initialize_console(BootInfo* bi);
+
+// Двойная буферизация (v0.8-мост, пункт 2) — см. подробный комментарий в
+// console.c. Включать ПОСЛЕ heap_init() И после того, как уже тикает
+// таймер (kernel.c зовёт сразу после sti/irq_enable).
+void console_enable_double_buffering(void);
+// Копирует back buffer в hw-буфер немедленно, безусловно.
+void gfx_present(void);
+// Присутствует back buffer на экран, только если что-то рисовали с
+// прошлого раза — зовётся из pit_timer_handler() каждый тик.
+void console_tick_present(void);
+// Для кода, который пишет в framebuffer[] напрямую в обход put_pixel()
+// (graphics2d.c).
+void console_mark_dirty(void);
 void put_pixel(uint32_t x, uint32_t y, uint32_t color);
 uint32_t convert_color(uint32_t color);
 void put_char_graphic(int c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color);

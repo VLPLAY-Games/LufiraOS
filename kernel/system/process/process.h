@@ -13,6 +13,24 @@
 #define KERNEL_STACK_SIZE       (16 * 1024)            // 16KB на процесс
 #define MAX_PROCESSES           32
 #define USER_STACK_AREA_START 0x0000700000000000ULL
+
+// Отдельный маленький стек для обработчиков сигналов (v0.8-мост, пункт 5,
+// SYS_SIGACTION) — ОДИН и тот же виртуальный адрес у каждого процесса (не
+// pid-сдвинутый, как USER_STACK_AREA_START выше): у каждого процесса своя
+// собственная PML4, так что коллизии между процессами тут в принципе нет,
+// а ребёнку после fork() этот адрес достаётся автоматически, тем же общим
+// постраничным копированием, что и весь остальной адрес процесса
+// (clone_address_space_deep(), process.c) — которое просто копирует уже
+// СУЩЕСТВУЮЩИЕ маппинги по их текущим виртуальным адресам, а не
+// пересчитывает их заново под pid ребёнка. Нужен отдельный от основного
+// user-стека, а не просто кусок того же: context.rsp на момент доставки
+// сигнала может указывать на КЕРНЕЛ-стек процесса (если его прервали
+// глубоко внутри блокирующего syscall'а, напр. process_sleep()) — и этот
+// адрес для ring3-обработчика попросту недоступен (найдено живым
+// тестированием: обработчик падал в page fault на первой же попытке
+// использовать "свой" стек).
+#define SIGNAL_STACK_AREA_START 0x0000690000000000ULL
+#define SIGNAL_STACK_SIZE (2 * PAGE_SIZE) // печать внутри обработчика (printf) — небольшой запас сверх 1 страницы
 #define USER_STACK_SIZE       (16 * 1024)  // 16KB
 
 // Область под mmap(). Один и тот же виртуальный адрес для ВСЕХ процессов
@@ -40,15 +58,28 @@
 // PID никогда не достигают этого значения.
 #define WAIT_ANY_PID ((uint32_t)-1)
 
-// Сигналы: только действия по умолчанию (нет sigaction()/обработчиков в
-// user-space) — доставка синхронная, прямо в момент отправки (см.
-// process_signal() в process.c). Номера взяты как у настоящих POSIX-сигналов
-// просто для привычности.
+// Сигналы. v0.8-мост, пункт 5: SIGINT/SIGTERM теперь ловятся (SYS_SIGACTION,
+// syscall.h) — SIGKILL/SIGSTOP/SIGCONT по-прежнему только действие по
+// умолчанию (как и в настоящем POSIX — их нельзя ни поймать, ни
+// проигнорировать). Доставка — ОТЛОЖЕННАЯ, не синхронная: process_signal()
+// только выставляет pending_signal, а реальный переход на обработчик —
+// process_deliver_pending_signal() (process.c), вызывается из
+// syscall_handler() (syscall.c) прямо перед возвратом ИЗ КАЖДОГО
+// syscall'а — единственная точка, где доступный указатель (syscall_frame_t*)
+// гарантированно настоящая ring3-точка возврата, независимо от того, кто и
+// когда вызвал process_signal() (даже сам процесс в себя, из прерывания
+// клавиатуры прямо во время своего же исполнения) — см. подробный
+// комментарий там же. Номера взяты как у настоящих POSIX-сигналов просто
+// для привычности.
 #define SIGINT  2
+#define SIGALRM 14 // v0.8-мост, пункт 6 — доставляется SYS_ALARM по истечении таймера
 #define SIGKILL 9
 #define SIGTERM 15
 #define SIGCONT 18
 #define SIGSTOP 19
+
+// Максимальный номер сигнала + 1 — размер signal_handlers[] (process_t).
+#define MAX_SIGNUM 32
 
 typedef enum {
     PROCESS_READY = 0,
@@ -71,9 +102,14 @@ typedef struct __attribute__((packed)) {
 } process_context_t;
 
 // Один регион, выделенный sys_mmap(). length==0 — слот свободен.
+// shared_id — индекс в реестре shm.c (v0.8-мост, пункт 4), -1 для
+// обычного (MAP_PRIVATE-подобного) региона. Копируется process_fork()'ом
+// вместе со всем остальным mmap_regions[] — ребёнок наследует тот же id,
+// что и физически алиасированные страницы (clone_address_space_deep()).
 typedef struct {
     uint64_t addr;
     uint64_t length;
+    int shared_id;
 } mmap_region_t;
 
 typedef struct process {
@@ -125,6 +161,36 @@ typedef struct process {
     // так что вместо него пересоздаётся новый — иначе система осталась бы
     // вообще без интерактивного приглашения.
     int is_shell;
+    // v0.8-мост, пункт 5 (SYS_SIGACTION/SYS_SIGRETURN, см. комментарий у
+    // SIGINT выше): signal_handlers[sig] — адрес обработчика в user-space
+    // (0 = действие по умолчанию). pending_signal — сигнал, ещё не
+    // доставленный (один слот — тот же принцип минимализма, что и у
+    // console_input_waiter/pipe_t.read_waiter: на практике сигналы здесь
+    // не настолько часты, чтобы нужна была очередь; новый ПЕРЕЗАПИСЫВАЕТ
+    // предыдущий недоставленный, как и везде в этом ядре). in_signal_handler
+    // — внутри обработчика сейчас или нет (пока 1 — новые сигналы не
+    // доставляются, тот же дух, что sigprocmask() во время настоящего
+    // обработчика в POSIX, упрощённо: всё, а не только сам этот сигнал).
+    // saved_signal_context — полный снимок syscall_frame_t на момент
+    // редиректа в обработчик (process_deliver_pending_signal(), process.c)
+    // — SYS_SIGRETURN переносит его обратно в syscall_frame_t вызывающего
+    // (process_sigreturn(), process.c) и возобновляет исполнение ТОЧНО с
+    // того места, где сигнал застал процесс.
+    uint64_t signal_handlers[MAX_SIGNUM];
+    int pending_signal;
+    int in_signal_handler;
+    process_context_t saved_signal_context;
+    // Верхний адрес отдельного стека для обработчиков сигналов (0, если
+    // ещё не выделен/недоступен — тогда доставка сигнала просто
+    // пропускается, см. process_deliver_pending_signal()) — см.
+    // SIGNAL_STACK_AREA_START выше.
+    uint64_t sig_stack_top;
+    // v0.8-мост, пункт 6 (SYS_ALARM) — 0, если таймер не взведён, иначе
+    // тик PIT (см. pit_get_ticks()), на который взведён SIGALRM. Проверяется
+    // в той же точке, что и пробуждение PROCESS_SLEEPING (timer_irq_handler(),
+    // pit.c), и доставляется через тот же process_signal(), что и обычный
+    // kill() — ничего отдельного изобретать не пришлось.
+    uint64_t alarm_tick;
     // 1 до первой активации процесса, затем всегда 0. switch_to_process()
     // использует это, чтобы направить САМЫЙ первый запуск через
     // context_enter_ring3() (настоящий ring0->ring3 переход через iretq)
@@ -251,6 +317,12 @@ int build_exec_stack(uint64_t new_pml4, uint64_t stack_top,
 // (нужен, чтобы ребёнок продолжил выполнение с той же инструкции user-кода,
 // что и родитель). Возвращает pid ребёнка (родителю) или (uint64_t)-1.
 uint64_t process_fork(uint64_t frame_ptr);
+// v0.8-мост, пункт 5 — см. подробный комментарий у его определения
+// (process.c) и у SYS_SIGRETURN (syscall.h).
+uint64_t process_sigreturn(uint64_t frame_ptr);
+// Зовётся из syscall_handler() (syscall.c) прямо перед возвратом ИЗ
+// КАЖДОГО syscall'а — см. подробный комментарий у определения (process.c).
+void process_deliver_pending_signal(uint64_t frame_ptr);
 
 extern uint64_t kernel_cr3;
 

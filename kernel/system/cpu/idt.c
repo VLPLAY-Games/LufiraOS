@@ -137,6 +137,15 @@ void FORCE_ALIGN_ARG_POINTER isr_common_handler(interrupt_frame_t* frame) {
     printf("\n System halted.\n");
     current_color = convert_color(0xFFFFFF);
 
+    // v0.8-мост, пункт 2 (двойная буферизация, console.c): без этого вызова
+    // весь дамп исключения выше остался бы только в back buffer — таймер,
+    // который обычно флашит его на экран (console_tick_present(),
+    // pit_timer_handler()), прерываниями ниже уже навсегда отключён, и
+    // ничего и никогда не доставило бы этот текст до реального экрана.
+    // Найдено живым тестированием — ЭТОТ САМЫЙ дамп оказался невидимым на
+    // скриншоте при живой отладке SYS_SIGACTION (v0.8-мост, пункт 5).
+    gfx_present();
+
     for (;;) {
         asm volatile ("cli; hlt");
     }

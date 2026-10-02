@@ -3,6 +3,7 @@
 #include "system/mm/heap.h"
 #include "system/mm/pmm.h"
 #include "system/mm/paging.h"
+#include "system/mm/shm.h"
 #include "system/cpu/gdt.h"
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
@@ -272,6 +273,26 @@ static uint64_t clone_address_space_deep(uint64_t src_pml4_phys) {
                         continue;
 
                     uint64_t src_phys = src_pt[pt_idx] & 0x000FFFFFFFFFF000ULL;
+
+                    // PAGE_MMAP_SHARED (v0.8-мост, пункт 4, shm.h) —
+                    // MAP_SHARED-страница: ребёнок должен ВИДЕТЬ ТЕ ЖЕ
+                    // данные, что и родитель, причём изменения в любую
+                    // сторону обязаны быть видны другой — алиасим физический
+                    // кадр напрямую (без memcpy) и регистрируем ещё одну
+                    // ссылку в shm.c, а не копируем, как для всей остальной
+                    // памяти процесса ниже.
+                    if (src_pt[pt_idx] & PAGE_MMAP_SHARED) {
+                        int id = shm_find_region_by_page(src_phys);
+                        if (id >= 0) {
+                            shm_add_ref(id);
+                            new_pt[pt_idx] = src_pt[pt_idx]; // тот же физ. адрес и флаги как есть
+                            continue;
+                        }
+                        // Не нашли область (не должно случаться в норме) —
+                        // падаем назад на обычное копирование ниже, лучше
+                        // лишняя приватная копия, чем алиас в никуда.
+                    }
+
                     // PAGE_IDENTITY_SHARED снимается явно: у родителя эта
                     // запись могла быть нетронутой identity-копией (общий
                     // физический кадр ядра, см. map_page_in_pml4()), но
@@ -342,6 +363,11 @@ void process_init(void) {
     // поле вообще когда-нибудь тронут.
     idle_process->next_mmap_addr = MMAP_AREA_START;
     memset(idle_process->mmap_regions, 0, sizeof(idle_process->mmap_regions));
+    memset(idle_process->signal_handlers, 0, sizeof(idle_process->signal_handlers));
+    idle_process->pending_signal = 0;
+    idle_process->in_signal_handler = 0;
+    idle_process->alarm_tick = 0;
+    idle_process->sig_stack_top = 0;
     idle_process->cwd_inode = LUFIRAFS_ROOT_INODE;
     idle_process->cwd_path[0] = '/';
     idle_process->cwd_path[1] = '\0';
@@ -377,10 +403,15 @@ int process_is_idle(void) {
 
 // Тоже без переключения CR3 (см. подробное объяснение у
 // allocate_ring0_stack()) — маппим прямо в pml4_phys через
-// map_page_in_pml4().
-static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys, uint32_t pid) {
+// map_page_in_pml4(). base_area/stride — та же идея "уникальный
+// виртуальный адрес на pid", что и раньше (единственный вызывавший раньше
+// жёстко использовал USER_STACK_AREA_START/USER_STACK_SIZE) — обобщено
+// под SIGNAL_STACK_AREA_START (v0.8-мост, пункт 5, см. ниже), чтобы не
+// дублировать всю эту функцию ради другой области.
+static uint64_t allocate_user_stack_in(size_t size, uint64_t pml4_phys, uint32_t pid,
+                                        uint64_t base_area, uint64_t stride) {
     // Каждому процессу - свой уникальный виртуальный адрес
-    uint64_t stack_virt = USER_STACK_AREA_START + (pid * USER_STACK_SIZE);
+    uint64_t stack_virt = base_area + (pid * stride);
     size_t num_pages = size / PAGE_SIZE;
 
     if (num_pages == 0) num_pages = 1;
@@ -417,6 +448,10 @@ static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys, uint32_t pi
 
     // Возвращаем ВЕРХНИЙ адрес стека
     return stack_virt + size;
+}
+
+static uint64_t allocate_user_stack(size_t size, uint64_t pml4_phys, uint32_t pid) {
+    return allocate_user_stack_in(size, pml4_phys, pid, USER_STACK_AREA_START, USER_STACK_SIZE);
 }
 
 // Пишет len байт из src (kernel-side) по виртуальному адресу dst_virt В
@@ -542,6 +577,10 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     proc->first_run = (entry == NULL);
     proc->next_mmap_addr = MMAP_AREA_START;
     memset(proc->mmap_regions, 0, sizeof(proc->mmap_regions));
+    memset(proc->signal_handlers, 0, sizeof(proc->signal_handlers));
+    proc->pending_signal = 0;
+    proc->in_signal_handler = 0;
+    proc->alarm_tick = 0;
     proc->cwd_inode = LUFIRAFS_ROOT_INODE;
     proc->cwd_path[0] = '/';
     proc->cwd_path[1] = '\0';
@@ -605,6 +644,16 @@ process_t* process_create(const char *name, void (*entry)(void)) {
         irq_enable();
         return NULL;
     }
+
+    // Отдельный стек для обработчиков сигналов (v0.8-мост, пункт 5) — см.
+    // комментарий у SIGNAL_STACK_AREA_START (process.h). Не фатально, если
+    // не удалось выделить: просто останется 0, и switch_to_process()
+    // пропустит доставку сигналов этому процессу (как если бы у него не
+    // было обработчиков) — SYS_SIGACTION всё ещё успешно "зарегистрирует"
+    // обработчик, он просто никогда не будет вызван, пока память не
+    // освободится и процесс не будет пересоздан (exec()).
+    proc->sig_stack_top = allocate_user_stack_in(SIGNAL_STACK_SIZE, new_pml4, proc->pid,
+                                                  SIGNAL_STACK_AREA_START, 0);
 
     // Инициализируем контекст
     memset(&proc->context, 0, sizeof(process_context_t));
@@ -903,6 +952,13 @@ int process_commit_exec(process_t *proc,
     proc->stack_base = new_stack;
     proc->stack_size = USER_STACK_SIZE;
 
+    // Новый стек сигналов для нового адресного пространства — старый (если
+    // был) физически принадлежал УЖЕ ЗАМЕНЁННОМУ page_table и больше не
+    // существует, см. тот же повод у mmap_regions ниже. Не фатально, если
+    // не выделился (см. комментарий в process_create()).
+    proc->sig_stack_top = allocate_user_stack_in(SIGNAL_STACK_SIZE, new_pml4, proc->pid,
+                                                  SIGNAL_STACK_AREA_START, 0);
+
     // exec() заменяет ВСЁ адресное пространство новым new_pml4 — старые
     // mmap-регионы (как и старый стек/образ) физически больше не
     // существуют в нём. Без сброса здесь процесс унаследовал бы учёт,
@@ -910,6 +966,15 @@ int process_commit_exec(process_t *proc,
     // просто нет.
     proc->next_mmap_addr = MMAP_AREA_START;
     memset(proc->mmap_regions, 0, sizeof(proc->mmap_regions));
+
+    // exec() также сбрасывает обработчики сигналов на действие по
+    // умолчанию (POSIX: execve() делает то же самое для ПОЙМАННЫХ
+    // сигналов — у старого образа их адреса всё равно уже не существует
+    // в новом адресном пространстве).
+    memset(proc->signal_handlers, 0, sizeof(proc->signal_handlers));
+    proc->pending_signal = 0;
+    proc->in_signal_handler = 0;
+    proc->alarm_tick = 0;
 
     // cwd (proc->cwd_path/cwd_inode) НЕ сбрасывается здесь — в отличие от
     // mmap-регионов, exec() не должен менять текущий каталог процесса
@@ -1119,6 +1184,17 @@ void switch_to_process(process_t *next) {
     current_process = next;
     current_kernel_rsp = next->ring0_stack;
 
+    // v0.8-мост, пункт 5 (SYS_SIGACTION) — доставка отложенного сигнала
+    // происходит НЕ здесь: process_t.context в момент переключения может
+    // застать процесс где угодно В СЕРЕДИНЕ кернела (например, внутри
+    // schedule(), если его прервали во время блокирующего syscall'а), и
+    // подмена context.rip на обработчик в таком состоянии ведёт к page
+    // fault при резюме (найдено живым тестированием). Доставка вместо
+    // этого — в syscall_handler() (process_deliver_pending_signal(),
+    // вызывается прямо перед возвратом ИЗ КАЖДОГО syscall'а) — там
+    // frame_ptr всегда настоящая ring3-точка возврата, см. подробный
+    // комментарий там же.
+
     // Самая первая активация процесса идёт через настоящий ring0->ring3
     // переход (iretq) — см. process_t.first_run в process.h — а не через
     // обычный context_switch() (jmp, CS/CPL не меняются). Все последующие
@@ -1272,10 +1348,31 @@ int process_signal(uint32_t pid, int sig)
             if (p == idle_process)
                 return -1;
 
+            // SIGINT/SIGTERM/SIGALRM с зарегистрированным обработчиком
+            // (SYS_SIGACTION) — не убиваем, а откладываем доставку до
+            // process_deliver_pending_signal() (см. подробный комментарий
+            // там же, syscall.c). SIGKILL — ВСЕГДА действие по умолчанию,
+            // как и в настоящем POSIX (его нельзя поймать). SIGALRM без
+            // обработчика падает ниже в switch() и тоже завершает процесс
+            // — тот же default, что и в POSIX (частый сюрприз для тех, кто
+            // зовёт alarm()/SYS_ALARM, не поставив sigaction() заранее).
+            if ((sig == SIGINT || sig == SIGTERM || sig == SIGALRM) &&
+                p->signal_handlers[sig] && !p->in_signal_handler) {
+                p->pending_signal = sig;
+                // Заблокированный/спящий процесс иначе никогда не дойдёт
+                // до switch_to_process() и не получит сигнал — будим его,
+                // как и обычное пробуждение по готовности (pipe_wake()
+                // и т.п. в vfs.c), просто условие тут другое.
+                if (p->state == PROCESS_BLOCKED || p->state == PROCESS_SLEEPING)
+                    p->state = PROCESS_READY;
+                return 0;
+            }
+
             switch (sig) {
                 case SIGINT:
                 case SIGKILL:
                 case SIGTERM:
+                case SIGALRM:
                     return terminate_process_by_signal(p, sig);
 
                 case SIGSTOP:
@@ -1462,6 +1559,26 @@ uint64_t process_fork(uint64_t frame_ptr) {
     child->next_mmap_addr = parent->next_mmap_addr;
     memcpy(child->mmap_regions, parent->mmap_regions, sizeof(parent->mmap_regions));
 
+    // fork() наследует обработчики сигналов (POSIX) — но НЕ "сейчас
+    // внутри обработчика"/"есть недоставленный сигнал": это состояние
+    // конкретного исполнения родителя на момент fork(), ребёнок начинает
+    // с чистого листа (process_create() выше уже поставил оба в 0 для
+    // плейсхолдера — явно повторяем здесь для ясности, а не полагаемся
+    // на то, что их никто не трогал между process_create() и этим местом).
+    memcpy(child->signal_handlers, parent->signal_handlers, sizeof(parent->signal_handlers));
+    child->pending_signal = 0;
+    child->in_signal_handler = 0;
+    // alarm() у настоящего POSIX fork() тоже НЕ наследуется ребёнком —
+    // та же причина, что и у pending_signal/in_signal_handler прямо выше:
+    // это состояние конкретного исполнения родителя, не "настройка", как
+    // signal_handlers.
+    child->alarm_tick = 0;
+    // Тот же виртуальный адрес, что и у родителя (SIGNAL_STACK_AREA_START
+    // не сдвигается по pid, см. его комментарий) — физическая страница под
+    // ним уже продублирована выше, общим постраничным копированием
+    // clone_address_space_deep().
+    child->sig_stack_top = parent->sig_stack_top;
+
     // POSIX: ребёнок наследует cwd родителя 1:1.
     child->cwd_inode = parent->cwd_inode;
     strcpy(child->cwd_path, parent->cwd_path);
@@ -1501,4 +1618,94 @@ uint64_t process_fork(uint64_t frame_ptr) {
     klog("[FORK] PID %u forked into PID %u", parent->pid, child->pid);
 
     return (uint64_t)child->pid;
+}
+
+// Доставляет p->pending_signal (если есть, есть обработчик, и мы ещё не
+// внутри другого обработчика), переписывая КОНКРЕТНЫЙ syscall_frame_t,
+// который syscall_entry.S вот-вот восстановит через sysret/iretq — см.
+// подробный комментарий у вызова в syscall_handler() (syscall.c). Это
+// единственное безопасное место: в отличие от process_t.context (который
+// может застать процесс ГДЕ УГОДНО внутри кернела, если его вытеснили
+// посреди блокирующего syscall'а — именно так и было найдено живым
+// тестированием первой версии этого кода, пытавшейся подменить
+// process_t.context напрямую в switch_to_process() и падавшей в page
+// fault на резюме), frame_ptr здесь ВСЕГДА настоящая ring3-точка
+// возврата — был ли syscall мгновенным или долго спал (process_sleep() и
+// т.п.), к этому моменту он уже и так возвращается назад в ring3
+// нормальным путём.
+void process_deliver_pending_signal(uint64_t frame_ptr) {
+    process_t *p = current_process;
+    if (!p || !frame_ptr) return;
+    // sig_stack_top==0 — выделить отдельный стек сигналов (process_create()/
+    // process_commit_exec()) не удалось (нехватка памяти) — лучше тихо не
+    // доставить сигнал, чем доставить его без годного ring3-стека.
+    if (!p->pending_signal || !p->signal_handlers[p->pending_signal] ||
+        p->in_signal_handler || !p->sig_stack_top)
+        return;
+
+    int sig = p->pending_signal;
+    p->pending_signal = 0;
+    p->in_signal_handler = 1;
+
+    syscall_frame_t *frame = (syscall_frame_t *)frame_ptr;
+
+    // Сохраняем ВЕСЬ кадр — SYS_SIGRETURN восстановит его целиком, тем же
+    // путём (process_sigreturn() ниже).
+    process_context_t *saved = &p->saved_signal_context;
+    // frame_t не несёт отдельных rcx/r11 — у sysret это слоты user RIP/
+    // RFLAGS (см. комментарий у syscall_frame_t выше), уже захвачены ниже
+    // как saved->rip/saved->rflags.
+    saved->rax = frame->rax; saved->rbx = frame->rbx;
+    saved->rdx = frame->rdx;
+    saved->rsi = frame->rsi; saved->rdi = frame->rdi;
+    saved->rbp = frame->rbp;
+    saved->r8 = frame->r8; saved->r9 = frame->r9; saved->r10 = frame->r10;
+    saved->r12 = frame->r12; saved->r13 = frame->r13;
+    saved->r14 = frame->r14; saved->r15 = frame->r15;
+    saved->rsp = frame->user_rsp;
+    saved->rip = frame->rip;
+    saved->rflags = frame->rflags;
+
+    frame->rip = p->signal_handlers[sig];
+    frame->user_rsp = p->sig_stack_top;
+    frame->rdi = (uint64_t)sig; // 1-й аргумент, System V AMD64 ABI
+}
+
+// SYS_SIGRETURN — как и SYS_FORK, особый случай (нужен frame_ptr, не
+// обычные 5 аргументов, см. syscall_handler()). Обязательный способ
+// ЗАВЕРШИТЬ обработчик сигнала (контракт этого ABI, задокументирован у
+// sys_signal()/sys_sigreturn() в userspace libc/include/lufira/syscall.h)
+// — переносим ВЕСЬ сохранённый на момент доставки кадр
+// (saved_signal_context, записан в process_deliver_pending_signal() выше)
+// обратно в syscall_frame_t ЭТОГО вызова, так что sysret в syscall_entry.S
+// возобновит исполнение ровно с того места, где сигнал застал процесс.
+uint64_t process_sigreturn(uint64_t frame_ptr) {
+    process_t *p = current_process;
+    if (!p || !frame_ptr) return (uint64_t)-1;
+
+    syscall_frame_t *frame = (syscall_frame_t *)frame_ptr;
+    process_context_t *saved = &p->saved_signal_context;
+
+    frame->rbx = saved->rbx;
+    frame->rdx = saved->rdx;
+    frame->rsi = saved->rsi;
+    frame->rdi = saved->rdi;
+    frame->rbp = saved->rbp;
+    frame->r8  = saved->r8;
+    frame->r9  = saved->r9;
+    frame->r10 = saved->r10;
+    frame->r12 = saved->r12;
+    frame->r13 = saved->r13;
+    frame->r14 = saved->r14;
+    frame->r15 = saved->r15;
+    frame->rflags = saved->rflags;
+    frame->rip = saved->rip;
+    frame->user_rsp = saved->rsp;
+
+    p->in_signal_handler = 0;
+    // syscall_entry.S's эпилог НЕ восстанавливает rax из кадра (слот
+    // "syscall number" там просто пропускается, addq $8,%rsp) — в RAX на
+    // выходе остаётся ровно то, что ВЕРНУЛА эта C-функция, поэтому
+    // saved->rax восстанавливается через return, а не через frame->rax.
+    return saved->rax;
 }

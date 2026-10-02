@@ -5,6 +5,7 @@
 #include "system/mm/pmm.h"
 #include "system/mm/paging.h"
 #include "system/mm/heap.h"
+#include "system/mm/shm.h"
 #include "drivers/pci/pci.h"
 #include "drivers/keyboard/keyboard.h"
 #include "drivers/mouse/mouse.h"
@@ -230,6 +231,7 @@ void _start(BootInfo* bi) {
     
     // Heap теперь статический - инициализируем сразу
     heap_init();  // <-- ВСЯ память выделяется здесь
+    shm_init();   // v0.8-мост, пункт 4: реестр MAP_SHARED областей (shm.c)
 
     // Бутлоадер грузит в RAM ВЕСЬ диск одним куском с LBA 0 (см. подробный
     // комментарий у LUFIRAFS_ESP_SIZE) — первые LUFIRAFS_ESP_SIZE байт это
@@ -309,6 +311,13 @@ void _start(BootInfo* bi) {
     irq_enable(2);
     irq_enable(12); // мышь
     cpu_mark_interrupts_active();
+
+    // v0.8-мост, пункт 2 (console.c): включаем двойную буферизацию здесь,
+    // а не сразу в initialize_console() — специально ПОСЛЕ sti/irq_enable(0),
+    // чтобы таймер уже реально тикал и console_tick_present() (вызывается
+    // из pit_timer_handler()) сразу же начал флашить back buffer на экран,
+    // без слепого окна. Всё до этой точки по-прежнему шло прямо в hw-буфер.
+    console_enable_double_buffering();
 
     // Требует уже тикающего таймера (pit_wait_ms() внутри сброса контроллера).
     xhci_init();

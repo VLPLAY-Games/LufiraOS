@@ -100,11 +100,22 @@ void timer_irq_handler(interrupt_frame_t *frame) {
                 p->state = PROCESS_READY;
             }
 
+            // v0.8-мост, пункт 6 (SYS_ALARM) — тот же скан, та же причина
+            // смотреть на ВСЕ процессы, не только current_process: будильник
+            // мог быть взведён на процесс, который сейчас не исполняется
+            // вовсе. process_signal() сам разбирается, спит процесс,
+            // заблокирован или уже готов — тот же путь, что у kill().
+            if (p->alarm_tick && pit_ticks >= p->alarm_tick) {
+                p->alarm_tick = 0;
+                process_signal(p->pid, SIGALRM);
+            }
+
             p = p->next;
         } while (p && p != start);
     }
 
     update_cursor();
+    console_tick_present(); // v0.8-мост, пункт 2: флашит back buffer, только если "грязный"
 
     usb_poll();
     net_poll();

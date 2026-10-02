@@ -61,6 +61,10 @@
 #define SYS_USB_INFO 42
 #define SYS_USB_READ 43
 #define SYS_USB_WRITE 44
+#define SYS_POLL 45
+#define SYS_SIGACTION 46
+#define SYS_SIGRETURN 47
+#define SYS_ALARM 48
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -157,6 +161,14 @@ static inline long sys_chdir(const char *path) {
 static inline long sys_msleep(unsigned long milliseconds) {
     return __syscall5(SYS_SLEEP, (long)milliseconds, 0, 0, 0, 0);
 }
+// Номера сигналов — те же значения, что в kernel/system/process/process.h.
+#define SIGINT  2
+#define SIGALRM 14
+#define SIGKILL 9
+#define SIGTERM 15
+#define SIGCONT 18
+#define SIGSTOP 19
+
 static inline long sys_kill(long pid, int sig) {
     return __syscall5(SYS_KILL, pid, sig, 0, 0, 0);
 }
@@ -344,4 +356,65 @@ static inline long sys_usb_read(long index, unsigned long lba, void *buf, unsign
 // SYS_USB_WRITE в kernel/system/syscall/syscall.h.
 static inline long sys_usb_write(long index, unsigned long lba, const void *buf, unsigned long buf_size) {
     return __syscall5(SYS_USB_WRITE, index, (long)lba, (long)buf, (long)buf_size, 0);
+}
+
+// SYS_POLL (45) — v0.8-мост, пункт 3. Байт-в-байт зеркало lufira_pollfd_t
+// (kernel/system/syscall/syscall.h).
+#define LUFIRA_POLLIN  1
+#define LUFIRA_POLLOUT 2
+
+struct lufira_pollfd {
+    int fd;
+    int events;
+    int revents;
+};
+
+// timeout_ms: 0 — опросить и вернуться сразу, >0 — ждать не больше
+// стольки мс, <0 — ждать неограниченно. Возвращает число fd с ненулевым
+// revents, 0 при таймауте, иначе отрицательный код ошибки.
+static inline long sys_poll(struct lufira_pollfd *fds, unsigned long nfds, long timeout_ms) {
+    return __syscall5(SYS_POLL, (long)fds, (long)nfds, timeout_ms, 0, 0);
+}
+
+// SYS_SIGACTION (46) / SYS_SIGRETURN (47) — v0.8-мост, пункт 5. SIGINT/
+// SIGTERM/SIGALRM (см. комментарий у SYS_SIGACTION, kernel/system/syscall/
+// syscall.h) — SIGKILL/SIGSTOP/SIGCONT нельзя поймать.
+//
+// ВАЖНО, контракт этого ABI (НЕ настоящий POSIX sigaction/sigreturn):
+// обработчик обязан заканчиваться вызовом sys_sigreturn(), а не обычным
+// C "return" — у этого ядра нет сигнального трамплина в памяти процесса
+// (sys_sigreturn() просто подменяет кадр ВОЗВРАТА ИЗ ЭТОГО САМОГО
+// вызова на сохранённое состояние прерванного кода, см. process_sigreturn()
+// в kernel/system/process/process.c) — обычный "ret" из обработчика
+// попытался бы вернуться туда же, откуда его вызвал syscall_handler()
+// (т.е. никуда конкретного, скорее всего крах).
+//
+//   void on_sigterm(int sig) {
+//       ...
+//       sys_sigreturn(); // НЕ "return;"
+//   }
+//   sys_sigaction(SIGTERM, (void*)on_sigterm);
+static inline long sys_sigaction(int sig, void (*handler)(int)) {
+    return __syscall5(SYS_SIGACTION, sig, (long)handler, 0, 0, 0);
+}
+
+__attribute__((noreturn)) static inline void sys_sigreturn(void) {
+    __syscall5(SYS_SIGRETURN, 0, 0, 0, 0, 0);
+    __builtin_unreachable(); // sigreturn никогда не "возвращается" сюда обычным путём
+}
+
+// SYS_ALARM (48) — v0.8-мост, пункт 6. milliseconds==0 снимает уже
+// взведённый будильник. Доставляется ОДИН раз, не периодически — для
+// повтора (например, частота кадров будущего GUI) обработчик сам
+// переустанавливает его в конце:
+//
+//   void on_tick(int sig) {
+//       ...нарисовать кадр...
+//       sys_alarm(16); // ~60 Гц
+//       sys_sigreturn();
+//   }
+//   sys_sigaction(SIGALRM, on_tick);
+//   sys_alarm(16);
+static inline long sys_alarm(unsigned long milliseconds) {
+    return __syscall5(SYS_ALARM, (long)milliseconds, 0, 0, 0, 0);
 }

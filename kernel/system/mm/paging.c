@@ -1,6 +1,7 @@
 // paging.c
 #include "paging.h"
 #include "pmm.h"
+#include "shm.h"
 #include "bootinfo.h"
 #include "lib/stddef.h"
 #include "lib/types.h"
@@ -271,9 +272,22 @@ void unmap_page(uint64_t virt) {
     
     uint64_t phys = *pte & 0x000FFFFFFFFFF000ULL;
     if (phys) {
-        pmm_free_page(phys);
+        // PAGE_MMAP_SHARED (v0.8-мост, пункт 4, shm.h) — страница общая с
+        // другим процессом через MAP_SHARED; реальное pmm_free_page()
+        // внутри shm_release() случится только когда ПОСЛЕДНИЙ процесс её
+        // отпустит, не раньше. shm_find_region_by_page() вернёт -1, если
+        // область ещё не зарегистрирована (sys_mmap() откатывается после
+        // частичной неудачи ДО вызова shm_create() — см. его комментарий)
+        // — тогда ведём себя как обычно.
+        if (*pte & PAGE_MMAP_SHARED) {
+            int id = shm_find_region_by_page(phys);
+            if (id >= 0) shm_release(id);
+            else pmm_free_page(phys);
+        } else {
+            pmm_free_page(phys);
+        }
     }
-    
+
     *pte = 0;
     invlpg(virt);
 }
@@ -458,7 +472,16 @@ void free_user_address_space(uint64_t pml4_phys) {
                     if (pt[pt_idx] & PAGE_IDENTITY_SHARED) continue;
 
                     uint64_t leaf_phys = pt[pt_idx] & 0x000FFFFFFFFFF000ULL;
-                    pmm_free_page(leaf_phys);
+                    // PAGE_MMAP_SHARED — см. тот же комментарий в unmap_page()
+                    // выше (v0.8-мост, пункт 4): освобождаем через
+                    // refcount-реестр shm.c, а не напрямую.
+                    if (pt[pt_idx] & PAGE_MMAP_SHARED) {
+                        int id = shm_find_region_by_page(leaf_phys);
+                        if (id >= 0) shm_release(id);
+                        else pmm_free_page(leaf_phys);
+                    } else {
+                        pmm_free_page(leaf_phys);
+                    }
                 }
                 pmm_free_page(pt_phys);
             }

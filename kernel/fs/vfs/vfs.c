@@ -373,6 +373,42 @@ static file_ops_t pipe_write_fops = {
     .close = pipe_close_write,
 };
 
+int vfs_poll_check(int fd, int events, int *out_revents) {
+    *out_revents = 0;
+    if (fd < 0 || fd >= MAX_FD_PER_PROCESS) return -1;
+    if (!current_fd_table || !current_fd_table->files[fd]) return -1;
+
+    file_t *f = current_fd_table->files[fd];
+
+    if (f->ops == &pipe_read_fops) {
+        pipe_t *p = (pipe_t *)(f->inode ? f->inode->private_data : NULL);
+        // Готов к чтению: есть данные, ИЛИ все писатели уже закрылись
+        // (EOF сам по себе тоже результат, которого ждёт poll()/read()).
+        if (p && (events & 1) && (p->count > 0 || p->writers == 0))
+            *out_revents |= 1;
+        return 0;
+    }
+    if (f->ops == &pipe_write_fops) {
+        pipe_t *p = (pipe_t *)(f->inode ? f->inode->private_data : NULL);
+        // Готов к записи: есть место, ИЛИ читателей не осталось (тогда
+        // следующий write() сразу вернёт "сломанная труба", а не заблокирует).
+        if (p && (events & 2) && (p->count < p->size || p->readers == 0))
+            *out_revents |= 2;
+        return 0;
+    }
+    if (f->ops == &console_fops) {
+        if ((events & 1) && console_input_has_data()) *out_revents |= 1;
+        if (events & 2) *out_revents |= 2; // печать на экран никогда не блокирует
+        return 0;
+    }
+
+    // Обычный файл/директория — LufiraFS целиком в RAM, I/O никогда не
+    // блокирует, так что готов всегда.
+    if (events & 1) *out_revents |= 1;
+    if (events & 2) *out_revents |= 2;
+    return 0;
+}
+
 // Регистрирует ещё одну ссылку на уже открытый file_t (используется
 // fork()'ом и vfs_dup2() — оба случая, когда один и тот же file_t
 // оказывается в двух разных fd-слотах/процессах одновременно). Помимо
