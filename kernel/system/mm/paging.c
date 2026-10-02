@@ -135,6 +135,22 @@ void paging_init(BootInfo* bi) {
         if (end > max_phys) max_phys = end;
     }
 
+    // Фреймбуфер (bi->FrameBufferBase) консоль (drivers/console/console.c,
+    // "framebuffer = (uint32_t*)bi->FrameBufferBase") адресует НАПРЯМУЮ как
+    // physical==virtual указатель — а GOP-фреймбуферы живут далеко ЗА
+    // пределами настоящей RAM (у QEMU/OVMF обычно в районе нескольких GB, в
+    // отдельном MMIO-окне). EfiConventionalMemory-фильтр выше корректно его
+    // не считает (это не RAM), но identity-карта ниже обязана его всё равно
+    // покрывать — иначе первая же запись в консоль ПОСЛЕ переключения CR3
+    // page-fault'ится в пустоту (строка framebuffer[...] = ...), потому что
+    // новая, уже правильно маленькая (по размеру настоящей RAM) identity-карта
+    // больше не простирается так далеко, как раздутая прежняя (см. основной
+    // комментарий выше про mem_gb=512). Чиним явным расширением max_phys под
+    // ОДИН конкретный дополнительный регион, а не возвратом к "взять верхнюю
+    // границу вообще всей карты памяти".
+    uint64_t fb_end = bi->FrameBufferBase + bi->FrameBufferSize;
+    if (fb_end > max_phys) max_phys = fb_end;
+
     uint64_t mem_gb = (max_phys + (1ULL << 30) - 1) >> 30;
     if (mem_gb > 512) mem_gb = 512;
 
