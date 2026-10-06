@@ -128,6 +128,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/system/process/process.c \
 	$(KERNEL_DIR)/system/syscall/syscall.c \
 	$(KERNEL_DIR)/system/elf/elf.c \
+	$(KERNEL_DIR)/system/elf/dynlink.c \
 	$(KERNEL_DIR)/system/devmode/devmode.c \
 	$(KERNEL_DIR)/system/klog/klog.c \
 	$(KERNEL_DIR)/system/users/users.c \

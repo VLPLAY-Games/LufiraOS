@@ -17,6 +17,8 @@
 
 // Типы программных заголовков
 #define PT_LOAD     1
+#define PT_DYNAMIC  2 // v0.8-мост, пункт 8 (динамическая линковка): таблица Elf64_Dyn
+#define PT_INTERP   3 // путь интерпретатора — только метаданные, см. dynlink.h
 #define PT_PHDR     6
 #define PT_GNU_STACK 0x6474E551
 
@@ -60,6 +62,67 @@ typedef struct __attribute__((packed)) {
     uint64_t memsz;          // Size in memory
     uint64_t align;          // Alignment
 } elf64_program_header_t;
+
+// ===== Динамическая линковка (v0.8-мост, пункт 8) =====
+// См. подробное объяснение архитектуры в dynlink.h. Структуры ниже — то
+// минимальное подмножество настоящего ELF ABI (System V x86-64), которое
+// реально нужно для DT_NEEDED=libc.so + постраничных GOT/PLT-релокаций;
+// версионирование символов (DT_VERNEED/DT_VERDEF), DT_INIT_ARRAY/
+// DT_FINI_ARRAY, TLS (DT_TLS*) сюда намеренно не входят — ни один пакет
+// сегодня ими не пользуется, и у этого минимального libc нет никакой
+// нужды в конструкторах/TLS.
+
+// Запись таблицы PT_DYNAMIC — ОДНА и та же структура используется и для
+// d_val (целое: размеры, флаги), и для d_ptr (адрес) — какое поле валидно,
+// определяется самим d_tag (см. DT_* ниже), как и в настоящем ELF ABI.
+typedef struct __attribute__((packed)) {
+    int64_t  d_tag;
+    uint64_t d_val;
+} elf64_dyn_t;
+
+#define DT_NULL     0  // конец массива
+#define DT_NEEDED   1  // d_val = смещение в .dynstr — имя нужной .so (например "libc.so")
+#define DT_PLTRELSZ 2  // d_val = общий размер .rela.plt в байтах
+#define DT_PLTGOT   3  // d_val = адрес .got.plt (не используется — читаем offset'ы прямо из релокаций)
+#define DT_HASH     4  // d_val = адрес classic SysV .hash (nbucket,nchain,...) — нужен ТОЛЬКО nchain
+#define DT_STRTAB   5  // d_val = адрес .dynstr
+#define DT_SYMTAB   6  // d_val = адрес .dynsym
+#define DT_RELA     7  // d_val = адрес .rela.dyn
+#define DT_RELASZ   8  // d_val = общий размер .rela.dyn в байтах
+#define DT_RELAENT  9  // d_val = размер одной записи .rela.dyn (всегда 24 для amd64)
+#define DT_STRSZ    10 // d_val = размер .dynstr в байтах
+#define DT_SYMENT   11 // d_val = размер одной записи .dynsym (всегда 24 для amd64)
+#define DT_JMPREL   0x17 // d_val = адрес .rela.plt
+
+// Запись таблицы символов .dynsym (всегда 24 байта на amd64 — см. DT_SYMENT).
+typedef struct __attribute__((packed)) {
+    uint32_t st_name;  // смещение в .dynstr
+    uint8_t  st_info;
+    uint8_t  st_other;
+    uint16_t st_shndx;  // 0 (SHN_UNDEF) = символ не определён ЗДЕСЬ (импортируется)
+    uint64_t st_value;
+    uint64_t st_size;
+} elf64_sym_t;
+
+// Запись таблицы релокаций .rela.plt/.rela.dyn (всегда 24 байта на amd64).
+typedef struct __attribute__((packed)) {
+    uint64_t r_offset;  // куда писать результат (виртуальный адрес GOT-слота)
+    uint64_t r_info;    // упаковка (символ, тип) — см. ELF64_R_SYM/ELF64_R_TYPE ниже
+    int64_t  r_addend;
+} elf64_rela_t;
+
+#define ELF64_R_SYM(info)  ((uint32_t)((info) >> 32))
+#define ELF64_R_TYPE(info) ((uint32_t)((info) & 0xffffffffu))
+
+// Типы релокаций x86-64, которые реально встречаются при связывании
+// non-PIE исполняемого файла с PIC-библиотекой (см. комментарий в
+// dynlink.c с живым readelf-разбором, которым эта реализация
+// проверялась) — ТОЛЬКО эти четыре, не полный список из ABI:
+#define R_X86_64_RELATIVE  8 // база_библиотеки + addend — для релокаций САМОЙ libc.so (PIC/ET_DYN)
+#define R_X86_64_GLOB_DAT  6 // адрес_символа — для данных, на которые ссылаются через указатель/GOT
+#define R_X86_64_JUMP_SLOT 7 // адрес_символа — PLT/GOT слот для вызова функции
+#define R_X86_64_COPY      5 // memcpy(offset, адрес_символа, size) — прямая (не через указатель)
+                              // ссылка на данные ИЗ non-PIE исполняемого файла, см. dynlink.c
 
 // Структура процесса (forward declaration)
 typedef struct process process_t;

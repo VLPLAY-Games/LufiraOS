@@ -1,4 +1,5 @@
 #include "elf.h"
+#include "dynlink.h"
 #include "system/mm/pmm.h"
 #include "system/mm/paging.h"
 #include "system/mm/heap.h"
@@ -478,6 +479,18 @@ void* elf_load_to_process(const void *elf_data,
     }
 
     DLOG("[ELF] Loaded successfully\n");
+
+    // v0.8-мост, пункт 8 (динамическая линковка) — ОБЯЗАТЕЛЬНО после всех
+    // трёх проходов выше: релокации пишут прямо в уже замапленную,
+    // скопированную и переведённую на финальные права память proc (сам
+    // GOT лежит в .data/.got.plt, к этому моменту уже PAGE_WRITE). Если
+    // PT_DYNAMIC отсутствует (обычный статический бинарник — все пакеты
+    // до этого пункта), dynlink_process() мгновенно возвращает 0 и
+    // ничего не меняет — полная обратная совместимость.
+    if (dynlink_process(proc, elf_data, ph, header->phnum) != 0) {
+        printf("[ELF] Dynamic linking failed for '%s'\n", name);
+        return NULL;
+    }
 
     return (void*)header->entry;
 }
