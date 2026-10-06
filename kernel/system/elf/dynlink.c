@@ -105,6 +105,26 @@ static void dynlink_cache_rollback(void) {
     g_libc.dynstr_size = 0;
 }
 
+// Пишет 8-байтовое value по виртуальному адресу target_vaddr ВНУТРИ ещё
+// только кэшируемой libc.so — т.е. прямо в g_libc.segments[]->phys_pages,
+// а не в память уже исполняющегося процесса (см. dynlink_apply_
+// relocations() ниже — та же идея, но для ИСПОЛНЯЕМОГО файла и уже
+// готовых страниц процесса). Используется и для R_X86_64_RELATIVE
+// (собственная самоссылка libc.so), и для JUMP_SLOT/GLOB_DAT её
+// СОБСТВЕННОГО внутреннего PLT (см. комментарий у вызывающего кода).
+static void dynlink_cache_write(uint64_t target_vaddr, uint64_t value) {
+    for (int s = 0; s < g_libc.seg_count; s++) {
+        dynlink_segment_t *seg = &g_libc.segments[s];
+        if (target_vaddr < seg->vaddr_offset || target_vaddr >= seg->vaddr_offset + seg->memsz)
+            continue;
+        uint64_t rel_off = target_vaddr - seg->vaddr_offset;
+        uint64_t page_idx = rel_off / PAGE_SIZE;
+        uint64_t page_off = rel_off % PAGE_SIZE;
+        *(uint64_t*)((uint8_t*)phys_to_virt(seg->phys_pages[page_idx]) + page_off) = value;
+        return;
+    }
+}
+
 // Переводит виртуальный адрес (как он значится в ЭТОМ ЖЕ elf_data/ph/
 // phnum) в указатель внутрь elf_data — файл это один сплошной kmalloc'd
 // буфер, так что никаких забот о границах физических страниц тут нет (в
@@ -241,23 +261,48 @@ static int dynlink_load_libc_cache(void) {
 
     // DT_SYMTAB/DT_STRTAB (экспортные символы - нужны dynlink_resolve()
     // ниже) + DT_RELA (R_X86_64_RELATIVE - собственная самоссылка libc.so
-    // на свою же, пока неизвестную заранее базу DYNLINK_LIBC_BASE).
-    // Сегодняшний string/malloc/printf/stdlib не порождают ни одной такой
-    // релокации (проверено живой сборкой, см. комментарий в dynlink.h) -
-    // обрабатываем всё равно, на будущее, это дёшево.
+    // на свою же, пока неизвестную заранее базу DYNLINK_LIBC_BASE) +
+    // DT_JMPREL (.rela.plt - СОБСТВЕННЫЙ внутренний PLT libc.so).
+    //
+    // НАЙДЕННЫЙ БАГ (живое тестирование: gui_button_draw() валил процесс
+    // page fault'ом на крошечном, явно "не перебазированном" адресе
+    // вроде 0x1010 — а gui_button_init(), который НЕ зовёт strlen(),
+    // работал нормально): string/malloc/printf/stdlib (до этого пункта)
+    // НИ ОДНА функция не звала ДРУГУЮ экспортную функцию той же libc.so —
+    // как только gui_widgets.c добавил gui_button_draw(), которая внутри
+    // себя зовёт strlen() (тоже экспортный символ той же библиотеки), ld
+    // завёл libc.so СОБСТВЕННЫЙ внутренний .rela.plt (стандартная ELF-
+    // семантика symbol interposition: вызов экспортного символа ДАЖЕ
+    // внутри одной и той же .so по умолчанию идёт через PLT/GOT, не
+    // напрямую, см. --Bsymbolic — тут не используется). Раньше это
+    // всегда давало ПУСТОЙ .rela.plt (проверено живой сборкой до
+    // gui_widgets.c, см. комментарий в dynlink.h) — отсюда и ошибочное
+    // предположение, что для libc.so достаточно R_X86_64_RELATIVE.
+    // Нерезолвленный GOT-слот внутреннего PLT libc.so хранит обычный
+    // "ленивый" заглушечный адрес — СЫРОЙ, НЕ перебазированный
+    // DYNLINK_LIBC_BASE'ом (т.к. это статическое значение из файла, не
+    // релокация) — jmp через него улетает на крошечный нерабочий адрес
+    // вроде 0x1010. Чинится ровно тем же способом, что и релокации
+    // ИСПОЛНЯЕМОГО файла (dynlink_apply_relocations() ниже) — resolve по
+    // имени через dynlink_resolve() (к этому моменту g_libc.dynsym/
+    // dynstr уже заполнены — см. блок DT_SYMTAB/DT_STRTAB выше) и
+    // записать итоговый (уже перебазированный) адрес в GOT-слот.
     if (have_dynamic) {
         const elf64_dyn_t *dyn =
             (const elf64_dyn_t*)vaddr_to_file_ptr(buf, ph, header->phnum, dyn_vaddr);
         uint64_t symtab_v = 0, strtab_v = 0, rela_v = 0, relasz = 0, hash_v = 0, strsz = 0;
+        uint64_t jmprel_v = 0, pltrelsz = 0;
         if (dyn) {
             for (int i = 0; dyn[i].d_tag != DT_NULL; i++) {
                 switch (dyn[i].d_tag) {
-                    case DT_SYMTAB: symtab_v = dyn[i].d_val; break;
-                    case DT_STRTAB: strtab_v = dyn[i].d_val; break;
-                    case DT_RELA:   rela_v   = dyn[i].d_val; break;
-                    case DT_RELASZ: relasz   = dyn[i].d_val; break;
-                    case DT_HASH:   hash_v   = dyn[i].d_val; break;
-                    case DT_STRSZ:  strsz    = dyn[i].d_val; break;
+                    case DT_SYMTAB:   symtab_v = dyn[i].d_val; break;
+                    case DT_STRTAB:   strtab_v = dyn[i].d_val; break;
+                    case DT_RELA:     rela_v   = dyn[i].d_val; break;
+                    case DT_RELASZ:   relasz   = dyn[i].d_val; break;
+                    case DT_HASH:     hash_v   = dyn[i].d_val; break;
+                    case DT_STRSZ:    strsz    = dyn[i].d_val; break;
+                    case DT_JMPREL:   jmprel_v = dyn[i].d_val; break;
+                    case DT_PLTRELSZ: pltrelsz = dyn[i].d_val; break;
                     default: break;
                 }
             }
@@ -285,21 +330,24 @@ static int dynlink_load_libc_cache(void) {
             uint64_t count = relasz / sizeof(elf64_rela_t);
             for (uint64_t i = 0; relas && i < count; i++) {
                 if (ELF64_R_TYPE(relas[i].r_info) != R_X86_64_RELATIVE) continue;
+                dynlink_cache_write(relas[i].r_offset, DYNLINK_LIBC_BASE + (uint64_t)relas[i].r_addend);
+            }
+        }
 
-                uint64_t target_vaddr = relas[i].r_offset;
-                uint64_t value = DYNLINK_LIBC_BASE + (uint64_t)relas[i].r_addend;
+        if (jmprel_v && pltrelsz && g_libc.dynsym && g_libc.dynstr) {
+            const elf64_rela_t *relas =
+                (const elf64_rela_t*)vaddr_to_file_ptr(buf, ph, header->phnum, jmprel_v);
+            uint64_t count = pltrelsz / sizeof(elf64_rela_t);
+            for (uint64_t i = 0; relas && i < count; i++) {
+                uint32_t type = ELF64_R_TYPE(relas[i].r_info);
+                if (type != R_X86_64_JUMP_SLOT && type != R_X86_64_GLOB_DAT) continue;
 
-                for (int s = 0; s < g_libc.seg_count; s++) {
-                    dynlink_segment_t *seg = &g_libc.segments[s];
-                    if (target_vaddr < seg->vaddr_offset ||
-                        target_vaddr >= seg->vaddr_offset + seg->memsz)
-                        continue;
-                    uint64_t rel_off = target_vaddr - seg->vaddr_offset;
-                    uint64_t page_idx = rel_off / PAGE_SIZE;
-                    uint64_t page_off = rel_off % PAGE_SIZE;
-                    *(uint64_t*)((uint8_t*)phys_to_virt(seg->phys_pages[page_idx]) + page_off) = value;
-                    break;
-                }
+                uint32_t symidx = ELF64_R_SYM(relas[i].r_info);
+                if (symidx >= g_libc.dynsym_count) continue;
+                const elf64_sym_t *sym = &g_libc.dynsym[symidx];
+
+                uint64_t addr = DYNLINK_LIBC_BASE + sym->st_value; // сама libc.so - прямой адрес по собственному dynsym, dynlink_resolve() тут не нужен
+                dynlink_cache_write(relas[i].r_offset, addr);
             }
         }
     }
