@@ -4,6 +4,7 @@
 #include "shell/shell.h"
 #include "system/timer/pit.h"
 #include "system/process/process.h"
+#include "system/gui/gui.h"
 
 static int mouse_x = 0;
 static int mouse_y = 0;
@@ -86,6 +87,14 @@ void input_keyboard_event(int key) {
     last_key = key;
     last_key_tick = now;
     if (is_duplicate) return;
+
+    // v0.8 (GUI+WM): пока активен хоть один GUI-режим активен (есть хотя
+    // бы одно окно) - клавиатура идёт сфокусированному окну, а не в
+    // обычный ring buffer /dev/console: текстовый шелл в это время не
+    // должен получать ввод вовсе (как и в любой настоящей оконной
+    // системе, фоновый терминал не видит клавиш, пока открыто GUI-
+    // окно). gui_handle_key() сама решает, активен ли вообще GUI-режим.
+    if (gui_handle_key(key)) return;
 
     // Кольцевой буфер /dev/console (см. input.h) — то, что реально читает
     // shell.elf через SYS_READ. Ctrl+Up/Down (скролл вьюпорта) и KEY_CTRL_C

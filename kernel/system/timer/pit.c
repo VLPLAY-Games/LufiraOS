@@ -5,6 +5,7 @@
 #include "net/net.h"
 #include "system/devmode/devmode.h"
 #include "shell/shell.h"
+#include "system/gui/gui.h"
 
 // Порты I/O
 static inline void outb(uint16_t port, uint8_t val) {
@@ -115,6 +116,7 @@ void timer_irq_handler(interrupt_frame_t *frame) {
     }
 
     update_cursor();
+    gui_tick(); // v0.8 (GUI+WM): рисует рабочий стол/окна/курсор в back buffer, если GUI-режим активен
     console_tick_present(); // v0.8-мост, пункт 2: флашит back buffer, только если "грязный"
 
     usb_poll();

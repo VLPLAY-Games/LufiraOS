@@ -60,6 +60,10 @@ void console_mark_dirty(void);
 void put_pixel(uint32_t x, uint32_t y, uint32_t color);
 uint32_t convert_color(uint32_t color);
 void put_char_graphic(int c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color);
+// v0.8 (GUI+WM) — см. комментарии у реализаций в console.c.
+void put_char_graphic_px(int c, int x, int y, uint32_t fg_color, uint32_t bg_color);
+void font_draw_glyph_to_buffer(uint32_t *buf, uint32_t buf_w, uint32_t buf_h,
+                               int x, int y, int c, uint32_t fg_color);
 void draw_text_scaled(const char *text, uint32_t px, uint32_t py, uint32_t scale, uint32_t fg_color);
 void draw_text_tilted(const char *text, uint32_t px, uint32_t py, uint32_t scale, uint32_t fg_color);
 uint32_t text_scaled_width(const char *text, uint32_t scale);
@@ -101,4 +105,5 @@ void display_system_info(BootInfo* bi);
 void console_scroll_up(void);
 void console_scroll_down(void);
 void console_scroll_to_bottom(void);
+void console_redraw_from_history(void); // v0.8 (GUI+WM) - см. комментарий у реализации
 int console_is_scrolled(void);

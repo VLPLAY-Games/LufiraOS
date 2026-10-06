@@ -17,6 +17,7 @@
 #include "fs/fat/fat_mount.h"
 #include "system/acpi/acpi.h"
 #include "drivers/usb/xhci.h"
+#include "system/gui/gui.h"
 
 extern lufirafs_t lufirafs;
 
@@ -1404,6 +1405,102 @@ static uint64_t sys_get_foreground(uint64_t unused0, uint64_t unused1, uint64_t 
     return (uint64_t)process_get_foreground();
 }
 
+// ===== v0.8 (GUI+WM), первый срез — см. подробный разбор архитектуры в
+// kernel/system/gui/gui.h и описание каждого syscall'а в syscall.h =====
+
+// SYS_WIN_CREATE (50): x, y, w, h, title_ptr.
+static uint64_t sys_win_create(uint64_t x, uint64_t y, uint64_t w, uint64_t h,
+                               uint64_t title_ptr) {
+    if (!current_process) return (uint64_t)-EFAULT;
+
+    char title_buf[GUI_TITLE_MAX];
+    title_buf[0] = '\0';
+    if (title_ptr) {
+        int64_t slen = validate_user_string(current_process->page_table, title_ptr, USER_STRING_MAX);
+        if (slen < 0) return (uint64_t)-EFAULT;
+        int n = 0;
+        const char *src = (const char *)title_ptr;
+        while (src[n] && n < GUI_TITLE_MAX - 1) { title_buf[n] = src[n]; n++; }
+        title_buf[n] = '\0';
+    }
+
+    int id = gui_window_create(current_process->pid, (int)x, (int)y,
+                               (uint32_t)w, (uint32_t)h, title_buf);
+    return (id >= 0) ? (uint64_t)id : (uint64_t)-1;
+}
+
+static uint64_t sys_win_destroy(uint64_t window_id, uint64_t unused1, uint64_t unused2,
+                                uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    return (gui_window_destroy(current_process->pid, (int)window_id) == 0) ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_win_fill(uint64_t window_id, uint64_t color, uint64_t unused2,
+                             uint64_t unused3, uint64_t unused4) {
+    (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    return (gui_window_fill(current_process->pid, (int)window_id, (uint32_t)color) == 0) ? 0 : (uint64_t)-1;
+}
+
+// w/h упакованы в один аргумент ((w<<32)|h) — у syscall'а только 5
+// регистровых слотов, а window_id/x/y/wh/color уже ровно пять.
+static uint64_t sys_win_draw_rect(uint64_t window_id, uint64_t x, uint64_t y,
+                                  uint64_t wh_packed, uint64_t color) {
+    if (!current_process) return (uint64_t)-EFAULT;
+    uint32_t w = (uint32_t)(wh_packed >> 32);
+    uint32_t h = (uint32_t)(wh_packed & 0xFFFFFFFFu);
+    int res = gui_window_draw_rect(current_process->pid, (int)window_id,
+                                   (int)x, (int)y, w, h, (uint32_t)color);
+    return (res == 0) ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_win_draw_text(uint64_t window_id, uint64_t x, uint64_t y,
+                                  uint64_t text_ptr, uint64_t color) {
+    if (!current_process) return (uint64_t)-EFAULT;
+    int64_t slen = validate_user_string(current_process->page_table, text_ptr, USER_STRING_MAX);
+    if (slen < 0) return (uint64_t)-EFAULT;
+
+    int res = gui_window_draw_text(current_process->pid, (int)window_id,
+                                   (int)x, (int)y, (const char *)text_ptr, (uint32_t)color);
+    return (res == 0) ? 0 : (uint64_t)-1;
+}
+
+// Разделяемая с userspace раскладка события — см. struct lufira_gui_event
+// в libc/include/lufira/syscall.h (поля и порядок обязаны совпадать 1:1).
+typedef struct __attribute__((packed)) {
+    int32_t type;
+    int32_t x, y;
+    int32_t key_or_button;
+} lufira_gui_event_t;
+
+static uint64_t sys_win_poll_event(uint64_t window_id, uint64_t event_buf_ptr,
+                                   uint64_t unused2, uint64_t unused3, uint64_t unused4) {
+    (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (!is_user_range_valid(current_process->page_table, event_buf_ptr,
+                             sizeof(lufira_gui_event_t), 1))
+        return (uint64_t)-EFAULT;
+
+    gui_event_t ev;
+    if (!gui_window_poll_event(current_process->pid, (int)window_id, &ev)) return 0;
+
+    lufira_gui_event_t *out = (lufira_gui_event_t *)event_buf_ptr;
+    out->type = ev.type;
+    out->x = ev.x;
+    out->y = ev.y;
+    out->key_or_button = ev.key_or_button;
+    return 1;
+}
+
+static uint64_t sys_win_move(uint64_t window_id, uint64_t x, uint64_t y,
+                             uint64_t unused3, uint64_t unused4) {
+    (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    return (gui_window_move(current_process->pid, (int)window_id, (int)x, (int)y) == 0)
+           ? 0 : (uint64_t)-1;
+}
+
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
 
 static syscall_fn_t syscall_table[256] = {
@@ -1456,6 +1553,13 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_SIGACTION] = sys_sigaction,
     [SYS_ALARM] = sys_alarm,
     [SYS_GET_FOREGROUND] = sys_get_foreground,
+    [SYS_WIN_CREATE] = sys_win_create,
+    [SYS_WIN_DESTROY] = sys_win_destroy,
+    [SYS_WIN_FILL] = sys_win_fill,
+    [SYS_WIN_DRAW_RECT] = sys_win_draw_rect,
+    [SYS_WIN_DRAW_TEXT] = sys_win_draw_text,
+    [SYS_WIN_POLL_EVENT] = sys_win_poll_event,
+    [SYS_WIN_MOVE] = sys_win_move,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========

@@ -66,6 +66,13 @@
 #define SYS_SIGRETURN 47
 #define SYS_ALARM 48
 #define SYS_GET_FOREGROUND 49
+#define SYS_WIN_CREATE 50
+#define SYS_WIN_DESTROY 51
+#define SYS_WIN_FILL 52
+#define SYS_WIN_DRAW_RECT 53
+#define SYS_WIN_DRAW_TEXT 54
+#define SYS_WIN_POLL_EVENT 55
+#define SYS_WIN_MOVE 56
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -426,4 +433,76 @@ __attribute__((noreturn)) static inline void sys_sigreturn(void) {
 //   sys_alarm(16);
 static inline long sys_alarm(unsigned long milliseconds) {
     return __syscall5(SYS_ALARM, (long)milliseconds, 0, 0, 0, 0);
+}
+
+// ===== v0.8 (GUI+WM), первый срез =====
+// Окна — кернел-резидентные структуры (kernel/system/gui/gui.c): клиент
+// рисует ТОЛЬКО через эти syscall'ы, содержимое окна не отображается в
+// адресное пространство процесса вовсе. Без иконок — только
+// прямоугольники/текст битмап-шрифтом 8x8.
+//
+// Типичный цикл приложения:
+//   int win = sys_win_create(100, 100, 300, 200, "Моё окно");
+//   sys_win_fill(win, 0x202030);
+//   sys_win_draw_text(win, 10, 10, "Привет!", 0xffffff);
+//   struct lufira_gui_event ev;
+//   for (;;) {
+//       while (sys_win_poll_event(win, &ev)) {
+//           if (ev.type == LUFIRA_GUI_EVENT_CLOSE) { sys_win_destroy(win); return 0; }
+//           if (ev.type == LUFIRA_GUI_EVENT_KEY) { ... }
+//       }
+//       sys_msleep(16); // ~60 Гц - не крутим процессор вхолостую
+//   }
+
+#define LUFIRA_GUI_EVENT_NONE       0
+#define LUFIRA_GUI_EVENT_KEY        1
+#define LUFIRA_GUI_EVENT_MOUSE_DOWN 2
+#define LUFIRA_GUI_EVENT_MOUSE_UP   3
+#define LUFIRA_GUI_EVENT_CLOSE      4
+
+// Раскладка полей ОБЯЗАНА совпадать 1:1 с lufira_gui_event_t в syscall.c
+// (ядро пишет в этот буфер напрямую по указателю, без пересборки полей).
+struct lufira_gui_event {
+    int type;
+    int x, y;             // для мыши — координаты ОТНОСИТЕЛЬНО клиентской области окна
+    int key_or_button;    // для KEY — код клавиши (как у обычного console-ввода); для мыши — маска кнопок
+};
+
+// x, y, w, h — позиция/размер КЛИЕНТСКОЙ области (без рамки/титлбара).
+// title может быть NULL. Возвращает id окна (>=0) или -1.
+static inline long sys_win_create(int x, int y, unsigned int w, unsigned int h, const char *title) {
+    return __syscall5(SYS_WIN_CREATE, x, y, (long)w, (long)h, (long)title);
+}
+
+static inline long sys_win_destroy(int window_id) {
+    return __syscall5(SYS_WIN_DESTROY, window_id, 0, 0, 0, 0);
+}
+
+// color — 0xRRGGBB.
+static inline long sys_win_fill(int window_id, unsigned int color) {
+    return __syscall5(SYS_WIN_FILL, window_id, color, 0, 0, 0);
+}
+
+// x, y, w, h — КЛИЕНТСКИЕ координаты окна (0,0 — левый верхний угол
+// клиентской области, не экрана).
+static inline long sys_win_draw_rect(int window_id, int x, int y, unsigned int w, unsigned int h,
+                                     unsigned int color) {
+    long wh_packed = ((long)w << 32) | (long)h;
+    return __syscall5(SYS_WIN_DRAW_RECT, window_id, x, y, wh_packed, color);
+}
+
+// Битмап-шрифт 8x8 (тот же, что у текстовой консоли) — x, y произвольные
+// пиксели клиентской области, не клетки.
+static inline long sys_win_draw_text(int window_id, int x, int y, const char *text, unsigned int color) {
+    return __syscall5(SYS_WIN_DRAW_TEXT, window_id, x, y, (long)text, color);
+}
+
+// Неблокирующая проверка (как у sys_poll()) — 1 и заполненный *out, если
+// было событие, иначе 0 и *out не тронут.
+static inline long sys_win_poll_event(int window_id, struct lufira_gui_event *out) {
+    return __syscall5(SYS_WIN_POLL_EVENT, window_id, (long)out, 0, 0, 0);
+}
+
+static inline long sys_win_move(int window_id, int x, int y) {
+    return __syscall5(SYS_WIN_MOVE, window_id, x, y, 0, 0);
 }

@@ -513,6 +513,51 @@ void draw_text_tilted(const char *text, uint32_t px, uint32_t py, uint32_t scale
     }
 }
 
+// v0.8 (GUI+WM): put_char_graphic() выше считает x/y КЛЕТКАМИ текстовой
+// сетки (умножает на CHAR_WIDTH+CHAR_PADDING_X и т.д.) - окнам/титлбару
+// нужно позиционирование произвольными ПИКСЕЛЯМИ (рамка окна не обязана
+// совпадать с сеткой символов консоли). Та же отрисовка через put_pixel()
+// (значит, тот же экран/back buffer, что и put_char_graphic()), просто
+// без клеточного умножения координат.
+void put_char_graphic_px(int c, int x, int y, uint32_t fg_color, uint32_t bg_color) {
+    if (c < 32 || c > 127) c = '?';
+    unsigned char *glyph = full_font_data[c - 32];
+
+    for (int cy = 0; cy < 8; cy++) {
+        int target_y = y + cy;
+        if (target_y < 0 || (uint32_t)target_y >= screen_height_pixels) continue;
+        for (int cx = 0; cx < 8; cx++) {
+            int target_x = x + cx;
+            if (target_x < 0 || (uint32_t)target_x >= screen_width_pixels) continue;
+            if ((glyph[cy] >> (7 - cx)) & 1) put_pixel(target_x, target_y, fg_color);
+            else put_pixel(target_x, target_y, bg_color);
+        }
+    }
+}
+
+// Тот же глиф 8x8, но в ПРОИЗВОЛЬНЫЙ вызывающий буфер (не экран/back
+// buffer) - нужно gui_window_draw_text() (gui.c), чтобы рисовать текст в
+// приватный пиксельный буфер окна. Только foreground - фон окна рисует
+// сам вызывающий заранее (gui_window_fill()), затирать его здесь не
+// нужно (в отличие от put_char_graphic()/put_char_graphic_px() выше,
+// где bg_color осмыслен - экран без явного фона остаётся "дырявым" от
+// предыдущего кадра).
+void font_draw_glyph_to_buffer(uint32_t *buf, uint32_t buf_w, uint32_t buf_h,
+                               int x, int y, int c, uint32_t fg_color) {
+    if (c < 32 || c > 127) c = '?';
+    unsigned char *glyph = full_font_data[c - 32];
+
+    for (int cy = 0; cy < 8; cy++) {
+        int py = y + cy;
+        if (py < 0 || (uint32_t)py >= buf_h) continue;
+        for (int cx = 0; cx < 8; cx++) {
+            int px = x + cx;
+            if (px < 0 || (uint32_t)px >= buf_w) continue;
+            if ((glyph[cy] >> (7 - cx)) & 1) buf[py * buf_w + px] = fg_color;
+        }
+    }
+}
+
 void put_char(char c) {
     // Если пользователь смотрит старый вывод,
     // любой обычный вывод возвращает нас вниз.
@@ -1370,6 +1415,28 @@ void console_scroll_down(void) {
         cursor_visible = 0;
         draw_cursor();
     }
+}
+
+// v0.8 (GUI+WM): закрытие последнего окна возвращает экран в текстовый
+// режим - back buffer к этому моменту полностью перезаписан рабочим
+// столом/окнами (gui_tick(), gui.c), так что просто "поставить
+// dirty-флаг" недостаточно, нужно реально перерисовать текст заново.
+// console_scroll_to_bottom() для этого не подходит - она молча ничего не
+// делает, если console_history_scroll уже 0 (обычный случай: GUI-режим
+// не трогает прокрутку вовсе), та же отрисовка, что и в её собственной
+// ветке "lines >= screen_height_chars", но БЕЗ этой защиты раннего
+// выхода.
+void console_redraw_from_history(void) {
+    for (uint32_t y = 0; y < screen_height_chars; y++) {
+        uint32_t logical_line = console_history_count > screen_height_chars
+                                ? console_history_count - screen_height_chars + y
+                                : y;
+        clear_console_line(y);
+        if (logical_line < console_history_count) {
+            history_render_line(y, logical_line);
+        }
+    }
+    console_mark_dirty();
 }
 
 void console_scroll_to_bottom(void) {

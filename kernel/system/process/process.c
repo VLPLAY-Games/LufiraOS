@@ -11,6 +11,7 @@
 #include "system/devmode/devmode.h"
 #include "system/klog/klog.h"
 #include "fs/lufirafs/lufirafs.h"
+#include "system/gui/gui.h"
 
 #ifndef PAGE_PS
 #define PAGE_PS 0x80    // Page size (2MB/1GB) — как и в elf.c
@@ -817,6 +818,13 @@ void process_exit(int exit_code) {
     if (exiting_process->pid == foreground_pid)
         foreground_pid = 0;
 
+    // v0.8 (GUI+WM): процесс не обязан сам прибрать свои окна перед
+    // смертью - без этого они висели бы на экране вечно, принадлежа уже
+    // не существующему PID (и get_owned() в gui.c всё равно отказал бы в
+    // любом будущем SYS_WIN_* от переиспользованного PID чужому
+    // процессу, но сами окна так и остались бы занимать слоты/рисоваться).
+    gui_destroy_windows_owned_by(exiting_process->pid);
+
     respawn_shell_if_needed(exiting_process);
 
     process_t *waiter = wake_waiting_parent(exiting_process);
@@ -1312,6 +1320,9 @@ static int terminate_process_by_signal(process_t *p, int sig) {
     // PID навсегда.
     if (p->pid == foreground_pid)
         foreground_pid = 0;
+
+    // v0.8 (GUI+WM) - см. тот же вызов и комментарий в process_exit() выше.
+    gui_destroy_windows_owned_by(p->pid);
 
     // Тем же поводом (может не вернуться сюда обычным путём, если p ==
     // current_process): если убитый процесс был is_shell (exec когда-то
