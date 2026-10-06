@@ -64,6 +64,14 @@ void put_char_graphic(int c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t
 void put_char_graphic_px(int c, int x, int y, uint32_t fg_color, uint32_t bg_color);
 void font_draw_glyph_to_buffer(uint32_t *buf, uint32_t buf_w, uint32_t buf_h,
                                int x, int y, int c, uint32_t fg_color);
+// v0.8 (GUI+WM), этап 3: экспорт битмап-шрифта (full_font_data, static в
+// console.c) для SYS_FB_FONT (syscall.c) — userspace WM-процесс (wm.c)
+// больше не может звать put_char_graphic_px()/font_draw_glyph_to_buffer()
+// напрямую (не его адресное пространство), ему нужны сырые байты глифов,
+// чтобы рисовать титлбар/кнопку закрытия в СВОЕМ compositor-буфере. См.
+// console_get_font_data() у реализации.
+uint32_t console_get_font_size(void);
+void console_get_font_data(void *out, uint32_t max_bytes);
 void draw_text_scaled(const char *text, uint32_t px, uint32_t py, uint32_t scale, uint32_t fg_color);
 void draw_text_tilted(const char *text, uint32_t px, uint32_t py, uint32_t scale, uint32_t fg_color);
 uint32_t text_scaled_width(const char *text, uint32_t scale);

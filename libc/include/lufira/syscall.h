@@ -73,6 +73,14 @@
 #define SYS_WIN_DRAW_TEXT 54
 #define SYS_WIN_POLL_EVENT 55
 #define SYS_WIN_MOVE 56
+#define SYS_IPC_SEND 57
+#define SYS_IPC_RECV 58
+#define SYS_WM_REGISTER 59
+#define SYS_FB_INFO 60
+#define SYS_FB_PRESENT 61
+#define SYS_FB_FONT 62
+#define SYS_CONSOLE_INJECT 63
+#define SYS_CONSOLE_REDRAW 64
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -100,6 +108,7 @@
 // Коды ошибок — ровно то подмножество, которое ядро реально возвращает.
 #define EPERM    1
 #define ENOENT   2
+#define EAGAIN   11
 #define EACCES   13
 #define EFAULT   14
 #define ENOTDIR  20
@@ -435,10 +444,15 @@ static inline long sys_alarm(unsigned long milliseconds) {
     return __syscall5(SYS_ALARM, (long)milliseconds, 0, 0, 0, 0);
 }
 
-// ===== v0.8 (GUI+WM), первый срез =====
-// Окна — кернел-резидентные структуры (kernel/system/gui/gui.c): клиент
-// рисует ТОЛЬКО через эти syscall'ы, содержимое окна не отображается в
-// адресное пространство процесса вовсе. Без иконок — только
+// ===== v0.8 (GUI+WM) =====
+// Этап 3: оконный сервер (WM) — обычный userspace-процесс
+// (lufira-packages/src/apps/wm.c), не часть ядра. sys_win_*() ниже
+// НЕ ИЗМЕНИЛИСЬ с первого среза (ни сигнатуры, ни семантика) — приложения
+// и gui_widgets.h/.c, написанные против первого среза, работают без
+// изменений: внутри ядра они теперь просто релеятся WM-процессу через
+// SYS_IPC_SEND/RECV (см. ниже), а не исполняются кернел-резидентным кодом.
+// Содержимое окна по-прежнему не отображается в адресное пространство
+// клиента — клиент рисует только через эти syscall'ы. Без иконок — только
 // прямоугольники/текст битмап-шрифтом 8x8.
 //
 // Типичный цикл приложения:
@@ -505,4 +519,80 @@ static inline long sys_win_poll_event(int window_id, struct lufira_gui_event *ou
 
 static inline long sys_win_move(int window_id, int x, int y) {
     return __syscall5(SYS_WIN_MOVE, window_id, x, y, 0, 0);
+}
+
+// ===== v0.8 (GUI+WM), этап 3: generic IPC + привилегированные syscall'ы
+// WM-процесса. См. kernel/system/ipc/mailbox.h/wm_protocol.h про
+// архитектуру — это ОБЩИЙ примитив, не привязанный к GUI; обычные
+// приложения его не зовут напрямую (sys_win_*() выше уже прячут его под
+// собой), только сам wm.c. =====
+
+#define MAX_IPC_MSG_PAYLOAD 96
+
+// Байт-в-байт зеркало ipc_msg_t (kernel/system/ipc/mailbox.h) — ядро
+// копирует это целиком, без пересборки полей.
+struct lufira_ipc_msg {
+    uint32_t sender_pid;
+    uint32_t len;
+    uint8_t data[MAX_IPC_MSG_PAYLOAD];
+};
+
+// 0 при успехе, иначе -errno (-EINVAL — нет такого pid/слишком длинное
+// сообщение, -EAGAIN — почтовый ящик адресата полон).
+static inline long sys_ipc_send(long dest_pid, const void *msg, unsigned long len) {
+    return __syscall5(SYS_IPC_SEND, dest_pid, (long)msg, (long)len, 0, 0);
+}
+
+// blocking: 1 — ждать, пока не придёт сообщение; 0 — вернуть 0 немедленно,
+// если почтовый ящик пуст. Возвращает 1, если сообщение получено.
+static inline long sys_ipc_recv(struct lufira_ipc_msg *out, int blocking) {
+    return __syscall5(SYS_IPC_RECV, (long)out, blocking, 0, 0, 0);
+}
+
+// Делает вызывающего ЕДИНСТВЕННЫМ оконным сервером системы — 0 при
+// успехе, -1 если кто-то другой уже зарегистрирован.
+static inline long sys_wm_register(void) {
+    return __syscall5(SYS_WM_REGISTER, 0, 0, 0, 0, 0);
+}
+
+// Байт-в-байт зеркало lufira_fb_info_t (kernel/system/syscall/syscall.h).
+// pixel_format — см. комментарий там же: wm.c реплицирует convert_color()
+// у себя по этому значению (не может звать кернел-функцию напрямую).
+struct lufira_fb_info {
+    uint32_t width;
+    uint32_t height;
+    uint32_t pixel_format;
+};
+
+static inline long sys_fb_info(struct lufira_fb_info *out) {
+    return __syscall5(SYS_FB_INFO, (long)out, 0, 0, 0, 0);
+}
+
+// buf —w*h пикселей, УЖЕ в финальном формате экрана (pixel_format выше);
+// w/h обязаны точно совпадать с текущим разрешением (sys_fb_info()).
+// Доступно только зарегистрированному sys_wm_register() процессу.
+static inline long sys_fb_present(const uint32_t *buf, unsigned int w, unsigned int h) {
+    return __syscall5(SYS_FB_PRESENT, (long)buf, w, h, 0, 0);
+}
+
+// Копирует битмап-шрифт 8x8 (console.c::full_font_data, glyph 0 = ASCII 32
+// "пробел", 8 байт/глиф) в out, не больше max_bytes. Возвращает настоящий
+// размер шрифта — если он больше max_bytes, скопирована только первая
+// часть (вызывающий может перевызвать с буфером такого размера).
+static inline long sys_fb_font(void *out, unsigned long max_bytes) {
+    return __syscall5(SYS_FB_FONT, (long)out, (long)max_bytes, 0, 0, 0);
+}
+
+// Доступны только зарегистрированному sys_wm_register() процессу — см.
+// SYS_CONSOLE_INJECT/SYS_CONSOLE_REDRAW в kernel/system/syscall/syscall.h.
+// WM зовёт sys_console_inject() для каждой клавиши, пока у него открыто 0
+// окон (иначе шелл потерял бы ввод насовсем сразу после старта WM — не
+// успеть набрать команду для запуска ПЕРВОГО GUI-приложения), и
+// sys_console_redraw() один раз, когда закрывается ПОСЛЕДНЕЕ окно.
+static inline long sys_console_inject(int byte) {
+    return __syscall5(SYS_CONSOLE_INJECT, byte, 0, 0, 0, 0);
+}
+
+static inline long sys_console_redraw(void) {
+    return __syscall5(SYS_CONSOLE_REDRAW, 0, 0, 0, 0, 0);
 }

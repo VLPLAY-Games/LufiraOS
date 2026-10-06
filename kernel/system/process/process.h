@@ -3,6 +3,7 @@
 #include "lib/types.h"
 #include "system/cpu/tss.h"
 #include "fs/vfs/vfs.h"
+#include "system/ipc/mailbox.h"
 // lufira_ps_entry_t — для прототипа process_pslist() ниже (v0.7 план,
 // этап 5, под-этап 4). syscall.h не зависит от process.h, так что этот
 // include однонаправленный, без цикла.
@@ -208,6 +209,15 @@ typedef struct process {
     // накопительно по PID через exec), но начинается заново у ребёнка
     // fork() (см. process_fork()) — он ещё не выполнялся.
     uint64_t cpu_ticks;
+    // v0.8 (GUI+WM), этап 3: собственный почтовый ящик процесса (mailbox.h)
+    // — generic IPC, НЕ специфичный для GUI. Используется и userspace WM-
+    // процессом (получает сюда клиентские RPC-запросы и сырые input-события
+    // от ядра), и обычными клиентами (получают сюда ответы WM на свои
+    // запросы). process_create() заводит пустым; fork() (process_fork())
+    // ребёнку НЕ копирует — у него свой, отдельный от родителя (process_create()
+    // внутри fork() уже инициализирует его заново), как и у настоящего
+    // POSIX fork() не наследуются чужие message queues.
+    ipc_mailbox_t mailbox;
     struct process *next;
 } process_t;
 
@@ -359,6 +369,29 @@ int process_is_idle(void);
 // сбрасывается в process.c при завершении процесса (нормальном или по
 // сигналу) — см. подробности у terminate_process_by_signal()/process_exit().
 extern volatile uint32_t foreground_pid;
+
+// Ищет process_t по pid в process_list. NULL, если не найден. Раньше была
+// static-хелпером внутри process.c (нужна была только process_set_foreground()
+// и обходу вверх по ppid) — v0.8 (GUI+WM), этап 3: экспортирована, т.к.
+// теперь нужна и mailbox_send() (mailbox.c) для поиска адресата по pid
+// ЛЮБОГО, не только родственного, процесса.
+process_t* process_find_by_pid(uint32_t pid);
+
+// PID зарегистрированного оконного сервера (SYS_WM_REGISTER, syscall.h) —
+// 0, если никто не зарегистрирован (GUI недоступен, SYS_WIN_* отказывают).
+// v0.8 (GUI+WM), этап 3: замена кернел-резидентного gui.c — WM теперь
+// обычный userspace-процесс (lufira-packages/src/apps/wm.c), единственная
+// связь с ядром — этот pid (куда syscall.c релеит SYS_WIN_* как RPC через
+// mailbox.h) и привилегированные SYS_FB_*/SYS_WM_REGISTER (доступны только
+// этому pid, см. syscall.c). Та же идея единственного владельца слота, что
+// и у foreground_pid выше — только тут "слот" не сбрасывается явно, а
+// только когда сам WM-процесс завершается (process_exit()/
+// terminate_process_by_signal() обнуляют его, как и foreground_pid).
+extern volatile uint32_t g_wm_pid;
+
+// 0 при успехе, -1 если WM уже зарегистрирован (ровно один на систему).
+int process_wm_register(uint32_t pid);
+uint32_t process_get_wm_pid(void);
 
 // 1, если следующий вызов shell_task() (kernel.c) — это пересоздание после
 // того, как реальный exec (elf_exec_replace()) подменил собой процесс

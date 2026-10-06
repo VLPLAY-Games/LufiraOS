@@ -11,7 +11,7 @@
 #include "system/devmode/devmode.h"
 #include "system/klog/klog.h"
 #include "fs/lufirafs/lufirafs.h"
-#include "system/gui/gui.h"
+#include "system/ipc/wm_protocol.h"
 
 #ifndef PAGE_PS
 #define PAGE_PS 0x80    // Page size (2MB/1GB) — как и в elf.c
@@ -20,6 +20,8 @@
 process_t *process_list = NULL;
 process_t *current_process = NULL;
 volatile uint32_t foreground_pid = 0;
+// v0.8 (GUI+WM), этап 3 — см. комментарий у объявления в process.h.
+volatile uint32_t g_wm_pid = 0;
 volatile int shell_is_respawn = 0;
 static process_t *(*shell_spawner_fn)(void) = NULL;
 
@@ -591,6 +593,7 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     proc->uid = current_process ? current_process->uid : 0;
     proc->gid = current_process ? current_process->gid : 0;
     proc->cpu_ticks = 0;
+    mailbox_init(&proc->mailbox); // v0.8 (GUI+WM), этап 3 — см. комментарий у поля в process.h
 
     // memset ПЕРЕД копированием, а не только "proc->name[31] = 0" — иначе
     // хвост буфера после конца короткого имени (например "shell" — 5 из 32
@@ -818,12 +821,33 @@ void process_exit(int exit_code) {
     if (exiting_process->pid == foreground_pid)
         foreground_pid = 0;
 
-    // v0.8 (GUI+WM): процесс не обязан сам прибрать свои окна перед
-    // смертью - без этого они висели бы на экране вечно, принадлежа уже
-    // не существующему PID (и get_owned() в gui.c всё равно отказал бы в
-    // любом будущем SYS_WIN_* от переиспользованного PID чужому
-    // процессу, но сами окна так и остались бы занимать слоты/рисоваться).
-    gui_destroy_windows_owned_by(exiting_process->pid);
+    // v0.8 (GUI+WM), этап 3: WM теперь обычный userspace-процесс — если
+    // ИМЕННО ОН умирает (крах/kill, не штатное SYS_WIN_DESTROY, которого у
+    // самого WM и нет), снимаем регистрацию (SYS_WIN_*/SYS_FB_* не повиснут,
+    // ожидая ответа от уже не существующего pid) и восстанавливаем видимый
+    // текстовый режим — back buffer к этому моменту мог быть целиком
+    // перезаписан GUI-кадрами, так что без явной перерисовки экран остался
+    // бы застывшим на последнем кадре WM навсегда. ИЗВЕСТНОЕ ОГРАНИЧЕНИЕ
+    // (не в объёме этого этапа): клиенты, уже заблокированные внутри
+    // wm_call() в ожидании ответа на свой RPC в момент смерти WM, останутся
+    // заблокированы навсегда — как и в реальных системах при неожиданной
+    // смерти compositor'а, восстановление такого сценария требует
+    // отдельного таймаута/сигнала, которого здесь пока нет.
+    if (exiting_process->pid == g_wm_pid) {
+        g_wm_pid = 0;
+        console_redraw_from_history();
+    } else if (g_wm_pid != 0) {
+        // Зеркало прежнего прямого gui_destroy_windows_owned_by(pid) из
+        // первого среза — WM больше не в ядре, так что вместо прямого
+        // вызова просто уведомляем его, а закрытие чужих окон по pid делает
+        // он сам (см. WM_NOTIFY_PROCESS_EXIT, kernel/system/ipc/wm_protocol.h,
+        // и обработчик в lufira-packages/apps/wm.c).
+        wm_request_t notify;
+        memset(&notify, 0, sizeof(notify));
+        notify.opcode = WM_NOTIFY_PROCESS_EXIT;
+        notify.a[0] = (int32_t)exiting_process->pid;
+        mailbox_send(g_wm_pid, WM_SENDER_KERNEL, &notify, sizeof(notify));
+    }
 
     respawn_shell_if_needed(exiting_process);
 
@@ -1321,8 +1345,17 @@ static int terminate_process_by_signal(process_t *p, int sig) {
     if (p->pid == foreground_pid)
         foreground_pid = 0;
 
-    // v0.8 (GUI+WM) - см. тот же вызов и комментарий в process_exit() выше.
-    gui_destroy_windows_owned_by(p->pid);
+    // v0.8 (GUI+WM), этап 3 - см. тот же приём и комментарий в process_exit() выше.
+    if (p->pid == g_wm_pid) {
+        g_wm_pid = 0;
+        console_redraw_from_history();
+    } else if (g_wm_pid != 0) {
+        wm_request_t notify;
+        memset(&notify, 0, sizeof(notify));
+        notify.opcode = WM_NOTIFY_PROCESS_EXIT;
+        notify.a[0] = (int32_t)p->pid;
+        mailbox_send(g_wm_pid, WM_SENDER_KERNEL, &notify, sizeof(notify));
+    }
 
     // Тем же поводом (может не вернуться сюда обычным путём, если p ==
     // current_process): если убитый процесс был is_shell (exec когда-то
@@ -1426,10 +1459,21 @@ int process_kill(uint32_t pid)
     return process_signal(pid, SIGKILL);
 }
 
+// v0.8 (GUI+WM), этап 3 — см. комментарий у g_wm_pid в process.h.
+int process_wm_register(uint32_t pid) {
+    if (g_wm_pid != 0) return -1;
+    g_wm_pid = pid;
+    return 0;
+}
+
+uint32_t process_get_wm_pid(void) {
+    return g_wm_pid;
+}
+
 // Ищет process_t по pid в process_list. NULL, если не найден (process_list
 // пуст или список циклический без совпадений). Вынесено отдельно — нужно
 // как самому process_set_foreground(), так и его обходу вверх по ppid.
-static process_t* process_find_by_pid(uint32_t pid)
+process_t* process_find_by_pid(uint32_t pid)
 {
     if (!process_list) return NULL;
     process_t *p = process_list;

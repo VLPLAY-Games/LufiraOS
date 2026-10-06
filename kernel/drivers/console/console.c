@@ -558,6 +558,17 @@ void font_draw_glyph_to_buffer(uint32_t *buf, uint32_t buf_w, uint32_t buf_h,
     }
 }
 
+// v0.8 (GUI+WM), этап 3 — см. комментарий у объявления в console.h.
+uint32_t console_get_font_size(void) {
+    return (uint32_t)sizeof(full_font_data);
+}
+
+void console_get_font_data(void *out, uint32_t max_bytes) {
+    uint32_t n = (uint32_t)sizeof(full_font_data);
+    if (n > max_bytes) n = max_bytes;
+    memcpy(out, full_font_data, n);
+}
+
 void put_char(char c) {
     // Если пользователь смотрит старый вывод,
     // любой обычный вывод возвращает нас вниз.
@@ -1419,8 +1430,10 @@ void console_scroll_down(void) {
 
 // v0.8 (GUI+WM): закрытие последнего окна возвращает экран в текстовый
 // режим - back buffer к этому моменту полностью перезаписан рабочим
-// столом/окнами (gui_tick(), gui.c), так что просто "поставить
-// dirty-флаг" недостаточно, нужно реально перерисовать текст заново.
+// столом/окнами (композитинг теперь в userspace WM-процессе, см.
+// lufira-packages/src/apps/wm.c, который зовёт SYS_FB_PRESENT), так что
+// просто "поставить dirty-флаг" недостаточно, нужно реально перерисовать
+// текст заново.
 // console_scroll_to_bottom() для этого не подходит - она молча ничего не
 // делает, если console_history_scroll уже 0 (обычный случай: GUI-режим
 // не трогает прокрутку вовсе), та же отрисовка, что и в её собственной
@@ -1436,6 +1449,25 @@ void console_redraw_from_history(void) {
             history_render_line(y, logical_line);
         }
     }
+
+    // НАЙДЕННЫЙ БАГ (v0.8 GUI+WM, этап 3, живое тестирование: тонкая синяя
+    // полоса оставалась внизу экрана после закрытия всех окон и возврата в
+    // текстовый режим) — screen_height_chars = screen_height_pixels /
+    // (CHAR_HEIGHT+CHAR_PADDING_Y) целочисленно, так что при разрешении,
+    // не кратном высоте строки (800 / 12 = 66 строк, 792px, остаток 8px),
+    // нижняя полоска экрана не накрывается НИ ОДНОЙ строкой из цикла выше
+    // и раньше молча хранила то, что там нарисовал последний кадр WM
+    // (таскбар, см. lufira-packages/apps/wm.c) — цикл по clear_console_line()
+    // просто не доходит до этих пикселей. Раньше (первый срез, без
+    // таскбара) это тоже было верно, просто сливалось с чёрным фоном
+    // рабочего стола и было незаметно.
+    uint32_t covered_height = screen_height_chars * (CHAR_HEIGHT + CHAR_PADDING_Y);
+    for (uint32_t py = covered_height; py < screen_height_pixels; py++) {
+        for (uint32_t px = 0; px < screen_width_pixels; px++) {
+            put_pixel(px, py, current_bg_color);
+        }
+    }
+
     console_mark_dirty();
 }
 

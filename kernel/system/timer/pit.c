@@ -5,7 +5,6 @@
 #include "net/net.h"
 #include "system/devmode/devmode.h"
 #include "shell/shell.h"
-#include "system/gui/gui.h"
 
 // Порты I/O
 static inline void outb(uint16_t port, uint8_t val) {
@@ -116,7 +115,12 @@ void timer_irq_handler(interrupt_frame_t *frame) {
     }
 
     update_cursor();
-    gui_tick(); // v0.8 (GUI+WM): рисует рабочий стол/окна/курсор в back buffer, если GUI-режим активен
+    // v0.8 (GUI+WM), этап 3: композитинг переехал в userspace WM-процесс
+    // (lufira-packages/src/apps/wm.c) — он сам пишет в back buffer через
+    // SYS_FB_PRESENT (syscall.c), больше не отсюда. console_tick_present()
+    // ниже всё ещё нужен безусловно: это он флашит back buffer (который
+    // теперь обновляет WM, а не только текстовая консоль) на реальный
+    // экран.
     console_tick_present(); // v0.8-мост, пункт 2: флашит back buffer, только если "грязный"
 
     usb_poll();

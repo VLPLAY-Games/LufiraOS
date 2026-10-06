@@ -44,3 +44,10 @@ int console_input_read(uint8_t *out, int max);
 // пункт 3, syscall.c/vfs.c) — проверить "есть ли что почитать прямо
 // сейчас", не уходя в PROCESS_BLOCKED, как делает console_input_read().
 int console_input_has_data(void);
+
+// v0.8 (GUI+WM), этап 3: экспортирована (была static) — SYS_CONSOLE_INJECT
+// (syscall.c) даёт userspace WM-процессу вернуть байт в этот же ring
+// buffer, когда у него открыто 0 окон (см. комментарий у SYS_CONSOLE_INJECT,
+// kernel/system/syscall/syscall.h) — тот же путь, которым идёт обычное
+// нажатие клавиши при полностью выключенном GUI-режиме.
+void console_input_push(uint8_t byte);

@@ -4,7 +4,9 @@
 #include "shell/shell.h"
 #include "system/timer/pit.h"
 #include "system/process/process.h"
-#include "system/gui/gui.h"
+#include "system/ipc/mailbox.h"
+#include "system/ipc/wm_protocol.h"
+#include "lib/string.h"
 
 static int mouse_x = 0;
 static int mouse_y = 0;
@@ -22,7 +24,7 @@ static volatile int console_input_count = 0;
 // ядре тоже не поддерживает нескольких блокированных читателей разом.
 static process_t *console_input_waiter = NULL;
 
-static void console_input_push(uint8_t byte) {
+void console_input_push(uint8_t byte) {
     if (console_input_count >= CONSOLE_INPUT_BUF_SIZE) return; // переполнение — молча роняем, как и реальный tty
     console_input_buf[console_input_head] = byte;
     console_input_head = (console_input_head + 1) % CONSOLE_INPUT_BUF_SIZE;
@@ -88,13 +90,23 @@ void input_keyboard_event(int key) {
     last_key_tick = now;
     if (is_duplicate) return;
 
-    // v0.8 (GUI+WM): пока активен хоть один GUI-режим активен (есть хотя
-    // бы одно окно) - клавиатура идёт сфокусированному окну, а не в
-    // обычный ring buffer /dev/console: текстовый шелл в это время не
-    // должен получать ввод вовсе (как и в любой настоящей оконной
-    // системе, фоновый терминал не видит клавиш, пока открыто GUI-
-    // окно). gui_handle_key() сама решает, активен ли вообще GUI-режим.
-    if (gui_handle_key(key)) return;
+    // v0.8 (GUI+WM), этап 3: пока зарегистрирован WM-процесс (SYS_WM_REGISTER,
+    // process_get_wm_pid()) - клавиатура идёт ЕМУ (сырым событием через
+    // mailbox.h), а не в обычный ring buffer /dev/console: текстовый шелл в
+    // это время не должен получать ввод вовсе (как и в любой настоящей
+    // оконной системе, фоновый терминал не видит клавиш, пока открыто
+    // GUI-окно). Раньше (первый срез) эту развилку делал gui_handle_key()
+    // прямо внутри ядра - теперь сам WM решает, какому окну это отдать
+    // (фокус - понятие, которое ядро больше не обязано знать).
+    uint32_t wm_pid = process_get_wm_pid();
+    if (wm_pid) {
+        wm_request_t req;
+        memset(&req, 0, sizeof(req));
+        req.opcode = WM_INPUT_KEY;
+        req.a[0] = key;
+        mailbox_send(wm_pid, WM_SENDER_KERNEL, &req, sizeof(req));
+        return;
+    }
 
     // Кольцевой буфер /dev/console (см. input.h) — то, что реально читает
     // shell.elf через SYS_READ. Ctrl+Up/Down (скролл вьюпорта) и KEY_CTRL_C
@@ -180,6 +192,26 @@ void input_mouse_event(int dx, int dy, uint8_t buttons) {
     if (mouse_y < 0) mouse_y = 0;
 
     mouse_buttons = buttons;
+
+    // v0.8 (GUI+WM), этап 3: раньше WM (gui_tick(), кернел-резидентный
+    // gui.c) САМ опрашивал input_mouse_get_x/y/buttons() каждый PIT-тик -
+    // теперь, когда композитинг и вся эта логика в userspace, у WM нет
+    // способа "подождать тика" (нет больше PIT-driven gui_tick()) - вместо
+    // опроса толкаем событие ему сразу отсюда, с места настоящего
+    // аппаратного прерывания/опроса устройства (PS/2 IRQ или USB HID poll
+    // из timer_irq_handler(), см. их вызывающих). WM получает это тем же
+    // блокирующим SYS_IPC_RECV, что и клавиатуру/клиентские RPC - никакого
+    // отдельного опроса мыши ему теперь не нужно вовсе.
+    uint32_t wm_pid = process_get_wm_pid();
+    if (wm_pid) {
+        wm_request_t req;
+        memset(&req, 0, sizeof(req));
+        req.opcode = WM_INPUT_MOUSE;
+        req.a[0] = mouse_x;
+        req.a[1] = mouse_y;
+        req.a[2] = (int32_t)mouse_buttons;
+        mailbox_send(wm_pid, WM_SENDER_KERNEL, &req, sizeof(req));
+    }
 }
 
 int input_mouse_get_x(void) {

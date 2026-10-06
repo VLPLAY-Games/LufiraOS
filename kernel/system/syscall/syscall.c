@@ -17,7 +17,10 @@
 #include "fs/fat/fat_mount.h"
 #include "system/acpi/acpi.h"
 #include "drivers/usb/xhci.h"
-#include "system/gui/gui.h"
+#include "drivers/console/graphics2d.h"
+#include "system/ipc/mailbox.h"
+#include "system/ipc/wm_protocol.h"
+#include "drivers/input/input.h"
 
 extern lufirafs_t lufirafs;
 
@@ -1405,42 +1408,91 @@ static uint64_t sys_get_foreground(uint64_t unused0, uint64_t unused1, uint64_t 
     return (uint64_t)process_get_foreground();
 }
 
-// ===== v0.8 (GUI+WM), первый срез — см. подробный разбор архитектуры в
-// kernel/system/gui/gui.h и описание каждого syscall'а в syscall.h =====
+// ===== v0.8 (GUI+WM), этап 3 — WM вынесен в userspace. Разбор архитектуры:
+// kernel/system/ipc/wm_protocol.h. SYS_WIN_* ниже — тонкие RPC-обёртки
+// поверх generic mailbox.h, см. wm_call() сразу под ними. =====
+
+// Разделяемая с userspace раскладка события — см. struct lufira_gui_event
+// в libc/include/lufira/syscall.h (поля и порядок обязаны совпадать 1:1).
+// Ядро больше не знает смысла type/key_or_button (раньше — GUI_EVENT_* из
+// удалённого gui.h) — просто прозрачно переносит int'ы из wm_reply_t
+// (wm_protocol.h), которые наполняет уже сам userspace WM.
+typedef struct __attribute__((packed)) {
+    int32_t type;
+    int32_t x, y;
+    int32_t key_or_button;
+} lufira_gui_event_t;
+
+// Общая часть любого SYS_WIN_*: отправить req зарегистрированному WM pid
+// и заблокированно дождаться ответа. -EFAULT если WM не зарегистрирован
+// (нет "дисплея") или mailbox_send()/mailbox_recv() не удались (ответ WM
+// пришёл бы с sender_pid == wm_pid; в этой версии мы ему доверяем без
+// явной проверки sender_pid — единственный, кто вообще пишет в mailbox
+// ЭТОГО процесса, это либо само ядро (input-события — но те идут в
+// mailbox WM, не клиента), либо WM в ответ на наш же запрос).
+static int wm_call(const wm_request_t *req, wm_reply_t *reply) {
+    uint32_t wm_pid = process_get_wm_pid();
+    if (!wm_pid) return -1;
+    if (mailbox_send(wm_pid, current_process->pid, req, sizeof(*req)) != 0) return -1;
+
+    lufira_ipc_msg_t msg;
+    if (mailbox_recv(&msg, 1) != 0) return -1;
+    if (msg.len != sizeof(wm_reply_t)) return -1;
+    memcpy(reply, msg.payload, sizeof(wm_reply_t));
+    return 0;
+}
 
 // SYS_WIN_CREATE (50): x, y, w, h, title_ptr.
 static uint64_t sys_win_create(uint64_t x, uint64_t y, uint64_t w, uint64_t h,
                                uint64_t title_ptr) {
     if (!current_process) return (uint64_t)-EFAULT;
 
-    char title_buf[GUI_TITLE_MAX];
-    title_buf[0] = '\0';
+    wm_request_t req;
+    memset(&req, 0, sizeof(req));
+    req.opcode = WM_OP_WIN_CREATE;
+    req.a[0] = (int32_t)x; req.a[1] = (int32_t)y;
+    req.a[2] = (int32_t)w; req.a[3] = (int32_t)h;
     if (title_ptr) {
         int64_t slen = validate_user_string(current_process->page_table, title_ptr, USER_STRING_MAX);
         if (slen < 0) return (uint64_t)-EFAULT;
         int n = 0;
         const char *src = (const char *)title_ptr;
-        while (src[n] && n < GUI_TITLE_MAX - 1) { title_buf[n] = src[n]; n++; }
-        title_buf[n] = '\0';
+        while (src[n] && n < (int)sizeof(req.str) - 1) { req.str[n] = src[n]; n++; }
+        req.str[n] = '\0';
     }
 
-    int id = gui_window_create(current_process->pid, (int)x, (int)y,
-                               (uint32_t)w, (uint32_t)h, title_buf);
-    return (id >= 0) ? (uint64_t)id : (uint64_t)-1;
+    wm_reply_t reply;
+    if (wm_call(&req, &reply) != 0) return (uint64_t)-1;
+    return (reply.result >= 0) ? (uint64_t)reply.result : (uint64_t)-1;
 }
 
 static uint64_t sys_win_destroy(uint64_t window_id, uint64_t unused1, uint64_t unused2,
                                 uint64_t unused3, uint64_t unused4) {
     (void)unused1; (void)unused2; (void)unused3; (void)unused4;
     if (!current_process) return (uint64_t)-EFAULT;
-    return (gui_window_destroy(current_process->pid, (int)window_id) == 0) ? 0 : (uint64_t)-1;
+
+    wm_request_t req; memset(&req, 0, sizeof(req));
+    req.opcode = WM_OP_WIN_DESTROY;
+    req.a[0] = (int32_t)window_id;
+
+    wm_reply_t reply;
+    if (wm_call(&req, &reply) != 0) return (uint64_t)-1;
+    return (reply.result == 0) ? 0 : (uint64_t)-1;
 }
 
 static uint64_t sys_win_fill(uint64_t window_id, uint64_t color, uint64_t unused2,
                              uint64_t unused3, uint64_t unused4) {
     (void)unused2; (void)unused3; (void)unused4;
     if (!current_process) return (uint64_t)-EFAULT;
-    return (gui_window_fill(current_process->pid, (int)window_id, (uint32_t)color) == 0) ? 0 : (uint64_t)-1;
+
+    wm_request_t req; memset(&req, 0, sizeof(req));
+    req.opcode = WM_OP_WIN_FILL;
+    req.a[0] = (int32_t)window_id;
+    req.a[1] = (int32_t)color;
+
+    wm_reply_t reply;
+    if (wm_call(&req, &reply) != 0) return (uint64_t)-1;
+    return (reply.result == 0) ? 0 : (uint64_t)-1;
 }
 
 // w/h упакованы в один аргумент ((w<<32)|h) — у syscall'а только 5
@@ -1450,9 +1502,17 @@ static uint64_t sys_win_draw_rect(uint64_t window_id, uint64_t x, uint64_t y,
     if (!current_process) return (uint64_t)-EFAULT;
     uint32_t w = (uint32_t)(wh_packed >> 32);
     uint32_t h = (uint32_t)(wh_packed & 0xFFFFFFFFu);
-    int res = gui_window_draw_rect(current_process->pid, (int)window_id,
-                                   (int)x, (int)y, w, h, (uint32_t)color);
-    return (res == 0) ? 0 : (uint64_t)-1;
+
+    wm_request_t req; memset(&req, 0, sizeof(req));
+    req.opcode = WM_OP_WIN_DRAW_RECT;
+    req.a[0] = (int32_t)window_id;
+    req.a[1] = (int32_t)x; req.a[2] = (int32_t)y;
+    req.a[3] = (int32_t)w; req.a[4] = (int32_t)h;
+    req.a[5] = (int32_t)color;
+
+    wm_reply_t reply;
+    if (wm_call(&req, &reply) != 0) return (uint64_t)-1;
+    return (reply.result == 0) ? 0 : (uint64_t)-1;
 }
 
 static uint64_t sys_win_draw_text(uint64_t window_id, uint64_t x, uint64_t y,
@@ -1461,18 +1521,20 @@ static uint64_t sys_win_draw_text(uint64_t window_id, uint64_t x, uint64_t y,
     int64_t slen = validate_user_string(current_process->page_table, text_ptr, USER_STRING_MAX);
     if (slen < 0) return (uint64_t)-EFAULT;
 
-    int res = gui_window_draw_text(current_process->pid, (int)window_id,
-                                   (int)x, (int)y, (const char *)text_ptr, (uint32_t)color);
-    return (res == 0) ? 0 : (uint64_t)-1;
-}
+    wm_request_t req; memset(&req, 0, sizeof(req));
+    req.opcode = WM_OP_WIN_DRAW_TEXT;
+    req.a[0] = (int32_t)window_id;
+    req.a[1] = (int32_t)x; req.a[2] = (int32_t)y;
+    req.a[3] = (int32_t)color;
+    int n = 0;
+    const char *src = (const char *)text_ptr;
+    while (src[n] && n < (int)sizeof(req.str) - 1) { req.str[n] = src[n]; n++; }
+    req.str[n] = '\0';
 
-// Разделяемая с userspace раскладка события — см. struct lufira_gui_event
-// в libc/include/lufira/syscall.h (поля и порядок обязаны совпадать 1:1).
-typedef struct __attribute__((packed)) {
-    int32_t type;
-    int32_t x, y;
-    int32_t key_or_button;
-} lufira_gui_event_t;
+    wm_reply_t reply;
+    if (wm_call(&req, &reply) != 0) return (uint64_t)-1;
+    return (reply.result == 0) ? 0 : (uint64_t)-1;
+}
 
 static uint64_t sys_win_poll_event(uint64_t window_id, uint64_t event_buf_ptr,
                                    uint64_t unused2, uint64_t unused3, uint64_t unused4) {
@@ -1482,14 +1544,19 @@ static uint64_t sys_win_poll_event(uint64_t window_id, uint64_t event_buf_ptr,
                              sizeof(lufira_gui_event_t), 1))
         return (uint64_t)-EFAULT;
 
-    gui_event_t ev;
-    if (!gui_window_poll_event(current_process->pid, (int)window_id, &ev)) return 0;
+    wm_request_t req; memset(&req, 0, sizeof(req));
+    req.opcode = WM_OP_WIN_POLL_EVENT;
+    req.a[0] = (int32_t)window_id;
+
+    wm_reply_t reply;
+    if (wm_call(&req, &reply) != 0) return 0;
+    if (reply.result != 1) return 0;
 
     lufira_gui_event_t *out = (lufira_gui_event_t *)event_buf_ptr;
-    out->type = ev.type;
-    out->x = ev.x;
-    out->y = ev.y;
-    out->key_or_button = ev.key_or_button;
+    out->type = reply.ev_type;
+    out->x = reply.ev_x;
+    out->y = reply.ev_y;
+    out->key_or_button = reply.ev_key;
     return 1;
 }
 
@@ -1497,8 +1564,112 @@ static uint64_t sys_win_move(uint64_t window_id, uint64_t x, uint64_t y,
                              uint64_t unused3, uint64_t unused4) {
     (void)unused3; (void)unused4;
     if (!current_process) return (uint64_t)-EFAULT;
-    return (gui_window_move(current_process->pid, (int)window_id, (int)x, (int)y) == 0)
-           ? 0 : (uint64_t)-1;
+
+    wm_request_t req; memset(&req, 0, sizeof(req));
+    req.opcode = WM_OP_WIN_MOVE;
+    req.a[0] = (int32_t)window_id;
+    req.a[1] = (int32_t)x; req.a[2] = (int32_t)y;
+
+    wm_reply_t reply;
+    if (wm_call(&req, &reply) != 0) return (uint64_t)-1;
+    return (reply.result == 0) ? 0 : (uint64_t)-1;
+}
+
+// SYS_IPC_SEND (57): dest_pid, msg_ptr, len — см. syscall.h/mailbox.h.
+static uint64_t sys_ipc_send(uint64_t dest_pid, uint64_t msg_ptr, uint64_t len,
+                             uint64_t unused3, uint64_t unused4) {
+    (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (len > MAX_IPC_MSG_PAYLOAD) return (uint64_t)-EINVAL;
+    if (len > 0 && !is_user_range_valid(current_process->page_table, msg_ptr, len, 0))
+        return (uint64_t)-EFAULT;
+
+    int res = mailbox_send((uint32_t)dest_pid, current_process->pid, (const void *)msg_ptr, (uint32_t)len);
+    if (res == 0) return 0;
+    return (res == -2) ? (uint64_t)-EAGAIN : (uint64_t)-EINVAL;
+}
+
+// SYS_IPC_RECV (58): msg_out_ptr, blocking — см. syscall.h/mailbox.h.
+static uint64_t sys_ipc_recv(uint64_t msg_out_ptr, uint64_t blocking, uint64_t unused2,
+                             uint64_t unused3, uint64_t unused4) {
+    (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (!is_user_range_valid(current_process->page_table, msg_out_ptr, sizeof(lufira_ipc_msg_t), 1))
+        return (uint64_t)-EFAULT;
+
+    if (mailbox_recv((void *)msg_out_ptr, (int)blocking) != 0) return 0;
+    return 1;
+}
+
+// SYS_WM_REGISTER (59) — см. syscall.h.
+static uint64_t sys_wm_register(uint64_t unused0, uint64_t unused1, uint64_t unused2,
+                                uint64_t unused3, uint64_t unused4) {
+    (void)unused0; (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    return (process_wm_register(current_process->pid) == 0) ? 0 : (uint64_t)-1;
+}
+
+// SYS_FB_INFO (60) — см. syscall.h.
+static uint64_t sys_fb_info(uint64_t out_ptr, uint64_t unused1, uint64_t unused2,
+                            uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (!is_user_range_valid(current_process->page_table, out_ptr, sizeof(lufira_fb_info_t), 1))
+        return (uint64_t)-EFAULT;
+
+    lufira_fb_info_t *out = (lufira_fb_info_t *)out_ptr;
+    out->width = screen_width_pixels;
+    out->height = screen_height_pixels;
+    out->pixel_format = pixel_format;
+    return 0;
+}
+
+// SYS_FB_PRESENT (61) — см. syscall.h. Только зарегистрированный WM pid.
+static uint64_t sys_fb_present(uint64_t buf_ptr, uint64_t w, uint64_t h,
+                               uint64_t unused3, uint64_t unused4) {
+    (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (current_process->pid != process_get_wm_pid()) return (uint64_t)-EPERM;
+    if (w != screen_width_pixels || h != screen_height_pixels) return (uint64_t)-EINVAL;
+
+    size_t bytes = (size_t)w * (size_t)h * sizeof(uint32_t);
+    if (!is_user_range_valid(current_process->page_table, buf_ptr, bytes, 0))
+        return (uint64_t)-EFAULT;
+
+    gfx_blit(0, 0, (const uint32_t *)buf_ptr, (uint32_t)w, (uint32_t)h, (uint32_t)w);
+    return 0;
+}
+
+// SYS_FB_FONT (62) — см. syscall.h.
+static uint64_t sys_fb_font(uint64_t out_ptr, uint64_t max_bytes, uint64_t unused2,
+                            uint64_t unused3, uint64_t unused4) {
+    (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (max_bytes > 0 && !is_user_range_valid(current_process->page_table, out_ptr, max_bytes, 1))
+        return (uint64_t)-EFAULT;
+
+    console_get_font_data((void *)out_ptr, (uint32_t)max_bytes);
+    return (uint64_t)console_get_font_size();
+}
+
+// SYS_CONSOLE_INJECT (63) — см. syscall.h. Только зарегистрированный WM pid.
+static uint64_t sys_console_inject(uint64_t byte, uint64_t unused1, uint64_t unused2,
+                                   uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (current_process->pid != process_get_wm_pid()) return (uint64_t)-EPERM;
+    console_input_push((uint8_t)byte);
+    return 0;
+}
+
+// SYS_CONSOLE_REDRAW (64) — см. syscall.h. Только зарегистрированный WM pid.
+static uint64_t sys_console_redraw(uint64_t unused0, uint64_t unused1, uint64_t unused2,
+                                   uint64_t unused3, uint64_t unused4) {
+    (void)unused0; (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (current_process->pid != process_get_wm_pid()) return (uint64_t)-EPERM;
+    console_redraw_from_history();
+    return 0;
 }
 
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
@@ -1560,6 +1731,14 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_WIN_DRAW_TEXT] = sys_win_draw_text,
     [SYS_WIN_POLL_EVENT] = sys_win_poll_event,
     [SYS_WIN_MOVE] = sys_win_move,
+    [SYS_IPC_SEND] = sys_ipc_send,
+    [SYS_IPC_RECV] = sys_ipc_recv,
+    [SYS_WM_REGISTER] = sys_wm_register,
+    [SYS_FB_INFO] = sys_fb_info,
+    [SYS_FB_PRESENT] = sys_fb_present,
+    [SYS_FB_FONT] = sys_fb_font,
+    [SYS_CONSOLE_INJECT] = sys_console_inject,
+    [SYS_CONSOLE_REDRAW] = sys_console_redraw,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========

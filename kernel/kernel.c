@@ -6,7 +6,6 @@
 #include "system/mm/paging.h"
 #include "system/mm/heap.h"
 #include "system/mm/shm.h"
-#include "system/gui/gui.h"
 #include "drivers/pci/pci.h"
 #include "drivers/keyboard/keyboard.h"
 #include "drivers/mouse/mouse.h"
@@ -233,7 +232,10 @@ void _start(BootInfo* bi) {
     // Heap теперь статический - инициализируем сразу
     heap_init();  // <-- ВСЯ память выделяется здесь
     shm_init();   // v0.8-мост, пункт 4: реестр MAP_SHARED областей (shm.c)
-    gui_init();   // v0.8 (GUI+WM): таблица окон (gui.c)
+    // v0.8 (GUI+WM), этап 3: отдельной gui_init() больше нет — таблица окон
+    // переехала в userspace WM-процесс (lufira-packages/src/apps/wm.c),
+    // ядру тут нечего инициализировать (g_wm_pid/mailbox уже по умолчанию
+    // 0/пустой, см. process.c).
 
     // Бутлоадер грузит в RAM ВЕСЬ диск одним куском с LBA 0 (см. подробный
     // комментарий у LUFIRAFS_ESP_SIZE) — первые LUFIRAFS_ESP_SIZE байт это
