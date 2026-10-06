@@ -1415,6 +1415,21 @@ int process_kill(uint32_t pid)
     return process_signal(pid, SIGKILL);
 }
 
+// Ищет process_t по pid в process_list. NULL, если не найден (process_list
+// пуст или список циклический без совпадений). Вынесено отдельно — нужно
+// как самому process_set_foreground(), так и его обходу вверх по ppid.
+static process_t* process_find_by_pid(uint32_t pid)
+{
+    if (!process_list) return NULL;
+    process_t *p = process_list;
+    process_t *start = p;
+    do {
+        if (p->pid == pid) return p;
+        p = p->next;
+    } while (p && p != start);
+    return NULL;
+}
+
 int process_set_foreground(uint32_t caller_pid, uint32_t target_pid)
 {
     if (target_pid == 0) {
@@ -1422,19 +1437,34 @@ int process_set_foreground(uint32_t caller_pid, uint32_t target_pid)
         return 0;
     }
 
-    if (!process_list) return -1;
-    process_t *p = process_list;
-    process_t *start = p;
-    do {
-        if (p->pid == target_pid) {
-            if (p->ppid != caller_pid) return -1;
+    process_t *target = process_find_by_pid(target_pid);
+    if (!target) return -1;
+
+    // См. комментарий у объявления в process.h — поднимаемся по ppid от
+    // target вверх, а не сравниваем только p->ppid == caller_pid напрямую,
+    // чтобы caller мог назначить foreground любому своему потомку, не
+    // только прямому ребёнку. depth-ограничение — чистая защита от
+    // (в норме невозможного) цикла в ppid-цепочке, не рассчитываем на
+    // реальную глубину дерева процессов.
+    uint32_t walk_pid = target->ppid;
+    int depth = 0;
+    while (walk_pid != 0 && depth < MAX_PROCESSES) {
+        if (walk_pid == caller_pid) {
             foreground_pid = target_pid;
             return 0;
         }
-        p = p->next;
-    } while (p && p != start);
+        process_t *parent = process_find_by_pid(walk_pid);
+        if (!parent) break;
+        walk_pid = parent->ppid;
+        depth++;
+    }
 
     return -1;
+}
+
+uint32_t process_get_foreground(void)
+{
+    return foreground_pid;
 }
 
 // Раскладка кадра регистров, который syscall_entry.S сохраняет на

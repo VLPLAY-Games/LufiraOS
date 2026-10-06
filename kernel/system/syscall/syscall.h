@@ -177,6 +177,15 @@
 // Возвращает 0.
 #define SYS_ALARM 48
 
+// SYS_GET_FOREGROUND (49): без аргументов, возвращает текущий foreground_pid
+// (0, если не выставлен). v0.8-мост, пункт 7 — спутник к
+// SYS_SET_FOREGROUND(31), который сам раньше не давал userspace способа
+// ПРОЧИТАТЬ значение, только выставить/снять. См. также генерализацию
+// самого process_set_foreground() в process.h/process.c (пункт 7 этого же
+// моста): владение теперь проверяется по всей цепочке потомков, не только
+// по прямому ребёнку.
+#define SYS_GET_FOREGROUND 49
+
 // Флаги для sys_open
 #define O_RDONLY    0
 #define O_WRONLY    1

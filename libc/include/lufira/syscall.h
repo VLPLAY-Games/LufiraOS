@@ -65,6 +65,7 @@
 #define SYS_SIGACTION 46
 #define SYS_SIGRETURN 47
 #define SYS_ALARM 48
+#define SYS_GET_FOREGROUND 49
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -274,10 +275,18 @@ static inline long sys_pslist(struct lufira_ps_entry *out, unsigned long max_cou
 }
 
 // pid == 0 снимает foreground (Ctrl+C больше никого не целит) — v0.7 план,
-// этап 5, под-этап 6. pid должен быть СОБСТВЕННЫМ ребёнком вызывающего
-// (ядро проверяет ppid, см. process_set_foreground()).
+// этап 5, под-этап 6. pid должен быть ПОТОМКОМ вызывающего (ядро
+// проверяет это по всей цепочке ppid до корня, не только прямое родство —
+// см. process_set_foreground(), генерализация v0.8-мост, пункт 7).
 static inline long sys_set_foreground(long pid) {
     return __syscall5(SYS_SET_FOREGROUND, pid, 0, 0, 0, 0);
+}
+
+// Текущий foreground_pid (0 — не выставлен) — v0.8-мост, пункт 7, спутник
+// к sys_set_foreground() выше, который сам раньше не давал способа
+// прочитать значение.
+static inline long sys_get_foreground(void) {
+    return __syscall5(SYS_GET_FOREGROUND, 0, 0, 0, 0, 0);
 }
 
 // 0 при успехе (меняет uid/gid вызывающего процесса), иначе -errno

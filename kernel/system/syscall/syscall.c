@@ -581,7 +581,23 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
     // которому можно было бы задать такой относительный вопрос) — строим
     // родительский путь прямо из cwd_path и уходим в обычную lufirafs-ветку
     // ниже с ним вместо исходного относительного path.
-    if (current_process->cwd_inode == LUFIRAFS_FAT_MOUNT_CWD_INODE) {
+    //
+    // НАЙДЕННЫЙ БАГ (пользователь: "после монтирования не могу переходить
+    // в директории, ошибка что папка не найдена"): эта ветка раньше не
+    // проверяла path[0] и перехватывала ЛЮБОЙ chdir, пока cwd стоит внутри
+    // смонтированного FAT — включая абсолютные пути, вообще не имеющие
+    // отношения к "выйти из флешки через '..'" (например, "cd /mnt2" на
+    // совершенно обычную lufirafs-директорию, пока cwd ещё "/mnt"), и
+    // безусловно отвечала ENOENT на всё, кроме ".."/"."  Абсолютные пути
+    // (path[0]=='/') сюда вообще попадать не должны: сам
+    // lufirafs_lookup() ниже уже умеет резолвить их от корня независимо
+    // от текущего cwd_inode (см. его же "cur = path[0]=='/' ? root :
+    // start_inode"), так что для них достаточно просто ПРОВАЛИТЬСЯ в
+    // обычную ветку ниже — нужна только тут эта специальная обработка
+    // ДЛЯ ОТНОСИТЕЛЬНЫХ "."/".." (другие относительные пути из плоского
+    // FAT-монтирования и так не имеют смысла — там нет настоящих
+    // вложенных директорий, см. fat_mount.h).
+    if (current_process->cwd_inode == LUFIRAFS_FAT_MOUNT_CWD_INODE && path[0] != '/') {
         if (strcmp(path, ".") == 0) return 0;
 
         if (strcmp(path, "..") != 0) return (uint64_t)-ENOENT;
@@ -997,6 +1013,55 @@ static uint64_t sys_su(uint64_t username_ptr, uint64_t password_ptr, uint64_t un
     return 0;
 }
 
+// Создаёт path и все отсутствующие родительские директории в lufirafs
+// (аналог "mkdir -p"), не трогая уже существующие компоненты. v0.8-мост,
+// пункт 4 (пользователь: "если не создать папку перед монтированием, оно
+// смонтируется, но лучше сразу авто-mkdir по полному пути") — mount
+// раньше регистрировал ТОЛЬКО строковый префикс в fat_mount.c, оставляя
+// саму точку монтирования несуществующей как lufirafs-директория; cd/ls
+// на неё потом либо падали в ENOENT (если путь не абсолютный — см. фикс
+// sys_chdir() чуть выше), либо требовали отдельного ручного mkdir уже
+// ПОСЛЕ mount. Молча не настаивает на успехе (нет диагностики наружу) —
+// это удобство, а не обязательное условие монтирования: сам mount всё
+// равно продолжит работать через fat_mount.c чисто по строковому
+// префиксу, даже если здесь что-то не задалось (например, не нашлось
+// свободных inode).
+static void lufirafs_mkdir_p(const char *path) {
+    if (!path || path[0] != '/') return;
+
+    uint32_t cur = lufirafs.sb.root_inode;
+    uint32_t uid = current_process ? current_process->uid : 0;
+    uint32_t gid = current_process ? current_process->gid : 0;
+    int i = 1; // пропускаем ведущий '/'
+    char component[LUFIRAFS_MAX_NAME + 1];
+    int created_any = 0;
+
+    while (path[i]) {
+        int start = i;
+        while (path[i] && path[i] != '/') i++;
+        int len = i - start;
+        if (len > 0 && len <= LUFIRAFS_MAX_NAME) {
+            memcpy(component, path + start, (size_t)len);
+            component[len] = '\0';
+
+            uint32_t next;
+            if (lufirafs_lookup(&lufirafs, cur, component, &next) == 0) {
+                cur = next;
+            } else {
+                uint32_t new_ino;
+                if (lufirafs_create(&lufirafs, cur, component, LUFIRAFS_MODE_DIR,
+                                     uid, gid, LUFIRAFS_DEFAULT_DIR_PERM, &new_ino) != 0)
+                    return; // не настаиваем - mount попробует сам по строковому префиксу
+                cur = new_ino;
+                created_any = 1;
+            }
+        }
+        while (path[i] == '/') i++;
+    }
+
+    if (created_any) lufirafs_sync(&lufirafs);
+}
+
 // SYS_MOUNT (33) / SYS_UNMOUNT (34): см. комментарии в syscall.h. Просто
 // тонкие обёртки — вся логика (включая проверку usb-устройства, чтение
 // образа, real-time синк после записи) уже в vfs_fat_mount()/
@@ -1009,6 +1074,8 @@ static uint64_t sys_mount(uint64_t prefix_ptr, uint64_t usb_index, uint64_t unus
 
     int64_t slen = validate_user_string(current_process->page_table, prefix_ptr, USER_STRING_MAX);
     if (slen <= 0) return (uint64_t)-EFAULT;
+
+    lufirafs_mkdir_p((const char *)prefix_ptr);
 
     int res = vfs_fat_mount((int)usb_index, (const char *)prefix_ptr);
     return (uint64_t)(int64_t)res;
@@ -1328,6 +1395,15 @@ static uint64_t sys_alarm(uint64_t milliseconds, uint64_t unused1, uint64_t unus
     return 0;
 }
 
+// SYS_GET_FOREGROUND (49) — см. комментарий в syscall.h. Нет аргументов,
+// нет проверки доступа (просто чтение) — симметрично тому, что сам
+// foreground_pid и так всегда был виден изнутри ядра всем.
+static uint64_t sys_get_foreground(uint64_t unused0, uint64_t unused1, uint64_t unused2,
+                                   uint64_t unused3, uint64_t unused4) {
+    (void)unused0; (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    return (uint64_t)process_get_foreground();
+}
+
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
 
 static syscall_fn_t syscall_table[256] = {
@@ -1379,6 +1455,7 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_POLL] = sys_poll,
     [SYS_SIGACTION] = sys_sigaction,
     [SYS_ALARM] = sys_alarm,
+    [SYS_GET_FOREGROUND] = sys_get_foreground,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
