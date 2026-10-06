@@ -79,8 +79,8 @@
 #define SYS_FB_INFO 60
 #define SYS_FB_PRESENT 61
 #define SYS_FB_FONT 62
-#define SYS_CONSOLE_INJECT 63
-#define SYS_CONSOLE_REDRAW 64
+// 63/64 — удалены, этап 4 (см. kernel-side syscall.h)
+#define SYS_DUP2 65
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -583,16 +583,12 @@ static inline long sys_fb_font(void *out, unsigned long max_bytes) {
     return __syscall5(SYS_FB_FONT, (long)out, (long)max_bytes, 0, 0, 0);
 }
 
-// Доступны только зарегистрированному sys_wm_register() процессу — см.
-// SYS_CONSOLE_INJECT/SYS_CONSOLE_REDRAW в kernel/system/syscall/syscall.h.
-// WM зовёт sys_console_inject() для каждой клавиши, пока у него открыто 0
-// окон (иначе шелл потерял бы ввод насовсем сразу после старта WM — не
-// успеть набрать команду для запуска ПЕРВОГО GUI-приложения), и
-// sys_console_redraw() один раз, когда закрывается ПОСЛЕДНЕЕ окно.
-static inline long sys_console_inject(int byte) {
-    return __syscall5(SYS_CONSOLE_INJECT, byte, 0, 0, 0, 0);
-}
-
-static inline long sys_console_redraw(void) {
-    return __syscall5(SYS_CONSOLE_REDRAW, 0, 0, 0, 0, 0);
+// Дублирует oldfd в newfd (закрывая newfd первым, если был занят) — тонкая
+// обёртка над vfs_dup2() (fs/vfs/vfs.h), тем же приёмом, которым ядро само
+// дублирует fd-таблицу при fork(). Нужен терминальному GUI-приложению
+// (lufira-packages/apps/terminal.c) — подменить fd 0/1/2 дочернего
+// /bin/shell.elf на концы pipe() перед exec()'ом. Возвращает newfd при
+// успехе (как и настоящий POSIX dup2()), иначе -1.
+static inline long sys_dup2(int oldfd, int newfd) {
+    return __syscall5(SYS_DUP2, oldfd, newfd, 0, 0, 0);
 }

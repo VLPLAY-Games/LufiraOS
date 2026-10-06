@@ -114,7 +114,15 @@ void timer_irq_handler(interrupt_frame_t *frame) {
         } while (p && p != start);
     }
 
-    update_cursor();
+    // НАЙДЕННЫЙ БАГ (живое тестирование: после запуска WM текстовый
+    // курсор-подчёркивание шелла всё равно продолжал мигать поверх
+    // GUI-кадров) — update_cursor() безусловно рисует/стирает прямо в
+    // общий back buffer (console.c, тот же, что и WM через SYS_FB_PRESENT)
+    // по current_x/current_y шелла, independent от того, кто сейчас
+    // реально владеет экраном. Пока зарегистрирован WM — экран его, а не
+    // текстовой консоли (см. process_get_wm_pid(), process.h), так что
+    // мигать тут нечему.
+    if (!process_get_wm_pid()) update_cursor();
     // v0.8 (GUI+WM), этап 3: композитинг переехал в userspace WM-процесс
     // (lufira-packages/src/apps/wm.c) — он сам пишет в back buffer через
     // SYS_FB_PRESENT (syscall.c), больше не отсюда. console_tick_present()

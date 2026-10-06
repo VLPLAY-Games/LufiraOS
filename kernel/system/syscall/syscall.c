@@ -1652,24 +1652,13 @@ static uint64_t sys_fb_font(uint64_t out_ptr, uint64_t max_bytes, uint64_t unuse
     return (uint64_t)console_get_font_size();
 }
 
-// SYS_CONSOLE_INJECT (63) — см. syscall.h. Только зарегистрированный WM pid.
-static uint64_t sys_console_inject(uint64_t byte, uint64_t unused1, uint64_t unused2,
-                                   uint64_t unused3, uint64_t unused4) {
-    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+// SYS_DUP2 (65) — см. syscall.h.
+static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t unused2,
+                         uint64_t unused3, uint64_t unused4) {
+    (void)unused2; (void)unused3; (void)unused4;
     if (!current_process) return (uint64_t)-EFAULT;
-    if (current_process->pid != process_get_wm_pid()) return (uint64_t)-EPERM;
-    console_input_push((uint8_t)byte);
-    return 0;
-}
-
-// SYS_CONSOLE_REDRAW (64) — см. syscall.h. Только зарегистрированный WM pid.
-static uint64_t sys_console_redraw(uint64_t unused0, uint64_t unused1, uint64_t unused2,
-                                   uint64_t unused3, uint64_t unused4) {
-    (void)unused0; (void)unused1; (void)unused2; (void)unused3; (void)unused4;
-    if (!current_process) return (uint64_t)-EFAULT;
-    if (current_process->pid != process_get_wm_pid()) return (uint64_t)-EPERM;
-    console_redraw_from_history();
-    return 0;
+    int res = vfs_dup2((int)oldfd, (int)newfd);
+    return (res >= 0) ? (uint64_t)res : (uint64_t)-1;
 }
 
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
@@ -1737,8 +1726,7 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_FB_INFO] = sys_fb_info,
     [SYS_FB_PRESENT] = sys_fb_present,
     [SYS_FB_FONT] = sys_fb_font,
-    [SYS_CONSOLE_INJECT] = sys_console_inject,
-    [SYS_CONSOLE_REDRAW] = sys_console_redraw,
+    [SYS_DUP2] = sys_dup2,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========

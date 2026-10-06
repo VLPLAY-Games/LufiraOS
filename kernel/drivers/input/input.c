@@ -24,7 +24,7 @@ static volatile int console_input_count = 0;
 // ядре тоже не поддерживает нескольких блокированных читателей разом.
 static process_t *console_input_waiter = NULL;
 
-void console_input_push(uint8_t byte) {
+static void console_input_push(uint8_t byte) {
     if (console_input_count >= CONSOLE_INPUT_BUF_SIZE) return; // переполнение — молча роняем, как и реальный tty
     console_input_buf[console_input_head] = byte;
     console_input_head = (console_input_head + 1) % CONSOLE_INPUT_BUF_SIZE;
@@ -188,8 +188,16 @@ void input_mouse_event(int dx, int dy, uint8_t buttons) {
     mouse_x += dx;
     mouse_y += dy;
 
+    // НАЙДЕННЫЙ БАГ (живое тестирование: резкое движение мыши вправо/вниз
+    // "теряло" курсор за пределами экрана — zажат был только нижний край
+    // (0), верхнего/правого предела не было вовсе, raw dx/dy с PS/2/USB
+    // ничем не ограничены сверху). Зажимаем по factual разрешению экрана
+    // (screen_width_pixels/screen_height_pixels, console.h) — на -1, чтобы
+    // курсор не повиснул вплотную за последним валидным пикселем.
     if (mouse_x < 0) mouse_x = 0;
     if (mouse_y < 0) mouse_y = 0;
+    if (screen_width_pixels && mouse_x >= (int)screen_width_pixels) mouse_x = (int)screen_width_pixels - 1;
+    if (screen_height_pixels && mouse_y >= (int)screen_height_pixels) mouse_y = (int)screen_height_pixels - 1;
 
     mouse_buttons = buttons;
 
