@@ -26,6 +26,7 @@
 #include <time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netdb.h>
 
 #define STUB_CHUNK 1460
 
@@ -79,11 +80,37 @@ int ip_str_to_addr(const char *s, uint32_t *out_ip) {
     return 0;
 }
 
-// В тестах всегда указывается числовой адрес (127.0.0.1), так что до DNS
-// дело не доходит; заглушка существует только для линковки.
+/*
+ * Резолвер хоста. По умолчанию ОТКАЗЫВАЕТ — ровно это и проверяет
+ * run_url_checks() в test_net.c (успешный разбор URL виден по тому, что
+ * дело дошло до HTTP_FETCH_EDNS, а не до EBADURL), и localhost-тестам
+ * DNS не нужен вовсе: там адрес задан числом.
+ *
+ * Если выставлена LUFIRA_REAL_DNS=1 — используется настоящий
+ * getaddrinfo() хоста. Это нужно, чтобы гонять tls.c против НАСТОЯЩЕГО
+ * сервера в интернете (raw.githubusercontent.com): без разрешения имени
+ * туда не попасть, а подставить IP вместо имени нельзя — тогда в SNI
+ * уедет IP, и Fastly отдаст либо чужой сертификат, либо отказ (см.
+ * расширение server_name в tls_build_client_hello()).
+ */
 int dns_resolve(const char *hostname, uint32_t *out_ip) {
-    (void)hostname; (void)out_ip;
-    return -1;
+    const char *real = getenv("LUFIRA_REAL_DNS");
+    if (!real || real[0] != '1') return -1;
+
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET; // этот стек знает только IPv4, см. ip.c
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(hostname, NULL, &hints, &res) != 0 || !res) return -1;
+
+    uint32_t net_order = ((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr;
+    const uint8_t *b = (const uint8_t *)&net_order;
+    // Внутри этого стека адреса ходят в хостовом порядке (см. net.h), а
+    // getaddrinfo() отдаёт сетевой — разбираем побайтово, без htonl.
+    *out_ip = ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
+              ((uint32_t)b[2] << 8) | (uint32_t)b[3];
+    freeaddrinfo(res);
+    return 0;
 }
 
 int tcp_connect(uint32_t remote_ip, uint16_t remote_port) {
@@ -135,7 +162,19 @@ int tcp_recv_poll(uint8_t **out_ptr, uint16_t *out_len) {
     }
     if (g_sock < 0) return 0;
 
-    ssize_t n = recv(g_sock, g_stage, sizeof(g_stage), 0);
+    // LUFIRA_RX_CHUNK позволяет зажать размер одного «сегмента» до
+    // сколь угодно мелкого — так проверяется, что пересборка записей и
+    // handshake-сообщений не зависит от того, по каким границам поток
+    // порезан (в ядре границы кусков диктует TCP и они произвольны).
+    size_t want = sizeof(g_stage);
+    {
+        const char *e = getenv("LUFIRA_RX_CHUNK");
+        if (e) {
+            long v = atol(e);
+            if (v > 0 && (size_t)v < want) want = (size_t)v;
+        }
+    }
+    ssize_t n = recv(g_sock, g_stage, want, 0);
     if (n > 0) {
         if (g_tamper_offset == -2) {
             const char *e = getenv("LUFIRA_TAMPER_OFFSET");
