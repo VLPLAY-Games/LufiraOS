@@ -473,6 +473,13 @@ static inline long sys_alarm(unsigned long milliseconds) {
 #define LUFIRA_GUI_EVENT_MOUSE_DOWN 2
 #define LUFIRA_GUI_EVENT_MOUSE_UP   3
 #define LUFIRA_GUI_EVENT_CLOSE      4
+// Окно изменило размер клиентской области (ресайз за рамку, кнопка
+// maximize/restore в титлбаре) — x/y тут это НОВЫЕ w/h клиентской области,
+// не координаты. Необязательно обрабатывать: примитивы sys_win_draw_*()
+// уже сами ограничены актуальным w/h окна, так что приложение, которое
+// это событие игнорирует, просто не использует новое место (но и не
+// падает и не рисует за пределами буфера).
+#define LUFIRA_GUI_EVENT_RESIZE     5
 
 // Раскладка полей ОБЯЗАНА совпадать 1:1 с lufira_gui_event_t в syscall.c
 // (ядро пишет в этот буфер напрямую по указателю, без пересборки полей).
