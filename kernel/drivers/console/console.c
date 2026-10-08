@@ -444,7 +444,25 @@ void initialize_console(BootInfo* bi) {
 void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
     if (x >= screen_width_pixels || y >= screen_height_pixels) return;
     framebuffer[y * pixels_per_scan_line + x] = color;
-    fb_dirty = 1; // см. "ДВОЙНАЯ БУФЕРИЗАЦИЯ" выше — до enable безобиден (gfx_present()/console_tick_present() сами no-op без неё)
+    // НАЙДЕННЫЙ БАГ (жалоба пользователя: экран визуально "зависает" на
+    // "LufiraOS Booting", хотя шелл под капотом реально работает и даже
+    // принимает ввод вслепую) — put_pixel() САМЫЙ частый путь отрисовки
+    // (им рисуется весь текст, put_char_graphic() ниже) и раньше просто
+    // напрямую выставлял fb_dirty=1, в обход mark_dirty_rect_raw(). После
+    // перехода "грязного" флага на прямоугольник (см. комментарий у
+    // dirty_x0 выше) это переcтало обновлять сами границы dirty_x0..y1 —
+    // первый же put_pixel() после console_enable_double_buffering()
+    // выставлял fb_dirty=1 при ВСЁ ЕЩЁ нулевом прямоугольнике (0,0,0,0),
+    // gfx_present() на ближайшем тике видел fb_dirty и честно "обрабатывал"
+    // его — но цикл по пустому прямоугольнику не копировал ни одного
+    // пикселя — и тут же сбрасывал fb_dirty обратно в 0. Экран навсегда
+    // оставался таким, каким был на момент enable (как раз "Booting..."),
+    // а дальнейший текст рисовался только в back buffer, никогда не
+    // попадая на реальный экран. console_mark_dirty_rect() ниже — тот же
+    // push, что и у gfx_blit()/gfx_fill_rect() (graphics2d.c), но на один
+    // пиксель — до console_enable_double_buffering() это так же безобидно
+    // (gfx_present()/console_tick_present() сами no-op без неё).
+    console_mark_dirty_rect((int)x, (int)y, 1, 1);
 }
 
 // Получение имени цвета
@@ -765,7 +783,7 @@ void clear_entire_screen(void) {
             framebuffer[y * pixels_per_scan_line + x] = current_bg_color;
         }
     }
-    fb_dirty = 1; // пишет framebuffer[] напрямую, в обход put_pixel()
+    console_mark_dirty(); // пишет framebuffer[] напрямую, в обход put_pixel() — весь экран, см. комментарий у put_pixel()
     current_x = 0;
     current_y = 0;
 
@@ -1373,7 +1391,7 @@ static void framebuffer_shift_up(uint32_t lines) {
             framebuffer[y * pixels_per_scan_line + x] = current_bg_color;
         }
     }
-    fb_dirty = 1; // пишет framebuffer[] напрямую, в обход put_pixel()
+    console_mark_dirty(); // пишет framebuffer[] напрямую, в обход put_pixel() — весь экран, см. комментарий у put_pixel()
 }
 
 static void framebuffer_shift_down(uint32_t lines) {
@@ -1399,7 +1417,7 @@ static void framebuffer_shift_down(uint32_t lines) {
             framebuffer[y * pixels_per_scan_line + x] = current_bg_color;
         }
     }
-    fb_dirty = 1; // пишет framebuffer[] напрямую, в обход put_pixel()
+    console_mark_dirty(); // пишет framebuffer[] напрямую, в обход put_pixel() — весь экран, см. комментарий у put_pixel()
 }
 
 
