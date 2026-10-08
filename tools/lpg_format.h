@@ -58,6 +58,17 @@ static inline int lpg_version_gte(lpg_version_t a, lpg_version_t b) {
     return a.patch >= b.patch;
 }
 
+// Возвращает 1, если a СТРОГО больше b — нужен dlpg upgrade (lufira-
+// packages/base/dlpg.c), чтобы отличить "в репозитории версия новее" от
+// "локально уже такая же или новее" (lpg_version_gte() одного тут
+// недостаточно: gte(remote,local) истинно и когда версии РАВНЫ, что не
+// должно считаться поводом перескачивать и переустанавливать пакет).
+static inline int lpg_version_gt(lpg_version_t a, lpg_version_t b) {
+    if (a.major != b.major) return a.major > b.major;
+    if (a.minor != b.minor) return a.minor > b.minor;
+    return a.patch > b.patch;
+}
+
 typedef struct __attribute__((packed)) {
     char magic[LPG_MAGIC_LEN];      // "LPG1", без завершающего NUL
     char name[LPG_NAME_MAX];        // NUL-terminated, паддинг нулями

@@ -42,6 +42,12 @@ typedef struct {
     uint32_t our_ip;
     uint32_t netmask;
     uint32_t gateway;
+    // Резолвер для dns_resolve() (dns.c) — нужен dlpg sync/upgrade, чтобы
+    // ходить по имени хоста (raw.githubusercontent.com), а не только по IP,
+    // как раньше умел только wget (см. его комментарий в net.c/shell/
+    // commands/net.c). Дефолт — встроенный DNS-форвардер QEMU SLIRP
+    // (10.0.2.3, тот же /24, что и наш статический IP/шлюз, см. net.c).
+    uint32_t dns_server;
 } net_config_t;
 
 // Инициализация: поднимает RTL8139 (см. rtl8139.c), при успехе — статический

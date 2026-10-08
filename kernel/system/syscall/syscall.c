@@ -21,6 +21,7 @@
 #include "system/ipc/mailbox.h"
 #include "system/ipc/wm_protocol.h"
 #include "drivers/input/input.h"
+#include "net/http_client.h"
 
 extern lufirafs_t lufirafs;
 
@@ -1681,6 +1682,46 @@ static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t unused2,
     return (res >= 0) ? (uint64_t)res : (uint64_t)-1;
 }
 
+// SYS_NET_FETCH (66) — см. syscall.h. Вся работа (URL/DNS/TCP/TLS/HTTP)
+// внутри http_fetch() (net/http_client.c); здесь — только проверка
+// пользовательских указателей и проброс результата. Отрицательные коды
+// HTTP_FETCH_E* уходят в userspace КАК ЕСТЬ: они численно совпадают с
+// NET_FETCH_E* из libc/include/lufira/syscall.h (см. комментарий об этом
+// в net/http_client.h), поэтому перекодировать их не нужно и нельзя.
+static uint64_t sys_net_fetch(uint64_t url_ptr, uint64_t out_buf_ptr, uint64_t out_cap,
+                              uint64_t status_ptr, uint64_t unused4) {
+    (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+
+    if (validate_user_string(current_process->page_table, url_ptr, USER_STRING_MAX) < 0)
+        return (uint64_t)-EFAULT;
+
+    if (out_cap > 0 &&
+        !is_user_range_valid(current_process->page_table, out_buf_ptr, out_cap, 1))
+        return (uint64_t)-EFAULT;
+
+    if (status_ptr != 0 &&
+        !is_user_range_valid(current_process->page_table, status_ptr, sizeof(int), 1))
+        return (uint64_t)-EFAULT;
+
+    // Пишем напрямую в буфер пользователя под его же CR3 — тот же приём,
+    // что у sys_readdir()/sys_statfs()/sys_pslist() выше. Здесь это
+    // безопасно ДАЖЕ при том, что http_fetch() внутри крутит длинный
+    // блокирующий цикл с pit_wait_ms(): вытеснение по таймеру срабатывает
+    // только когда прерванный код исполнялся в ring3 (frame->cs == 0x33,
+    // см. timer_irq_handler() в pit.c), то есть во время ядерного кода
+    // syscall'а CR3 поменяться не может. Побочная сторона того же факта:
+    // на всё время скачивания планировщик стоит — ровно как и у wget
+    // (shell/commands/net.c), это принятая модель этого сетевого стека.
+    int status = 0;
+    int n = http_fetch((const char *)url_ptr, (void *)out_buf_ptr,
+                       (unsigned long)out_cap, &status);
+
+    if (status_ptr != 0) *(int *)status_ptr = status;
+
+    return (uint64_t)(int64_t)n;
+}
+
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
 
 static syscall_fn_t syscall_table[256] = {
@@ -1747,6 +1788,7 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_FB_PRESENT] = sys_fb_present,
     [SYS_FB_FONT] = sys_fb_font,
     [SYS_DUP2] = sys_dup2,
+    [SYS_NET_FETCH] = sys_net_fetch,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========

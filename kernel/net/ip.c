@@ -4,6 +4,7 @@
 #include "arp.h"
 #include "icmp.h"
 #include "tcp.h"
+#include "udp.h"
 #include "lib/string.h"
 #include "system/devmode/devmode.h"
 
@@ -74,6 +75,10 @@ void ip_receive(const uint8_t *frame, uint16_t len) {
         icmp_receive(src_ip, payload, payload_len);
     } else if (hdr->protocol == IP_PROTO_TCP) {
         tcp_receive(src_ip, payload, payload_len);
+    } else if (hdr->protocol == IP_PROTO_UDP) {
+        // Пакетный менеджер (dlpg sync/upgrade): DNS-резолвер (dns.c) —
+        // первый и пока единственный потребитель UDP в этом стеке.
+        udp_receive(src_ip, payload, payload_len);
     }
-    // остальные протоколы молча отбрасываем (нет UDP в этой версии стека)
+    // остальные протоколы молча отбрасываем
 }

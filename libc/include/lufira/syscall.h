@@ -81,6 +81,7 @@
 #define SYS_FB_FONT 62
 // 63/64 — удалены, этап 4 (см. kernel-side syscall.h)
 #define SYS_DUP2 65
+#define SYS_NET_FETCH 66
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -618,4 +619,24 @@ static inline long sys_fb_font(void *out, unsigned long max_bytes) {
 // успехе (как и настоящий POSIX dup2()), иначе -1.
 static inline long sys_dup2(int oldfd, int newfd) {
     return __syscall5(SYS_DUP2, oldfd, newfd, 0, 0, 0);
+}
+
+// Отрицательные коды ошибок sys_net_fetch() ниже — см. подробное описание
+// у SYS_NET_FETCH (kernel/system/syscall/syscall.h) и http_fetch()
+// (kernel/net/http_client.h).
+#define NET_FETCH_EBADURL   (-1) // не распознан URL (нужна схема http:// или https://)
+#define NET_FETCH_EDNS      (-2) // не удалось резолвить хост (dns.c)
+#define NET_FETCH_ECONNECT  (-3) // TCP-соединение не установилось (tcp.c)
+#define NET_FETCH_ETLS      (-4) // TLS-рукопожатие не удалось (tls.c, только https://)
+#define NET_FETCH_EHTTP     (-5) // ответ сервера не распарсился как HTTP (битые заголовки/нет тела)
+#define NET_FETCH_ENOSPC    (-6) // тело ответа больше out_cap - ничего не скопировано
+#define NET_FETCH_ENODEV    (-7) // сетевая карта не найдена
+
+// Скачивает URL целиком (http:// или https://) в out_buf — см. подробности
+// архитектуры у SYS_NET_FETCH (kernel-side syscall.h). status_out может
+// быть NULL, если код HTTP-статуса не нужен вызывающему. Возвращает длину
+// тела (>=0, всегда <= out_cap) при успехе, иначе один из NET_FETCH_E*
+// выше.
+static inline long sys_net_fetch(const char *url, void *out_buf, unsigned long out_cap, int *status_out) {
+    return __syscall5(SYS_NET_FETCH, (long)url, (long)out_buf, (long)out_cap, (long)status_out, 0);
 }

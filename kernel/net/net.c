@@ -88,9 +88,10 @@ void mac_addr_to_str(const uint8_t mac[6], char *out) {
 
 // Дефолт под подсеть QEMU user-mode (SLIRP) — см. net.h/план.
 static net_config_t g_net_config = {
-    .our_ip  = (10u << 24) | (0u << 16) | (2u << 8) | 15u,  // 10.0.2.15
-    .netmask = (255u << 24) | (255u << 16) | (255u << 8) | 0u, // 255.255.255.0
-    .gateway = (10u << 24) | (0u << 16) | (2u << 8) | 2u,   // 10.0.2.2
+    .our_ip     = (10u << 24) | (0u << 16) | (2u << 8) | 15u,  // 10.0.2.15
+    .netmask    = (255u << 24) | (255u << 16) | (255u << 8) | 0u, // 255.255.255.0
+    .gateway    = (10u << 24) | (0u << 16) | (2u << 8) | 2u,   // 10.0.2.2
+    .dns_server = (10u << 24) | (0u << 16) | (2u << 8) | 3u,   // 10.0.2.3 (SLIRP DNS)
 };
 
 void net_init(void) {

@@ -50,6 +50,7 @@ $(shell mkdir -p $(BUILD_DIR) \
 	$(BUILD_DIR)/kernel/drivers/input \
 	$(BUILD_DIR)/kernel/drivers/net \
 	$(BUILD_DIR)/kernel/net \
+	$(BUILD_DIR)/kernel/net/crypto \
     $(BUILD_DIR)/kernel/shell \
 	$(BUILD_DIR)/kernel/shell/commands \
     $(BUILD_DIR)/kernel/system/cpu \
@@ -106,6 +107,16 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/net/ip.c \
 	$(KERNEL_DIR)/net/icmp.c \
 	$(KERNEL_DIR)/net/tcp.c \
+	$(KERNEL_DIR)/net/udp.c \
+	$(KERNEL_DIR)/net/dns.c \
+	$(KERNEL_DIR)/net/tls.c \
+	$(KERNEL_DIR)/net/http_client.c \
+	$(KERNEL_DIR)/net/crypto/sha256.c \
+	$(KERNEL_DIR)/net/crypto/hmac.c \
+	$(KERNEL_DIR)/net/crypto/aes_gcm.c \
+	$(KERNEL_DIR)/net/crypto/x25519.c \
+	$(KERNEL_DIR)/net/crypto/bignum.c \
+	$(KERNEL_DIR)/net/crypto/rsa_verify.c \
     $(KERNEL_DIR)/shell/shell.c \
     $(KERNEL_DIR)/shell/commands/system.c \
     $(KERNEL_DIR)/shell/commands/colors.c \

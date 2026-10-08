@@ -4,6 +4,7 @@
 
 #define IP_PROTO_ICMP 1u
 #define IP_PROTO_TCP  6u
+#define IP_PROTO_UDP  17u
 
 #define IP_HEADER_LEN 20
 
