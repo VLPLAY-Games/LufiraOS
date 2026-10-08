@@ -543,10 +543,11 @@ static inline long sys_ipc_send(long dest_pid, const void *msg, unsigned long le
     return __syscall5(SYS_IPC_SEND, dest_pid, (long)msg, (long)len, 0, 0);
 }
 
-// blocking: 1 — ждать, пока не придёт сообщение; 0 — вернуть 0 немедленно,
-// если почтовый ящик пуст. Возвращает 1, если сообщение получено.
-static inline long sys_ipc_recv(struct lufira_ipc_msg *out, int blocking) {
-    return __syscall5(SYS_IPC_RECV, (long)out, blocking, 0, 0, 0);
+// timeout_ms: <0 — ждать неограниченно; 0 — вернуть 0 немедленно, если
+// почтовый ящик пуст; >0 — ждать не больше стольки мс (см. SYS_IPC_RECV,
+// kernel/system/syscall/syscall.h). Возвращает 1, если сообщение получено.
+static inline long sys_ipc_recv(struct lufira_ipc_msg *out, int timeout_ms) {
+    return __syscall5(SYS_IPC_RECV, (long)out, timeout_ms, 0, 0, 0);
 }
 
 // Делает вызывающего ЕДИНСТВЕННЫМ оконным сервером системы — 0 при

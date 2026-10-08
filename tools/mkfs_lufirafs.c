@@ -323,6 +323,31 @@ static void cmd_put(const char *host_file, const char *dest_path, uint32_t perm)
     printf("mkfs_lufirafs: put %s -> %s (%ld bytes)\n", host_file, dest_path, fsize);
 }
 
+// ВРЕМЕННАЯ диагностика (найти, почему терминал/WM виснут) — читает файл
+// из региона и дампит его на stdout хоста, не трогая запущенный гостевой
+// QEMU вовсе (тот же приём, что put/mkdir — грузим регион, но здесь
+// только читаем, не пишем обратно). Снять вместе с остальной диагностикой.
+static void cmd_cat(const char *path) {
+    uint32_t parent, ino;
+    char name[LUFIRAFS_MAX_NAME + 1];
+    split_path(path, &parent, name);
+    if (lookup_in_dir(parent, name, &ino) != 0) {
+        fprintf(stderr, "mkfs_lufirafs: cat: not found: %s\n", path);
+        exit(1);
+    }
+    lufirafs_inode_t inode;
+    read_inode(ino, &inode);
+    uint32_t remaining = inode.size;
+    uint32_t nblocks = (inode.size + LUFIRAFS_BLOCK_SIZE - 1) / LUFIRAFS_BLOCK_SIZE;
+    for (uint32_t b = 0; b < nblocks; b++) {
+        uint32_t bn = inode_get_block(&inode, b, 0);
+        uint32_t chunk = remaining < LUFIRAFS_BLOCK_SIZE ? remaining : LUFIRAFS_BLOCK_SIZE;
+        if (bn) fwrite(block_ptr(bn), 1, chunk, stdout);
+        else { for (uint32_t i = 0; i < chunk; i++) fputc(0, stdout); }
+        remaining -= chunk;
+    }
+}
+
 static void load_region(const char *image_path, long offset, uint32_t size) {
     FILE *f = fopen(image_path, "r+b");
     if (!f) { fprintf(stderr, "mkfs_lufirafs: cannot open image %s\n", image_path); exit(1); }
@@ -400,6 +425,10 @@ int main(int argc, char **argv) {
         uint32_t perm = (argc >= 8) ? (uint32_t)strtoul(argv[7], NULL, 8) : LUFIRAFS_DEFAULT_FILE_PERM;
         cmd_put(argv[5], argv[6], perm);
         save_region(image_path, offset);
+    } else if (strcmp(cmd, "cat") == 0) {
+        if (argc < 6) { fprintf(stderr, "mkfs_lufirafs: cat needs </src/path>\n"); return 1; }
+        load_region(image_path, offset, size);
+        cmd_cat(argv[5]); // только читает — НЕ save_region()
     } else {
         fprintf(stderr, "mkfs_lufirafs: unknown command '%s'\n", cmd);
         return 1;

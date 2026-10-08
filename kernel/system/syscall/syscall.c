@@ -1436,7 +1436,7 @@ static int wm_call(const wm_request_t *req, wm_reply_t *reply) {
     if (mailbox_send(wm_pid, current_process->pid, req, sizeof(*req)) != 0) return -1;
 
     lufira_ipc_msg_t msg;
-    if (mailbox_recv(&msg, 1) != 0) return -1;
+    if (mailbox_recv(&msg, -1) != 0) return -1; // ждать ответа WM неограниченно
     if (msg.len != sizeof(wm_reply_t)) return -1;
     memcpy(reply, msg.payload, sizeof(wm_reply_t));
     return 0;
@@ -1590,14 +1590,14 @@ static uint64_t sys_ipc_send(uint64_t dest_pid, uint64_t msg_ptr, uint64_t len,
 }
 
 // SYS_IPC_RECV (58): msg_out_ptr, blocking — см. syscall.h/mailbox.h.
-static uint64_t sys_ipc_recv(uint64_t msg_out_ptr, uint64_t blocking, uint64_t unused2,
+static uint64_t sys_ipc_recv(uint64_t msg_out_ptr, uint64_t timeout_ms, uint64_t unused2,
                              uint64_t unused3, uint64_t unused4) {
     (void)unused2; (void)unused3; (void)unused4;
     if (!current_process) return (uint64_t)-EFAULT;
     if (!is_user_range_valid(current_process->page_table, msg_out_ptr, sizeof(lufira_ipc_msg_t), 1))
         return (uint64_t)-EFAULT;
 
-    if (mailbox_recv((void *)msg_out_ptr, (int)blocking) != 0) return 0;
+    if (mailbox_recv((void *)msg_out_ptr, (int)timeout_ms) != 0) return 0;
     return 1;
 }
 

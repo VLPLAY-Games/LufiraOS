@@ -53,7 +53,11 @@ int mailbox_send(uint32_t dest_pid, uint32_t sender_pid, const void *data, uint3
 
 // Забирает следующее сообщение СВОЕГО (current_process) почтового ящика
 // целиком (ipc_msg_t, тот же layout, что и userspace-зеркало
-// lufira_ipc_msg_t, libc/include/lufira/syscall.h) в out. blocking=1 —
-// уступать CPU (process_sleep()-подобный цикл), пока не придёт сообщение;
-// 0 — вернуть -1 немедленно, если ящик пуст. Возвращает 0 при успехе.
-int mailbox_recv(void *out, int blocking);
+// lufira_ipc_msg_t, libc/include/lufira/syscall.h) в out. timeout_ms < 0 —
+// ждать НЕОГРАНИЧЕННО (настоящая блокировка PROCESS_BLOCKED с явным
+// пробуждением из mailbox_send(), нулевая стоимость CPU, пока ничего не
+// приходит); 0 — вернуть -1 немедленно, если ящик пуст; >0 — ждать не
+// больше стольки мс (тот же приём опроса с шагом в один тик, что и у
+// SYS_POLL, syscall.h, — нужно самим проснуться по истечении таймаута,
+// не только по чужому mailbox_send()). Возвращает 0 при успехе, иначе -1.
+int mailbox_recv(void *out, int timeout_ms);

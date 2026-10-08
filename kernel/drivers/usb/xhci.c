@@ -160,8 +160,15 @@ static void *map_mmio(uint64_t phys, uint64_t size) {
 #define TRB_TRT_OUT     2
 #define TRB_TRT_IN      3
 
-#define TRB_COMPLETION_CODE_SHIFT 24
-#define TRB_COMPLETION_SUCCESS    1
+#define TRB_COMPLETION_CODE_SHIFT   24
+#define TRB_COMPLETION_SUCCESS      1
+// Short Packet — устройство вернуло МЕНЬШЕ байт, чем было запрошено в TRB.
+// Для interrupt IN HID-эндпоинтов это НОРМАЛЬНОЕ, ожидаемое завершение, а
+// не ошибка (см. xhci_service_hid_event() ниже) — именно так xHCI сообщает
+// "отчёт короче буфера", что типично для boot-протокольной мыши (report
+// обычно 3-4 байта), пока размер запроса в TRB завязан на 8 (под
+// клавиатуру, см. комментарий у hid_report_expected_len).
+#define TRB_COMPLETION_SHORT_PACKET 13
 
 /* ======================================================================== */
 /* TRB и кольца (Command Ring / Event Ring / Transfer Ring)                 */
@@ -596,8 +603,21 @@ static void xhci_service_hid_event(uint8_t slot_id, uint32_t status) {
     xhci_slot_t *slot = xhci_slot_for_id(slot_id);
     if (!slot || !slot->hid_ep_dci) return; // не HID-событие (например, MSD) — не наше дело
 
+    // НАЙДЕННЫЙ БАГ (репорт пользователя: мышь вообще не двигается, ни в
+    // QEMU-мониторе, ни живым курсором в GUI-окне — при этом клавиатура
+    // работает) — здесь принимался ТОЛЬКО TRB_COMPLETION_SUCCESS.
+    // hid_report_expected_len (ниже) захардкожен в 8 байт под boot-
+    // протокольную клавиатуру (её отчёт действительно всегда ровно 8
+    // байт) — но тот же размер транзакции запрашивался и у мыши, чей
+    // boot-отчёт (buttons+dX+dY) обычно 3-4 байта. xHCI в этом случае
+    // честно репортит Short Packet (устройство прислало меньше, чем было
+    // запрошено) — это ОЖИДАЕМОЕ завершение интеррапт-трансфера, не
+    // ошибка, но строгая проверка "== SUCCESS" отбрасывала КАЖДЫЙ отчёт
+    // мыши молча, так что usb_hid_mouse_report() не вызывался никогда,
+    // хотя эндпоинт исправно перевооружался (мышь выглядела как будто
+    // "зависла" — events просто никогда не доходили до input_mouse_event()).
     uint8_t cc = (uint8_t)((status >> TRB_COMPLETION_CODE_SHIFT) & 0xFFu);
-    if (cc == TRB_COMPLETION_SUCCESS) {
+    if (cc == TRB_COMPLETION_SUCCESS || cc == TRB_COMPLETION_SHORT_PACKET) {
         if (slot->hid_protocol == USB_HID_PROTOCOL_KEYBOARD) {
             usb_hid_keyboard_report((const uint8_t *)slot->hid_report_buf_virt);
         } else {
