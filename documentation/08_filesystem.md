@@ -75,7 +75,7 @@ uint32_t lba_offset = LUFIRAFS_ESP_SIZE / 512;
 lufirafs_init(&lufirafs, fs_image, fs_size, lba_offset);
 ```
 
-and mounts LufiraFS over the remaining bytes. `LUFIRAFS_ESP_SIZE` must be kept in sync between the kernel (`lufirafs_format.h`) and the `Makefile`'s image-build recipe — a mismatch means `mkfs_lufirafs` formats a different region than the one the kernel reads.
+and mounts LufiraFS over the remaining bytes. `LUFIRAFS_ESP_SIZE` must be kept in sync between the kernel (`lufirafs_format.h`) and the image-build recipe — a mismatch means `mkfs_lufirafs` formats a different region than the one the kernel reads. That recipe no longer lives in this repository's `Makefile` (see [`05_build_system.md`](05_build_system.md) — it now only builds `kernel.bin`/`BOOTX64.EFI`); disk-image assembly, including the `mkfs_lufirafs format`/`mkdir`/`put` calls, is in the sibling `LufiraOS-Builder` repository's `build.py`.
 
 ---
 
@@ -84,7 +84,7 @@ and mounts LufiraFS over the remaining bytes. `LUFIRAFS_ESP_SIZE` must be kept i
 The filesystem subsystem follows a layered architecture:
 
 **Userspace / Shell**
-Applications and shell commands use the VFS API for all file operations. Shell commands that need cwd-relative resolution (`ls`, `mkdir`, `rm`, `touch`, `cp`, `mv`, `run`, in `kernel/shell/commands/filesystem.c`) now do this through the VFS `_at()` functions (see [VFS `_at` Functions](#vfs-_at-functions)) rather than calling the LufiraFS driver directly, as they used to. `cd` is the one holdout — it still calls `lufirafs_lookup()` directly, since it only needs a raw LufiraFS inode number to store as the shell's `cwd_inode`, not a VFS `inode_t`/file descriptor.
+Applications use the syscall ABI for all file operations — there are no shell commands that talk to LufiraFS directly anymore (`kernel/shell/commands/filesystem.c`, which used to, is dead code; see [`14_shell_commands.md`](14_shell_commands.md)). Cwd-relative syscalls (`SYS_MKDIR`/`SYS_RMDIR`/`SYS_UNLINK`/…, used by the `lufira-packages` packages that implement `ls`/`mkdir`/`rm`/`touch`/`cp`/`mv`/etc.) go through the VFS `_at()` functions (see [VFS `_at` Functions](#vfs-_at-functions)) inside `syscall.c`, rather than calling the LufiraFS driver directly. `SYS_CHDIR` is the one holdout — it still calls `lufirafs_lookup()` directly, since it only needs a raw LufiraFS inode number to store as the calling process's `cwd_inode`, not a VFS `inode_t`/file descriptor.
 
 **VFS Layer**
 Provides a uniform interface for file operations. Dispatches calls to the underlying filesystem driver via function pointers. The original API (`vfs_open()`, `vfs_mkdir()`, etc.) always resolves from the LufiraFS root inode; the newer `_at()` variants resolve from a caller-supplied base inode instead — see [VFS `_at` Functions](#vfs-_at-functions), including a note on which syscalls resolve from where.
@@ -313,7 +313,7 @@ Most shell commands that need cwd-relative behaviour (`ls`, `mkdir`, `rm`, `touc
 | `mkdir` | `mkfs_lufirafs mkdir <image> <esp_size> <region_size> </path>` | Creates a directory, including any missing intermediate directories ("mkdir -p" style). |
 | `put` | `mkfs_lufirafs put <image> <esp_size> <region_size> <host_file> </dest/path>` | Copies a host file into the image, creating parent directories as needed. |
 
-The `Makefile`'s disk-image recipe uses these to create `/test`, `/system`, `/logs`, and `/readme.txt` when building `disk.img`, and `make debug` uses `put` to drop a `/system/devmode.flag` marker before launching QEMU (see [`04_logging.md`](04_logging.md)).
+These are invoked by the sibling `LufiraOS-Builder` repository's `build.py` (see [`05_build_system.md`](05_build_system.md)), not by anything in this repository's own `Makefile` anymore: its `build` step uses `mkdir`/`put` to stage `/etc/passwd`/`/etc/group` (from this repo's `tools/seed/`), `/bin/shell.elf`, and every other userspace `.lpg` package's files onto the LufiraFS region, and its `debug` step additionally uses `put` to drop a `/system/devmode.flag` marker before launching QEMU (see [`04_logging.md`](04_logging.md)).
 
 ---
 

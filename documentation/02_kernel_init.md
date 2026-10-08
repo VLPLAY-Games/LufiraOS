@@ -501,7 +501,7 @@ After all subsystems are initialised, the kernel enables interrupts and specific
 
 **Why IRQ2?** IRQ2 is the cascade line from the slave PIC; it must be enabled for slave IRQs (8–15) to work.
 
-A persistent flag (`cpu_mark_interrupts_active()`) is set right after this step — it records that interrupts have been enabled at least once this boot, and is what the shell's `status` command reports, since the live EFLAGS.IF bit is misleading when read from inside a synchronous IRQ-handler-driven shell command (see [`14_shell_commands.md`](14_shell_commands.md)).
+A persistent flag (`cpu_mark_interrupts_active()`) is set right after this step — it records that interrupts have been enabled at least once this boot, since the live EFLAGS.IF bit is misleading when read synchronously. It was originally read back by a kernel-native `status` command (`kernel/shell/commands/system.c`); that command is now dead code along with the rest of `kernel/shell/` (see [`14_shell_commands.md`](14_shell_commands.md)), and nothing in the current userspace reads the flag back, but the kernel still sets it.
 
 ---
 
@@ -529,7 +529,7 @@ A persistent flag (`cpu_mark_interrupts_active()`) is set right after this step 
 
 **Why after enabling interrupts?** Same reason as xHCI — `net_poll()` and the driver's own reset sequence need the PIT already ticking.
 
-**Result:** `net_poll()` is polled once per timer tick, alongside `usb_poll()`; `ifconfig`/`ping`/`wget` become usable.
+**Result:** `net_poll()` is polled once per timer tick, alongside `usb_poll()`. There is no interactive network shell command anymore (the old kernel-native `ifconfig`/`ping`/`wget` are dead code — see [`16_networking.md`](16_networking.md)); the stack's only present-day userspace consumer is `dlpg sync`/`dlpg upgrade` (package manager, `lufira-packages/base/dlpg.c`) via the `SYS_NET_FETCH` syscall, which goes through DNS, TCP/TLS, and HTTP in one blocking call.
 
 ---
 
@@ -545,18 +545,19 @@ A persistent flag (`cpu_mark_interrupts_active()`) is set right after this step 
 
 ### 23. Create Shell Process
 
-**Function:** process_create()
+**Function:** `spawn_shell_process()` (`kernel.c`), which calls `process_create("shell", NULL)` and then loads a real ELF image into it.
 
-**Location:** system/process/process.c
+**Location:** `kernel.c`
 
-**Purpose:** Creates the user shell as a separate process.
+**Purpose:** Since v0.7, the shell is no longer kernel code — it is a genuine ring-3 ELF binary, `/bin/shell.elf` (built in the sibling `lufira-packages` repository; see [`14_shell_commands.md`](14_shell_commands.md)). `kernel/shell/shell.c` and `kernel/shell/commands/` still exist and are still compiled into the kernel binary, but they are dead code — nothing calls into them anymore.
 
-**Shell Task:**
-- Shows the prompt with current working directory.
-- Draws the cursor.
-- Enters an infinite loop that enables interrupts, halts the CPU, disables interrupts, and calls the scheduler.
+**What `spawn_shell_process()` actually does:**
+1. Reads `/bin/shell.elf` straight off LufiraFS using raw `lufirafs_lookup()`/`lufirafs_read()` calls rather than `vfs_open()` — at this point in boot (before any process has ever been created) `current_process`/`current_fd_table`, which the VFS layer depends on, don't exist yet.
+2. Calls `process_create("shell", NULL)` to allocate the process structure, page table, and kernel stack.
+3. Loads the ELF image into the new process via `elf_load_to_process()` — the same loader used by `SYS_EXEC`/`run`/`runbg` (see [`12_elf_processes.md`](12_elf_processes.md)) — and points `proc->context.rip` at its entry point.
+4. Builds an empty `argv`/`envp` stack frame for it (`build_exec_stack()`) and marks `proc->is_shell = 1`.
 
-**Result:** The shell runs as a user process and is scheduled by the kernel.
+**Result:** The shell runs as an ordinary preemptible ring-3 process, scheduled exactly like any other — its prompt, line editing, history, and builtins (`cd`/`pwd`/`su`/`mount`/`unmount`/…) are all implemented in `shell.elf`'s own `main()`, not in the kernel. If `/bin/shell.elf` is missing or unreadable, boot halts with a fatal error (there is no kernel-native fallback shell). If the shell process ever exits or is killed, `respawn_shell_if_needed()` (`system/process/process.c`) calls `spawn_shell_process()` again automatically.
 
 ---
 

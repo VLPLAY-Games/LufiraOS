@@ -11,10 +11,7 @@ typedef struct {
     uint32_t cluster;
     fat_dir_entry_t entry;
 
-    /*
-     * Используется только для directories.
-     */
-    fat_dir_t dir;
+    fat_dir_t dir; // только для directories
     int is_dir;
 } fat_private_t;
 
@@ -41,9 +38,6 @@ static inode_ops_t fat_inode_ops = {
     .readdir = fat_inode_readdir
 };
 
-/*
- * VFS-level FAT functions.
- */
 int vfs_fat_create(const char *path);
 int vfs_fat_mkdir(const char *path);
 int vfs_fat_unlink(const char *path);
@@ -73,7 +67,6 @@ static int fat_file_read(file_t *f, void *buf, size_t count) {
     uint32_t bytes_per_cluster = fatfs.cluster_size * 512;
     uint32_t off = f->offset;
 
-    /* Пропускаем кластеры до offset */
     while (off >= bytes_per_cluster && cluster >= 2 && !is_eoc(&fatfs, cluster)) {
         cluster = get_fat_entry(&fatfs, cluster);
         off -= bytes_per_cluster;
@@ -196,7 +189,6 @@ int fat_lookup_path(fat_fs_t *fs,
     if (!fs || !path || !*path || !out_entry || !out_cluster)
         return -1;
 
-    /* Пропускаем ведущие '/' */
     while (*path == '/')
         path++;
 
@@ -208,14 +200,12 @@ int fat_lookup_path(fat_fs_t *fs,
 
     while (*path) {
 
-        /* Пропускаем повторные '/' */
         while (*path == '/')
             path++;
 
         if (!*path)
             break;
 
-        /* Извлекаем один компонент */
         int len = 0;
 
         while (path[len] &&
@@ -231,9 +221,6 @@ int fat_lookup_path(fat_fs_t *fs,
         if (len == 0)
             break;
 
-        /*
-         * Обработка "."
-         */
         if (component[0] == '.' &&
             component[1] == '\0')
         {
@@ -241,13 +228,8 @@ int fat_lookup_path(fat_fs_t *fs,
             continue;
         }
 
-        /*
-         * ".."
-         *
-         * Полноценный parent traversal позже можно
-         * сделать через '..' запись.
-         * Пока не уходим выше root.
-         */
+        // ".." — пока не уходим выше root; полноценный parent traversal
+        // через запись ".." можно сделать позже.
         if (component[0] == '.' &&
             component[1] == '.' &&
             component[2] == '\0')
@@ -282,11 +264,7 @@ int fat_lookup_path(fat_fs_t *fs,
             }
 
             dir_cluster =
-                ((uint32_t)high << 16) | low;
-
-            /*
-             * Для FAT32 root parent может быть 0.
-             */
+                ((uint32_t)high << 16) | low; // для FAT32 root parent может быть 0
             path += len;
             continue;
         }
@@ -318,30 +296,20 @@ int fat_lookup_path(fat_fs_t *fs,
         uint32_t entry_cluster =
             ((uint32_t)high << 16) | low;
 
-        /*
-         * Есть ли ещё компоненты?
-         */
         const char *rest = path + len;
 
         while (*rest == '/')
             rest++;
 
         if (*rest) {
-
-            /*
-             * Промежуточный компонент обязан быть каталогом.
-             */
             if (!(entry.attr & 0x10))
-                return -1;
+                return -1; // промежуточный компонент обязан быть каталогом
 
             dir_cluster = entry_cluster;
             path = rest;
             continue;
         }
 
-        /*
-         * Это последний компонент.
-         */
         memcpy(out_entry,
                &entry,
                sizeof(fat_dir_entry_t));
@@ -367,9 +335,6 @@ int fat_resolve_parent(fat_fs_t *fs,
         return -1;
     }
 
-    /*
-     * Копируем путь во временный буфер.
-     */
     char tmp[512];
 
     int len = 0;
@@ -384,17 +349,11 @@ int fat_resolve_parent(fat_fs_t *fs,
     if (len == 0)
         return -1;
 
-    /*
-     * Убираем конечные '/'.
-     */
     while (len > 1 && tmp[len - 1] == '/') {
         tmp[len - 1] = '\0';
         len--;
     }
 
-    /*
-     * Ищем последний '/'.
-     */
     int slash = -1;
 
     for (int i = 0; i < len; i++) {
@@ -402,10 +361,7 @@ int fat_resolve_parent(fat_fs_t *fs,
             slash = i;
     }
 
-    /*
-     * Файл непосредственно в root.
-     */
-    if (slash <= 0) {
+    if (slash <= 0) { // файл непосредственно в root
 
         const char *name =
             (slash == 0)
@@ -429,9 +385,6 @@ int fat_resolve_parent(fat_fs_t *fs,
         return 0;
     }
 
-    /*
-     * Выделяем parent path.
-     */
     char parent_path[512];
 
     for (int i = 0; i < slash; i++)
@@ -439,11 +392,7 @@ int fat_resolve_parent(fat_fs_t *fs,
 
     parent_path[slash] = '\0';
 
-    /*
-     * Последнее имя.
-     */
-    const char *name =
-        &tmp[slash + 1];
+    const char *name = &tmp[slash + 1];
 
     if (!*name)
         return -1;
@@ -459,9 +408,6 @@ int fat_resolve_parent(fat_fs_t *fs,
 
     out_name[name_len] = '\0';
 
-    /*
-     * Root.
-     */
     if (parent_path[0] == '\0' ||
         (parent_path[0] == '/' &&
          parent_path[1] == '\0'))

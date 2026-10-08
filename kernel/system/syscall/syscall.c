@@ -25,23 +25,19 @@
 
 extern lufirafs_t lufirafs;
 
-// Открывает filename через VFS, читает его целиком и заменяет им текущий
-// процесс через elf_exec_replace() (настоящий execve()). Используется и
-// шеллом (команда "exec"), и системным вызовом SYS_EXEC. argv/envp
-// передаются elf_exec_replace() как есть — ОНА забирает владение ими (см.
-// комментарий у её объявления в elf.h) и освобождает их на каждом СВОЁМ
-// пути отказа; но если do_exec() проваливается РАНЬШЕ вызова
-// elf_exec_replace() (файл не нашёлся/не прочитался/пуст), освобождать
-// их обязаны мы сами здесь — иначе они просто утекут.
+// Открывает filename через VFS, читает целиком и заменяет текущий процесс
+// через elf_exec_replace() (execve()). Используется и шеллом ("exec"), и
+// SYS_EXEC. elf_exec_replace() забирает владение argv/envp и освобождает их
+// сама (см. elf.h); если do_exec() проваливается раньше её вызова, освобождаем
+// их здесь сами.
 int do_exec(const char *filename, char *argv[], char *envp[]) {
     if (!filename || !*filename) {
         free_argv_envp(argv, envp);
         return -1;
     }
 
-    // Проверка бита исполнения — VFS-пути всегда разрешаются от корня (см.
-    // комментарий вверху lufirafs_vfs.c), поэтому резолвим так же, а не
-    // через cwd_inode (в отличие от sys_chmod/sys_chown ниже).
+    // Проверка бита исполнения — VFS-пути всегда резолвятся от корня (см.
+    // lufirafs_vfs.c), а не через cwd_inode (в отличие от sys_chmod/sys_chown).
     if (current_process) {
         uint32_t ino;
         if (lufirafs_lookup(&lufirafs, lufirafs.sb.root_inode, filename, &ino) == 0) {
@@ -89,19 +85,17 @@ int do_exec(const char *filename, char *argv[], char *envp[]) {
         return -1;
     }
 
-    // elf_exec_replace() освобождает и buf, и argv/envp при любом исходе
-    // (успех или неудача) — начиная с этой точки владение уже её.
+    // elf_exec_replace() освобождает buf и argv/envp при любом исходе —
+    // владение уже её.
     return elf_exec_replace(buf, size, filename, argv, envp);
 }
 
 typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 // Проверяет, что addr указывает на NUL-терминированную строку (<=max_len
-// байт без терминатора), целиком в читаемой памяти текущего процесса —
-// is_user_accessible() проверяется на каждой впервые пересечённой странице
-// перед разыменованием. pml4_phys обязан быть активным CR3 (вызывается
-// только из обработчиков syscall'ов, всегда под CR3 вызывающего). Возвращает
-// длину строки при успехе, -1 при невалидном адресе или отсутствии '\0'.
+// байт без терминатора) целиком в читаемой памяти процесса — is_user_accessible()
+// проверяется на каждой впервые пересечённой странице. pml4_phys обязан быть
+// активным CR3. Возвращает длину строки, -1 при невалидном адресе/нет '\0'.
 static int64_t validate_user_string(uint64_t pml4_phys, uint64_t addr, uint64_t max_len) {
     if (addr == 0) return -1;
 
@@ -121,30 +115,19 @@ static int64_t validate_user_string(uint64_t pml4_phys, uint64_t addr, uint64_t 
     return -1;
 }
 
-// Копирует NUL-терминированный массив указателей на строки (argv[]/envp[]
-// -стиль) из пользовательской памяти текущего процесса в kernel-side буфер
-// (kmalloc на массив указателей + отдельный kmalloc на каждую строку) — в
-// форме, которую elf_exec_replace()/free_argv_envp() ожидают/освобождают.
-// array_ptr==0 трактуется как argc=0, а не ошибка. Возвращает NULL при любой
-// другой ошибке (плохой указатель, больше MAX_EXEC_ARGS элементов, слишком
-// длинная строка) — без частично выделенного состояния.
+// Копирует NUL-терминированный массив указателей на строки (argv[]/envp[])
+// из памяти процесса в kernel-side буфер, в форме, которую
+// elf_exec_replace()/free_argv_envp() ожидают/освобождают. array_ptr==0 —
+// argc=0, не ошибка. NULL при любой другой ошибке, без частично
+// выделенного состояния.
 //
-// ВАЖНО для вызывающих SYS_EXEC/SYS_FORK+SYS_EXEC из userspace (v0.7 план,
-// этап 5, под-этап 6 — найдено при написании первого прямого вызывателя
-// SYS_EXEC вне кернел-нативного шелла): is_user_range_valid() ниже
-// проверяет ФИКСИРОВАННЫЙ диапазон (MAX_EXEC_ARGS+1)*8 байт от array_ptr,
-// а не только до фактического NULL-терминатора — так дешевле (не нужно
-// сначала безопасно прочитать переменную длину, чтобы узнать, сколько
-// проверять). Небольшой argv[] как ЛОКАЛЬНАЯ переменная на стеке (а не
-// static/global) может оказаться слишком близко к верху 16KB
-// пользовательского стека (USER_STACK_SIZE, process.h) — тогда этот
-// фиксированный диапазон вылетает за пределы замапленной страницы и
-// is_user_range_valid() честно возвращает отказ (-EFAULT), даже если
-// реальный, короткий argv[] с NULL-терминатором сам по себе целиком в
-// пределах маппинга. Единственный практичный способ обойти это на стороне
-// вызывающего — держать argv[]/envp[] в static/global памяти (.data/.bss,
-// свой собственный маппинг с большим запасом), а не в кадре стека — так и
-// стоит делать будущему shell.elf.
+// Важно для вызывающих SYS_EXEC из userspace: is_user_range_valid() ниже
+// проверяет фиксированный диапазон (MAX_EXEC_ARGS+1)*8 байт от array_ptr, а
+// не только до NULL-терминатора (дешевле). Если argv[] лежит как локальная
+// переменная у самого верха 16KB пользовательского стека (USER_STACK_SIZE),
+// этот фиксированный диапазон может вылезти за пределы замапленной страницы
+// и схватить -EFAULT, даже если реальный короткий argv[] был бы валиден —
+// держите argv[]/envp[] в static/global памяти, а не на стеке.
 static char **copy_user_string_array(uint64_t pml4_phys, uint64_t array_ptr) {
     if (array_ptr == 0) {
         char **empty = (char **)kmalloc(sizeof(char*));
@@ -223,10 +206,8 @@ static uint64_t sys_exit(uint64_t exit_code, uint64_t unused1, uint64_t unused2,
     (void)unused3;
     (void)unused4;
     
-    // "[pid] Exit(code)" — только в devmode (DLOG), чтобы не засорять вывод
-    // обычному пользователю: shell.elf сам печатает код выхода программы,
-    // когда это реально нужно (например wait), это сообщение — чисто
-    // отладочное, видно каждый раз, когда ЛЮБОЙ процесс завершается.
+    // Только devmode (DLOG) — shell.elf сам печатает код выхода, когда нужно
+    // (wait); это чисто отладочный след для КАЖДОГО завершения.
     DLOG("\n[%u] Exit(%u)\n",
          current_process ? current_process->pid : 0,
          (uint32_t)exit_code);
@@ -271,9 +252,8 @@ static uint64_t sys_open(uint64_t filename_ptr, uint64_t flags, uint64_t mode,
 
     const char *filename = (const char *)filename_ptr;
 
-    // Проверка прав — VFS всегда резолвит пути от корня (см. комментарий
-    // вверху lufirafs_vfs.c), поэтому резолвим так же здесь, отдельно от
-    // самого vfs_open() (который своей проверки не делает вообще).
+    // Проверка прав — VFS всегда резолвит пути от корня (lufirafs_vfs.c);
+    // vfs_open() сам этой проверки не делает.
     uint64_t accmode = flags & 0x3;
     int want_read = (accmode != O_WRONLY);
     int want_write = (accmode != O_RDONLY);
@@ -320,14 +300,10 @@ static uint64_t sys_seek(uint64_t fd, uint64_t offset, uint64_t whence,
 
 // SYS_MMAP (9): addr, length, prot, flags, fd
 // Только анонимная память (MAP_ANONYMOUS обязателен, addr/fd игнорируются,
-// MAP_FIXED не поддерживается); файловый mmap — будущая задача. Выделение
-// "eager": страницы физически выделяются и маппятся прямо здесь, а не по
-// требованию через page fault — обработчик page fault безусловно
-// останавливает систему на любом фолте, реального пути восстановления для
-// demand paging нет. Вызывается под собственным CR3 процесса, поэтому
-// свежесмапленная страница сразу доступна без phys_to_virt(). Таймер
-// преемптит только ring3-код (CS==0x33) — syscall-обработчик всегда в ring0,
-// так что отдельная блокировка прерываний здесь не нужна.
+// MAP_FIXED не поддерживается). Выделение eager: страницы физически
+// выделяются и маппятся здесь же, не по требованию — обработчик page fault
+// безусловно останавливает систему, demand paging не реализован. Под
+// собственным CR3 процесса, свежая страница доступна без phys_to_virt().
 static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
                          uint64_t flags, uint64_t fd) {
     (void)addr;
@@ -343,12 +319,9 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     uint64_t aligned_len = (length + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     uint64_t num_pages = aligned_len / PAGE_SIZE;
 
-    // v0.8-мост, пункт 4: MAP_SHARED был объявлен в ABI, но раньше вообще
-    // не проверялся — любой mmap() вёл себя как MAP_PRIVATE. Область,
-    // отмеченная им, переживает fork() алиасингом физических страниц (а не
-    // копированием), см. clone_address_space_deep() (process.c) и реестр
-    // в shm.c. MAX_SHARED_REGION_PAGES — тот же потолок, что и у shm.c,
-    // проверяем заранее, чтобы не делать лишнюю работу.
+    // MAP_SHARED: область переживает fork() алиасингом физических страниц
+    // (не копированием), см. clone_address_space_deep() (process.c) и
+    // реестр в shm.c. MAX_SHARED_REGION_PAGES — тот же потолок, что у shm.c.
     int want_shared = (flags & MAP_SHARED) != 0;
     if (want_shared && num_pages > MAX_SHARED_REGION_PAGES)
         return (uint64_t)-EINVAL;
@@ -387,12 +360,10 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     }
 
     if (mapped < num_pages) {
-        // Не хватило физической памяти на часть запроса — откатываем то,
-        // что уже успели замаппить. PAGE_MMAP_SHARED уже мог быть
-        // выставлен на эти PTE (page_flags выше), но shm_create() ещё не
-        // звали — unmap_page() (paging.c) в этом случае корректно
-        // откатывается на обычный pmm_free_page() (shm_find_region_by_page()
-        // ничего не найдёт, региона ещё не существует).
+        // Не хватило памяти на часть запроса — откатываем замапленное.
+        // PAGE_MMAP_SHARED мог быть выставлен, но shm_create() ещё не
+        // звали — unmap_page() корректно откатится на pmm_free_page()
+        // (shm_find_region_by_page() региона ещё не найдёт).
         for (uint64_t i = 0; i < mapped; i++) {
             unmap_page(base + i * PAGE_SIZE);
         }
@@ -464,11 +435,8 @@ static uint64_t sys_exec(uint64_t filename_ptr, uint64_t argv_ptr,
     char **envp = copy_user_string_array(current_process->page_table, envp_ptr);
     if (!envp) { free_argv_envp(argv, NULL); return (uint64_t)-EFAULT; }
 
-    // do_exec() (и, за ней, elf_exec_replace()) забирает владение argv/envp
-    // и освобождает их сама на любом исходе — do_exec() -> elf_exec_replace()
-    // не возвращается по этому стеку вызовов при УСПЕХЕ (настоящий
-    // execve()), возврат сюда возможен только при ошибке, но освобождать
-    // их здесь всё равно НЕ нужно ни в каком случае (уже сделано внутри).
+    // do_exec()/elf_exec_replace() забирает владение argv/envp и освобождает
+    // их само на любом исходе — здесь освобождать не нужно.
     return (uint64_t)do_exec(filename, argv, envp);
 }
 
@@ -483,9 +451,8 @@ static uint64_t sys_wait(uint64_t pid, uint64_t status_ptr, uint64_t options,
     (void)unused1;
     (void)unused2;
 
-    // Проверяем указатель ДО блокирующего process_wait() — плохой указатель
-    // должен провалиться сразу, а не после того, как мы уже дождались
-    // ребёнка (и тем более не должен разыменовываться напрямую после).
+    // Проверяем указатель до блокирующего process_wait() — плохой указатель
+    // должен провалиться сразу, а не после ожидания ребёнка.
     if (status_ptr != 0) {
         if (!current_process || !is_user_range_valid(current_process->page_table, status_ptr, sizeof(int), 1))
             return (uint64_t)-EFAULT;
@@ -521,28 +488,19 @@ static uint64_t sys_getcwd(uint64_t buffer, uint64_t size,
     return (uint64_t)len;
 }
 
-// SYS_CHDIR (15): path — та же логика, что и command_cd() (kernel/shell/
-// commands/filesystem.c), но на current_process->cwd_*, а не на
-// шелл-глобалах (которые теперь и есть эти же поля, см. shell.h), и с
-// проверкой указателя вместо прямого разыменования.
-// Смонтированный FAT (/mnt/...) в cwd — у него нет настоящего lufirafs-
-// inode (см. fat_mount.h), так что cwd_inode не может хранить на него
-// ссылку как обычно. LUFIRAFS_FAT_MOUNT_CWD_INODE — заведомо невалидный
-// номер инода (lufirafs_read_inode()/lufirafs_lookup() отвергают любой
-// ino > sb.inode_count, а реальных инодов на 16MB-образе всегда разы
-// меньше UINT32_MAX), безопасный как часовой: случайная относительная
-// операция (mkdir/lufirafs_lookup и т.п.) с ним просто вернёт ENOENT, а
-// не прочитает мусор. Источник истины при этом — cwd_path (строка),
-// ровно как и для настоящего lufirafs-cwd.
+// SYS_CHDIR (15): та же логика, что command_cd() (shell/commands/filesystem.c),
+// но на current_process->cwd_*, с проверкой указателя вместо разыменования.
+// Смонтированный FAT (/mnt/...) не имеет lufirafs-inode (fat_mount.h), так
+// что cwd_inode не может на него ссылаться обычным образом.
+// LUFIRAFS_FAT_MOUNT_CWD_INODE — заведомо невалидный номер инода (отвергается
+// lufirafs_read_inode()/lufirafs_lookup()), безопасный часовой — случайная
+// операция с ним вернёт ENOENT, а не мусор. Источник истины — cwd_path.
 #define LUFIRAFS_FAT_MOUNT_CWD_INODE 0xFFFFFFFFu
 
-// SYS_CHDIR (15): path — см. комментарий у pathutil.h (userspace/common/
-// pathutil.h): "cd" — единственная команда, которая отправляет сюда СЫРОЙ
-// (возможно относительный) аргумент пользователя, не склеенный заранее с
-// cwd (все остальные пакеты сначала резолвят путь в абсолютный через
-// resolve_path()+SYS_GETCWD). Поэтому, в отличие от sys_mkdir()/sys_remove()
-// выше, здесь нужно самим обрабатывать и случай "уже стоим в смонтированном
-// FAT, относительный '..'".
+// "cd" — единственная команда, отправляющая сюда сырой (возможно
+// относительный) путь, не склеенный заранее с cwd (см. pathutil.h) —
+// поэтому здесь, в отличие от sys_mkdir()/sys_remove(), нужно самим
+// обрабатывать относительный ".." из смонтированного FAT.
 static uint64_t sys_chdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
                           uint64_t unused3, uint64_t unused4) {
     (void)unused1;
@@ -558,11 +516,9 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
 
     const char *path = (const char *)path_ptr;
 
-    // Смонтированный FAT — ДО LufiraFS, тот же приоритет, что уже у
-    // vfs_open()/sys_mkdir()/sys_remove() (см. их комментарии): найдено
-    // при живом тестировании ("mount 0 /mnt/a" успевает, но "cd /mnt/a"
-    // отвечает ENOENT) — sys_chdir() был единственным путём, который так
-    // и не получил этот фикс при VFS-интеграции монтирования.
+    // Смонтированный FAT — до LufiraFS, тот же приоритет, что у
+    // vfs_open()/sys_mkdir()/sys_remove() (баг: "cd /mnt/a" отвечал ENOENT
+    // после успешного mount — sys_chdir() не получил этот фикс сразу).
     if (path[0] == '/') {
         struct inode *fat_inode = vfs_fat_lookup(path);
         if (fat_inode) {
@@ -582,26 +538,12 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
         }
     }
 
-    // ".."/"." из уже смонтированного FAT (нет настоящего lufirafs-inode,
-    // которому можно было бы задать такой относительный вопрос) — строим
-    // родительский путь прямо из cwd_path и уходим в обычную lufirafs-ветку
-    // ниже с ним вместо исходного относительного path.
-    //
-    // НАЙДЕННЫЙ БАГ (пользователь: "после монтирования не могу переходить
-    // в директории, ошибка что папка не найдена"): эта ветка раньше не
-    // проверяла path[0] и перехватывала ЛЮБОЙ chdir, пока cwd стоит внутри
-    // смонтированного FAT — включая абсолютные пути, вообще не имеющие
-    // отношения к "выйти из флешки через '..'" (например, "cd /mnt2" на
-    // совершенно обычную lufirafs-директорию, пока cwd ещё "/mnt"), и
-    // безусловно отвечала ENOENT на всё, кроме ".."/"."  Абсолютные пути
-    // (path[0]=='/') сюда вообще попадать не должны: сам
-    // lufirafs_lookup() ниже уже умеет резолвить их от корня независимо
-    // от текущего cwd_inode (см. его же "cur = path[0]=='/' ? root :
-    // start_inode"), так что для них достаточно просто ПРОВАЛИТЬСЯ в
-    // обычную ветку ниже — нужна только тут эта специальная обработка
-    // ДЛЯ ОТНОСИТЕЛЬНЫХ "."/".." (другие относительные пути из плоского
-    // FAT-монтирования и так не имеют смысла — там нет настоящих
-    // вложенных директорий, см. fat_mount.h).
+    // ".."/"." из смонтированного FAT (нет lufirafs-inode для такого
+    // относительного вопроса) — строим родительский путь из cwd_path и
+    // уходим в обычную lufirafs-ветку ниже. Условие на path[0] != '/'
+    // обязательно (баг: раньше перехватывало и абсолютные пути вроде
+    // "cd /mnt2", отвечая ENOENT вместо проваливания в lufirafs_lookup(),
+    // который и так резолвит абсолютные пути от корня независимо от cwd_inode).
     if (current_process->cwd_inode == LUFIRAFS_FAT_MOUNT_CWD_INODE && path[0] != '/') {
         if (strcmp(path, ".") == 0) return 0;
 
@@ -620,14 +562,10 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
             parent[i] = '\0';
         }
 
-        // "mount" регистрирует только сам префикс (vfs_fat_mount()), а не
-        // создаёт его родителя в lufirafs — найдено тем же живым
-        // тестированием: "mount 0 /mnt/a" без предварительного "mkdir /mnt"
-        // (ничего этого не требует) оставляет "/mnt" вообще не
-        // существующим в lufirafs. Раз пользователь уже пришёл "снаружи"
-        // (строка "/mnt/a" была так или иначе набрана), откат на корень —
-        // безопасный и предсказуемый край, лучше чем ENOENT на самое
-        // обычное действие "выйти из флешки".
+        // "mount" регистрирует только префикс (vfs_fat_mount()), не создаёт
+        // его родителя в lufirafs — "/mnt" может вообще не существовать
+        // как inode. Откат на корень — безопасный край, лучше чем ENOENT
+        // на обычное "выйти из флешки".
         uint32_t new_inode = lufirafs.sb.root_inode;
         lufirafs_lookup(&lufirafs, lufirafs.sb.root_inode, parent, &new_inode);
 
@@ -807,12 +745,10 @@ static uint64_t sys_mkdir(uint64_t path_ptr, uint64_t mode, uint64_t unused1,
     if (slen == 0) return (uint64_t)-EINVAL;
     const char *path = (const char *)path_ptr;
 
-    // Смонтированный FAT — ДО всех проверок прав на LufiraFS: путь вообще
-    // не существует как lufirafs-inode, lufirafs_resolve_parent() ниже
-    // всегда вернёт -ENOENT для него (найдено при тестировании VFS-
-    // интеграции монтирования, v0.7 план, этап 5, под-этап 6 — mkdir.elf
-    // звал именно SYS_MKDIR, а не vfs_mkdir()/vfs_mkdir_at() напрямую, так
-    // что более ранний фикс в vfs.c сюда просто не доходил).
+    // Смонтированный FAT — до всех проверок прав на LufiraFS: путь не
+    // существует как lufirafs-inode, lufirafs_resolve_parent() вернул бы
+    // -ENOENT (mkdir.elf зовёт SYS_MKDIR, не vfs_mkdir() напрямую — более
+    // ранний фикс в vfs.c сюда не доходил).
     if (path[0] == '/') {
         int r = vfs_fat_mkdir(path);
         if (r != -2) return (r == 0) ? 0 : (uint64_t)-1;
@@ -1019,18 +955,11 @@ static uint64_t sys_su(uint64_t username_ptr, uint64_t password_ptr, uint64_t un
 }
 
 // Создаёт path и все отсутствующие родительские директории в lufirafs
-// (аналог "mkdir -p"), не трогая уже существующие компоненты. v0.8-мост,
-// пункт 4 (пользователь: "если не создать папку перед монтированием, оно
-// смонтируется, но лучше сразу авто-mkdir по полному пути") — mount
-// раньше регистрировал ТОЛЬКО строковый префикс в fat_mount.c, оставляя
-// саму точку монтирования несуществующей как lufirafs-директория; cd/ls
-// на неё потом либо падали в ENOENT (если путь не абсолютный — см. фикс
-// sys_chdir() чуть выше), либо требовали отдельного ручного mkdir уже
-// ПОСЛЕ mount. Молча не настаивает на успехе (нет диагностики наружу) —
-// это удобство, а не обязательное условие монтирования: сам mount всё
-// равно продолжит работать через fat_mount.c чисто по строковому
-// префиксу, даже если здесь что-то не задалось (например, не нашлось
-// свободных inode).
+// ("mkdir -p"). mount раньше регистрировал только строковый префикс
+// (fat_mount.c), оставляя точку монтирования несуществующей как lufirafs-
+// директория, так что cd/ls на неё падали в ENOENT. Молча не настаивает на
+// успехе — удобство, а не обязательное условие: mount всё равно работает
+// через fat_mount.c по строковому префиксу, даже если тут не задалось.
 static void lufirafs_mkdir_p(const char *path) {
     if (!path || path[0] != '/') return;
 
@@ -1067,11 +996,9 @@ static void lufirafs_mkdir_p(const char *path) {
     if (created_any) lufirafs_sync(&lufirafs);
 }
 
-// SYS_MOUNT (33) / SYS_UNMOUNT (34): см. комментарии в syscall.h. Просто
-// тонкие обёртки — вся логика (включая проверку usb-устройства, чтение
-// образа, real-time синк после записи) уже в vfs_fat_mount()/
-// vfs_fat_unmount() (fat_mount.c), т.к. её нужно звать и из vfs.c (open/
-// mkdir/unlink на уже смонтированном пути), не только отсюда.
+// SYS_MOUNT (33) / SYS_UNMOUNT (34): тонкие обёртки — логика уже в
+// vfs_fat_mount()/vfs_fat_unmount() (fat_mount.c), т.к. её нужно звать и
+// из vfs.c (open/mkdir/unlink на уже смонтированном пути).
 static uint64_t sys_mount(uint64_t prefix_ptr, uint64_t usb_index, uint64_t unused1,
                           uint64_t unused2, uint64_t unused3) {
     (void)unused1; (void)unused2; (void)unused3;
@@ -1098,11 +1025,9 @@ static uint64_t sys_unmount(uint64_t prefix_ptr, uint64_t unused1, uint64_t unus
     return (uint64_t)(int64_t)res;
 }
 
-// SYS_REBOOT (35) / SYS_SHUTDOWN (36) — см. комментарии в syscall.h.
-// Прямой перенос command_reboot()/command_shutdown() (kernel/shell/
-// commands/system.c, мёртвый код) без изменений в самой логике сброса —
-// только root и синк диска гейтятся тут, а не в выводе на консоль (тот
-// был смыслом для интерактивного шелла, не для syscall'а).
+// SYS_REBOOT (35) / SYS_SHUTDOWN (36) — перенос command_reboot()/
+// command_shutdown() (shell/commands/system.c) без изменений в логике
+// сброса; root/синк диска гейтятся тут, а не в выводе на консоль.
 static uint64_t sys_reboot(uint64_t unused1, uint64_t unused2, uint64_t unused3,
                            uint64_t unused4, uint64_t unused5) {
     (void)unused1; (void)unused2; (void)unused3; (void)unused4; (void)unused5;
@@ -1148,11 +1073,9 @@ static void copy_bounded_path(char *dest, const char *src, int dest_size) {
     dest[i] = '\0';
 }
 
-// Создаёт /home (если его ещё нет) и /home/<username> внутри него, owner —
-// сам новый пользователь, perm 0700 — своя копия ensure_home_dir() из
-// kernel/shell/commands/users.c (мёртвый код, не трогается и не
-// экспортирует свои статические хелперы — тот же приём, что уже у
-// fat_mount.c с mount.c). При любой неудаче тихо откатывается на "/".
+// Создаёт /home (если нет) и /home/<username>, owner — новый пользователь,
+// perm 0700 — своя копия ensure_home_dir() из shell/commands/users.c (её
+// статические хелперы не экспортированы). При неудаче откатывается на "/".
 static void syscall_ensure_home_dir(uint32_t uid, uint32_t gid, const char *username,
                                      char *out_home, int out_home_size) {
     uint32_t home_root_ino;
@@ -1272,10 +1195,8 @@ static uint64_t sys_passwd(uint64_t username_ptr, uint64_t new_password_ptr, uin
 }
 
 // SYS_USB_COUNT (41) / SYS_USB_INFO (42) / SYS_USB_READ (43) / SYS_USB_WRITE
-// (44) — см. комментарии в syscall.h. Тонкие обёртки над xhci_msd_*()
-// (xhci.h) — прямой перенос command_usbinfo()/usbread()/usbwrite()
-// (kernel/shell/commands/usb.c, мёртвый код), уже проверенных на
-// безопасность (те же функции используются fat_mount.c для монтирования).
+// (44) — тонкие обёртки над xhci_msd_*() (xhci.h), те же функции, что
+// fat_mount.c использует для монтирования.
 static uint64_t sys_usb_count(uint64_t unused1, uint64_t unused2, uint64_t unused3,
                               uint64_t unused4, uint64_t unused5) {
     (void)unused1; (void)unused2; (void)unused3; (void)unused4; (void)unused5;
@@ -1424,13 +1345,10 @@ typedef struct __attribute__((packed)) {
     int32_t key_or_button;
 } lufira_gui_event_t;
 
-// Общая часть любого SYS_WIN_*: отправить req зарегистрированному WM pid
-// и заблокированно дождаться ответа. -EFAULT если WM не зарегистрирован
-// (нет "дисплея") или mailbox_send()/mailbox_recv() не удались (ответ WM
-// пришёл бы с sender_pid == wm_pid; в этой версии мы ему доверяем без
-// явной проверки sender_pid — единственный, кто вообще пишет в mailbox
-// ЭТОГО процесса, это либо само ядро (input-события — но те идут в
-// mailbox WM, не клиента), либо WM в ответ на наш же запрос).
+// Общая часть любого SYS_WIN_*: отправить req зарегистрированному WM pid и
+// заблокированно дождаться ответа. -EFAULT если WM не зарегистрирован или
+// mailbox_send()/mailbox_recv() не удались. sender_pid ответа не проверяется
+// явно — в mailbox этого процесса пишет либо ядро, либо WM в ответ на запрос.
 static int wm_call(const wm_request_t *req, wm_reply_t *reply) {
     uint32_t wm_pid = process_get_wm_pid();
     if (!wm_pid) return -1;
@@ -1854,15 +1772,13 @@ uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_t arg2,
                          uint64_t frame_ptr) {
     uint64_t result;
 
-    // SYS_FORK — особый случай: ему нужен указатель на весь сохранённый
-    // кадр регистров (rip/rflags/callee-saved), а не только 5 обычных
-    // аргументов, поэтому он обрабатывается до общей таблицы диспетчера.
+    // SYS_FORK — особый случай: нужен указатель на весь сохранённый кадр
+    // регистров, не только 5 обычных аргументов.
     if (syscall_num == SYS_FORK) {
         result = process_fork(frame_ptr);
     }
-    // SYS_SIGRETURN — тот же повод, что у SYS_FORK выше: process_sigreturn()
-    // (process.c) переписывает сохранённый кадр напрямую, а не просто
-    // возвращает значение через обычные 5 аргументов.
+    // SYS_SIGRETURN — тот же повод: process_sigreturn() переписывает
+    // сохранённый кадр напрямую.
     else if (syscall_num == SYS_SIGRETURN) {
         result = process_sigreturn(frame_ptr);
     }
@@ -1874,16 +1790,11 @@ uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1, uint64_t arg2,
         result = syscall_table[syscall_num](arg1, arg2, arg3, arg4, arg5);
     }
 
-    // v0.8-мост, пункт 5 (SYS_SIGACTION) — доставка отложенного сигнала,
-    // ЗДЕСЬ, а не в планировщике (switch_to_process()): frame_ptr в этой
-    // самой точке ВСЕГДА настоящая ring3-точка возврата ИМЕННО этого
-    // syscall'а (её же строит syscall_entry.S на каждый вход, какой бы
-    // синхронный или заблокировавшийся на время syscall ни был) — в
-    // отличие от process_t.context, который может застать процесс где
-    // угодно В СЕРЕДИНЕ кернела (внутри schedule(), например) — попытка
-    // подменить ЕГО напрямую на обработчик уже проверена живым
-    // тестированием и падает в page fault (см. подробный комментарий у
-    // process_sigreturn(), откуда этот подход и был перенесён сюда).
+    // Доставка отложенного сигнала здесь, а не в switch_to_process():
+    // frame_ptr тут всегда настоящая ring3-точка возврата этого syscall'а,
+    // в отличие от process_t.context, который может застать процесс где
+    // угодно в середине кернела (подмена context напрямую падает в page
+    // fault, см. process_sigreturn()).
     process_deliver_pending_signal(frame_ptr);
 
     return result;

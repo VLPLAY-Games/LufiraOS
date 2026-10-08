@@ -68,7 +68,7 @@ typedef struct {
 
 `LUFIRAFS_INODE_SIZE` is `76` bytes — up from the pre-`uid`/`gid`/`perm` layout — and `LUFIRAFS_INODE_COUNT` (512 inodes) is unchanged, so the inode table simply occupies more blocks for the same inode count. New files/directories get `LUFIRAFS_DEFAULT_FILE_PERM` (`0644`) or `LUFIRAFS_DEFAULT_DIR_PERM` (`0755`) respectively, unless a caller (e.g. `useradd`'s home-directory creation, see [Default and Seeded Accounts](#default-and-seeded-accounts)) passes an explicit mode.
 
-Growing the inode by 12 bytes is a breaking on-disk format change — a `disk.img` formatted by the old `mkfs_lufirafs`/kernel pair would misparse every inode under the new 76-byte stride. This is acceptable here (and is, in effect, the same reasoning the surrounding build already relies on for the format header — both the freestanding kernel driver and the hosted `tools/mkfs_lufirafs.c` include the exact same `lufirafs_format.h`, so the two can never silently disagree) because `disk.img` is a build artifact: the `Makefile`'s `$(BUILD_DIR)/disk.img` rule always runs `mkfs_lufirafs format` from scratch before populating `/etc/passwd`/`/etc/group` and everything else, for every clean build. There is no persistent installed system and therefore no migration path to maintain.
+Growing the inode by 12 bytes is a breaking on-disk format change — a `disk.img` formatted by the old `mkfs_lufirafs`/kernel pair would misparse every inode under the new 76-byte stride. This is acceptable here (and is, in effect, the same reasoning the surrounding build already relies on for the format header — both the freestanding kernel driver and the hosted `tools/mkfs_lufirafs.c` include the exact same `lufirafs_format.h`, so the two can never silently disagree) because `disk.img` is a build artifact: the sibling `LufiraOS-Builder` repository's `build` step (see [`05_build_system.md`](05_build_system.md)) always runs `mkfs_lufirafs format` from scratch before staging `/etc/passwd`/`/etc/group` and everything else, for every clean build. There is no persistent installed system and therefore no migration path to maintain.
 
 ---
 
@@ -106,34 +106,21 @@ The rule set, in order:
 
 ### Enforcement Coverage
 
-Two call sites wrap `lufirafs_check_access()`:
-
-- **`check_perm()`** in `kernel/shell/commands/filesystem.c` — used by shell commands that talk to LufiraFS directly (bypassing the VFS/syscall layer). On failure it prints `"<cmd>: permission denied: <name>"` and aborts the command.
-- Direct calls in `kernel/system/syscall/syscall.c` and `do_exec()` — used by syscalls and by `exec`/`run`.
+As of v0.7, the interactive shell is a userspace ELF (`lufira-packages/shell/shell.c`) and every file-manipulating command (`cp`/`mv`/`ls`/`mkdir`/`rm`/`cat`/`touch`/`write`/…) is its own small package under `lufira-packages/base/`, none of which can touch LufiraFS directly — they all go through the syscall ABI like any other userspace program. The old `check_perm()` helper in `kernel/shell/commands/filesystem.c` belonged to the kernel-native shell and is now dead code, never called. **All enforcement today lives in `kernel/system/syscall/syscall.c`** (plus `do_exec()`), which means it applies uniformly to every caller — a package, the shell's own builtins, or anything else — rather than being re-implemented (and potentially missed) per command:
 
 | Operation | Where | Checks |
 |-----------|-------|--------|
-| `mkdir` | shell `check_perm(cwd_inode, ...)` | write+exec on the target directory (cwd) |
-| `rm` | shell `check_perm(cwd_inode, ...)` | write+exec on the parent directory |
-| `touch` | shell `check_perm(cwd_inode, ...)` | write+exec on the parent directory |
-| `cat` | shell `check_perm(ino, ...)` | read on the file |
-| `run` (shell) / `exec` / `SYS_EXEC` | shell `check_perm()` and `do_exec()` | exec bit on the target file |
-| `write` (shell) | shell `check_perm()` | write on an existing file, or write+exec on the parent when creating |
-| `cp` | shell `check_perm()` (multiple calls) | read on source; write+exec on destination parent; write on an existing destination |
-| `mv` | shell `check_perm()` (multiple calls) | read+write+exec on source and its parent; write+exec on destination parent; write on an existing destination |
-| `edit` | shell `check_perm()` | write+exec on the parent when creating, write on an existing file |
-| `SYS_OPEN` | `syscall.c` | read/write on the target, or write+exec on the parent for `O_CREAT` |
-| `SYS_MKDIR` | `syscall.c` | write+exec on the parent (via `cwd_inode`-relative resolution) |
-| `SYS_RMDIR` / `SYS_UNLINK` | `syscall.c` (`sys_remove()`) | write+exec on the parent |
+| `SYS_OPEN` (`open()` — backs `cat`/`cp`/`mv`/`touch`/`write`/`ls`/…) | `syscall.c` | read and/or write on the target (depending on `O_RDONLY`/`O_WRONLY`/`O_RDWR`), or write+exec on the parent directory when `O_CREAT` creates a new entry |
+| `SYS_MKDIR` (`mkdir`) | `syscall.c` | write+exec on the parent (resolved relative to `cwd_inode`) |
+| `SYS_RMDIR` / `SYS_UNLINK` (`rm`) | `syscall.c` (`sys_remove()`) | write+exec on the parent |
+| `exec` / `run` / `SYS_EXEC` | `do_exec()` | exec bit on the target file |
+| `SYS_CHMOD` / `SYS_CHOWN` | `syscall.c` | owner-or-root (`chmod`), root-only (`chown`) — see [New Syscalls](#new-syscalls) |
 
-Two everyday operations were deliberately **not** wired up to any permission check:
+Because every package that touches a file does so by calling `open()` (with `O_RDONLY`/`O_WRONLY`/`O_CREAT` as appropriate), the net effect reproduces the old per-command checks without duplicating them: `cp` ends up read-checked on its source (plain `open(O_RDONLY)`) and write/parent-checked on its destination (`open(O_CREAT|O_WRONLY)`), `cat` is read-checked, `touch`/`write` are write/parent-checked, and so on — just via one shared code path instead of one `check_perm()` call per command.
 
-| Operation | Behaviour |
-|-----------|-----------|
-| `ls` (`command_ls()`) | Calls `lufirafs_opendir()`/`lufirafs_readdir()` directly — no `check_perm()` call anywhere in the function. Directory listing does not enforce read permission on the directory being listed. |
-| `cd` (`command_cd()`) | Calls `lufirafs_lookup()` directly to resolve the target path — no `check_perm()` call. Changing into a directory does not check its exec ("search") bit. |
+One behavior actually **improved** as a side effect of this move: the old kernel-native `ls` (`command_ls()`) called `lufirafs_opendir()`/`lufirafs_readdir()` directly, bypassing permission checks entirely. The new userspace `ls` (`lufira-packages/base/ls.c`) opens the target directory with a plain `sys_open(path, O_RDONLY, 0)` first — which **does** go through `SYS_OPEN`'s read-permission check above — so listing a directory now actually requires read permission on it, matching real Unix semantics (where listing needs read, not exec, on the directory).
 
-This matches the pattern observed directly in the source (`grep` for `check_perm(` in `kernel/shell/commands/filesystem.c` finds calls from `mkdir`/`rm`/`touch`/`cat`/`run`/`write`/`cp`/`mv`/`edit`, but none from `command_ls()` or `command_cd()`) — a deliberate scoping decision rather than an oversight, but one worth knowing about if you're relying on directory permissions to hide contents (see [Known Limitations](#known-limitations)).
+One gap remains exactly as before: **`cd` still does not check anything.** `SYS_CHDIR` (`sys_chdir()` in `syscall.c`) resolves the target via `lufirafs_lookup()` and never calls `lufirafs_check_access()` at all — changing into a directory still does not check its exec ("search") bit, regardless of whether the caller is the shell's own `cd` builtin or something else calling `SYS_CHDIR` directly (see [Known Limitations](#known-limitations)).
 
 ---
 
@@ -240,7 +227,7 @@ All four lookup functions return `0` on success (with `*out` filled in when non-
 
 ### Default and Seeded Accounts
 
-`tools/seed/passwd` and `tools/seed/group` are copied into `/etc/passwd`/`/etc/group` on every image build (`Makefile`'s `$(BUILD_DIR)/disk.img` target, via `mkfs_lufirafs put`). Their contents ship exactly two accounts:
+`tools/seed/passwd` and `tools/seed/group` are copied into `/etc/passwd`/`/etc/group` on every image build. This staging step no longer happens in this repository's own `Makefile` (which, since the build split described in [`05_build_system.md`](05_build_system.md), only builds `kernel.bin`/`BOOTX64.EFI` and does not touch `disk.img` at all) — it's done by the sibling `LufiraOS-Builder` repository's `build.py` (`lufira_builder/image.py`, via `mkfs_lufirafs put` against this repo's `tools/seed/passwd`/`tools/seed/group`). Their contents ship exactly two accounts:
 
 | Account | uid | gid | Password | Notes |
 |---------|-----|-----|----------|-------|
@@ -268,13 +255,13 @@ Propagation across the three ways a process comes into existence:
 | `process_fork()` (`SYS_FORK`) | `child->uid = parent->uid; child->gid = parent->gid;` — a straight 1:1 copy, matching POSIX `fork()`. |
 | `process_commit_exec()` (`SYS_EXEC` / shell `exec`) | Identity fields are **not touched at all**. The source comment is explicit: `// uid/gid тоже сознательно НЕ трогаются — POSIX execve() сохраняет identity процесса, кроме случая setuid-бита на исполняемом файле, которого в этой минимальной реализации нет вообще` ("uid/gid are deliberately left untouched — POSIX `execve()` preserves process identity except for a setuid bit on the executable, which does not exist at all in this minimal implementation"). This matches real `execve()` semantics with the explicit caveat that **there is no setuid bit** — a non-root user can never gain elevated privilege by running a particular executable. |
 
-**Boot-time default identity:** the kernel's `idle_process` is constructed directly (not via `process_create()`, since it's `kmalloc`'d by hand before the process subsystem is otherwise ready) and has `idle_process->uid = 0; idle_process->gid = 0;` set explicitly, with the source comment calling it out as the system's identity "point zero": *"idle is the identity starting point for the whole system (the first shell inherits from it via `process_create()`), so it must be root, not kmalloc garbage."* When `kernel.c` later calls `process_create("shell", shell_task)`, `current_process` at that point is still `idle_process` (uid 0), so the very first shell process inherits `uid=0`/`gid=0` — LufiraOS boots straight into a root shell, with no login prompt anywhere in the sequence. The only way to drop privilege afterward is the `su` shell command mutating `current_process->uid`/`gid` in place (see [Shell Commands](#shell-commands)).
+**Boot-time default identity:** the kernel's `idle_process` is constructed directly (not via `process_create()`, since it's `kmalloc`'d by hand before the process subsystem is otherwise ready) and has `idle_process->uid = 0; idle_process->gid = 0;` set explicitly, with the source comment calling it out as the system's identity "point zero": *"idle is the identity starting point for the whole system (the first shell inherits from it via `process_create()`), so it must be root, not kmalloc garbage."* When `kernel.c` later calls `spawn_shell_process()` (which itself calls `process_create("shell", NULL)` and loads `/bin/shell.elf` into it — see [`02_kernel_init.md`](02_kernel_init.md#23-create-shell-process)), `current_process` at that point is still `idle_process` (uid 0), so the very first shell process inherits `uid=0`/`gid=0` — LufiraOS boots straight into a root shell, with no login prompt anywhere in the sequence. The only way to drop privilege afterward is the `su` builtin (now in `lufira-packages/shell/shell.c`, backed by the `SYS_SU` syscall) mutating `current_process->uid`/`gid` in place (see [Shell Commands](#shell-commands)).
 
 ---
 
 ## New Syscalls
 
-Four syscalls expose identity/permission operations to userspace. Full signatures, return values, and error codes are documented in [13_syscalls.md](13_syscalls.md#filesystem--identity) — this table is a summary only.
+Eight syscalls expose identity/permission operations to userspace. Full signatures, return values, and error codes are documented in [13_syscalls.md](13_syscalls.md) — this table is a summary only.
 
 | # | Name | Description |
 |---|------|-------------|
@@ -282,21 +269,29 @@ Four syscalls expose identity/permission operations to userspace. Full signature
 | 20 | `SYS_CHOWN` | Changes a file's owner and group; root only. |
 | 21 | `SYS_GETUID` | Returns the calling process's `uid`. |
 | 22 | `SYS_GETGID` | Returns the calling process's `gid`. |
+| 32 | `SYS_SU` | Checks `username`/`password` against `users_check_password()` **inside the kernel** (userspace is not trusted to call this only after its own check) and, on success, mutates the *calling* process's own `uid`/`gid` in place — root may switch to anyone with no password. |
+| 38 | `SYS_USERADD` | Root-only. Thin wrapper over `users_add()`/`groups_add()`, plus home-directory creation. |
+| 39 | `SYS_GROUPADD` | Root-only. Thin wrapper over `groups_add()`. |
+| 40 | `SYS_PASSWD` | A NULL `username` changes the caller's own password (no check needed, already authenticated); a non-NULL one resets any user's password and is root-only. |
+
+`SYS_SU`/`SYS_USERADD`/`SYS_GROUPADD`/`SYS_PASSWD` were added later than `SYS_CHMOD`/`SYS_CHOWN`/`SYS_GETUID`/`SYS_GETGID` (v0.7 "bridge" plan) specifically to replace the equivalent kernel-native shell commands (`kernel/shell/commands/users.c`), which are now dead code — see [Shell Commands](#shell-commands).
 
 ---
 
 ## Shell Commands
 
-Six shell commands (all in `kernel/shell/commands/users.c`) drive this subsystem interactively. Full usage and behaviour are documented in [14_shell_commands.md](14_shell_commands.md) — this table is a summary only.
+The six interactive commands that drive this subsystem no longer live in the kernel. `kernel/shell/commands/users.c` still exists in the source tree but is dead code, unreachable since the shell moved to userspace (v0.7; see [`14_shell_commands.md`](14_shell_commands.md)). Today:
 
-| Command | Description |
-|---------|-------------|
-| `whoami` | Prints the calling process's `uid`/`gid`, with resolved usernames/group names when known. |
-| `chmod <mode> <path>` | Sets a file's octal permission mode; owner or root only. |
-| `chown <user>[:group] <path>` | Changes a file's owner (and optionally group); root only. |
-| `useradd <user> <password> [group]` | Creates a new user (auto-assigns the next free uid/gid ≥1000, creates a matching group if none given, creates a private `/home/<user>` directory). |
-| `groupadd <group>` | Creates a new group (auto-assigns the next free gid ≥1000). |
-| `su <user> [password]` | Switches the invoking shell's own `uid`/`gid` in place; root needs no password for any target, anyone else needs the target account's own password. |
+| Command | Where it lives | Description |
+|---------|-----------------|-------------|
+| `whoami` | package, `lufira-packages/base/whoami.c` | Prints the calling process's `uid`/`gid`, with resolved usernames/group names when known. |
+| `chmod <mode> <path>` | package, `lufira-packages/base/chmod.c` | Sets a file's octal permission mode via `SYS_CHMOD`; owner or root only. |
+| `chown <user>[:group] <path>` | package, `lufira-packages/base/chown.c` | Changes a file's owner (and optionally group) via `SYS_CHOWN`; root only. |
+| `useradd <user> <password> [group]` | package, `lufira-packages/base/useradd.c` | Creates a new user via `SYS_USERADD` (auto-assigns the next free uid/gid ≥1000, creates a matching group if none given, creates a private `/home/<user>` directory). |
+| `groupadd <group>` | package, `lufira-packages/base/groupadd.c` | Creates a new group via `SYS_GROUPADD` (auto-assigns the next free gid ≥1000). |
+| `su [user]` | **shell builtin**, `lufira-packages/shell/shell.c` | Prompts for a password with local echo suppressed (unlike the old kernel-native version, which took the password as a plain, visible command-line argument — see [Known Limitations](#known-limitations)), then calls `SYS_SU`; root needs no password for any target, anyone else needs the target account's own password. On success, re-resolves its own identity and `cd`s to the target's home directory. |
+
+`passwd` (`SYS_PASSWD`) is also exposed as a package, `lufira-packages/base/passwd.c`, though it predates this specific table in the original documentation pass and is not one of the original six — included here as it's part of the same identity/permission surface.
 
 ---
 
@@ -305,8 +300,8 @@ Six shell commands (all in `kernel/shell/commands/users.c`) drive this subsystem
 - **No setuid/setgid bit** — `exec()` never changes a process's identity, confirmed directly by the comment in `process_commit_exec()` (see [Process Identity](#process-identity)). There is no way for a non-root user to gain elevated privilege by running a specific program, and correspondingly no way to build a "run this one thing as root" helper the way real Unix uses setuid binaries.
 - **No multi-group membership** — each user has exactly one primary `gid`; `users.h`'s own header comment describes the model as "a simple user/group database over LufiraFS text files — classic early Unix style: one primary group per user, no multi-group membership." There is no supplementary-groups list anywhere in `user_entry_t` or `process_t`.
 - **Non-cryptographic password hashing** — passwords are hashed with unsalted 32-bit FNV-1a (see [Password Hashing](#password-hashing)), which is trivially brute-forceable and offers no collision resistance. Combined with `/etc/passwd` being world-readable (`perm 0644`), any local non-root process can read every account's hash.
-- **`su` takes the password as a plain, visible shell argument** — `command_su()` reads the password straight out of the typed command line (`su <username> [password]`); there is no masked/hidden-input prompt. The source comment acknowledges this directly: `// Видимый ввод пароля (не маскируется) — сознательное упрощение` ("visible password input, not masked — a deliberate simplification"). Anything that can see the shell's input (or command history, if any were kept) sees the password in cleartext.
-- **`ls` and `cd` do not enforce directory permissions** — neither `command_ls()` nor `command_cd()` calls the shared `check_perm()` helper (see [Enforcement Coverage](#enforcement-coverage)), so a directory's own read/exec bits do not prevent listing its contents or changing into it. Only operations on the files *inside* a directory (or on the directory as a write target) are checked.
+- **`cd` does not enforce directory permissions** — `SYS_CHDIR` (`syscall.c`) never calls `lufirafs_check_access()` (see [Enforcement Coverage](#enforcement-coverage)), so a directory's own exec ("search") bit does not prevent changing into it. `ls`, by contrast, is no longer in this category: since v0.7 it's a userspace package that opens its target with a plain `SYS_OPEN(O_RDONLY)` first, which *is* permission-checked (read bit on the directory) — see [Enforcement Coverage](#enforcement-coverage).
+- **`su`'s password prompt moved, but the kernel-side check did not change** — the current userspace `su` builtin (`lufira-packages/shell/shell.c`) prompts for the password separately and suppresses local echo while it's typed, unlike the old kernel-native `command_su()` (dead code), which took the password as a plain, visible command-line argument (`su <username> [password]`). The actual password check still happens once, inside the kernel (`SYS_SU` → `users_check_password()`), unchanged by this move.
 - **Hardcoded default root password shipped in the seed image** — every built `disk.img` ships `root` with the same well-known password (`toor`) and an additional `guest` account with **no password at all** (see [Default and Seeded Accounts](#default-and-seeded-accounts)). This is a real security problem for any use beyond a local, single-user hobby/testing context — there is no first-boot password-change flow, and nothing warns a user to change either credential.
 - **No `euid`/`egid` distinction** — a process's "real" and "effective" identity are always the same value, which is consistent with there being no setuid bit but does mean there is no mechanism at all for temporary privilege elevation or drop within a single process.
 

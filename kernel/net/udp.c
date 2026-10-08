@@ -25,7 +25,7 @@ static udp_state_t g_udp;
 int udp_send(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const void *data, uint16_t len) {
     if (len > UDP_MAX_PAYLOAD) return -1;
 
-    // Тот же приём псевдо-заголовка, что и tcp_send_segment_seq() (ip.c):
+    // Тот же приём псевдо-заголовка, что и tcp_send_segment_seq() (tcp.c):
     // псевдо-заголовок участвует только в арифметике чексума, на провод
     // уходит лишь настоящий UDP-заголовок+данные через ip_send() ниже.
     uint8_t buf[12 + UDP_HEADER_LEN + UDP_MAX_PAYLOAD];

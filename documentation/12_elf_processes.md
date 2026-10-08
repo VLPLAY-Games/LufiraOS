@@ -13,6 +13,7 @@ This document describes the ELF executable loader and the process management sub
    - [Segment Loading](#segment-loading)
    - [Memory Mapping](#memory-mapping)
    - [Entry Point](#entry-point)
+   - [Dynamic Linking (libc.so)](#dynamic-linking-libcso)
    - [Command-Line Arguments (argv/envp)](#command-line-arguments-argvenvp)
 3. [Process Management](#process-management)
    - [Process Structure](#process-structure)
@@ -36,7 +37,7 @@ This document describes the ELF executable loader and the process management sub
    - [Cold Start: context_enter_ring3()](#cold-start-context_enter_ring3)
    - [Idle Process](#idle-process)
 6. [Dependencies](#dependencies)
-7. [Future Extensions](#future-extensions)
+7. [Conclusion](#conclusion)
 
 ---
 
@@ -45,6 +46,7 @@ This document describes the ELF executable loader and the process management sub
 The ELF loader and process management subsystem provides:
 
 - **ELF64 Loading** – loads 64-bit ELF executables (ET_EXEC and ET_DYN) into memory.
+- **Dynamic Linking** – since v0.8, packages link against a single shared `/lib/libc.so` (loaded and relocated once, cached forever) instead of a static per-binary copy of libc — see [Dynamic Linking (libc.so)](#dynamic-linking-libcso).
 - **Process Creation** – allocates processes with their own address spaces and stacks, and passes real `argv`/`envp` to them.
 - **Scheduling** – round-robin scheduling, **preemptive**: the timer forcibly reclaims the CPU from ring-3 code once a process's timeslice expires (see [Preemption](#preemption)).
 - **Context Switching** – saves and restores CPU state when switching between processes, including a dedicated cold-start path that guarantees every process actually reaches ring 3 (see [Cold Start: context_enter_ring3()](#cold-start-context_enter_ring3)).
@@ -122,6 +124,28 @@ The loader uses the process's page table (PML4) for mapping:
 ### Entry Point
 
 The loader returns the entry point from the ELF header (`header->entry`). This is the address where execution should begin.
+
+### Dynamic Linking (libc.so)
+
+Since v0.8, every userspace package links **dynamically** against one shared `/lib/libc.so` instead of carrying its own statically-linked copy of `string`/`malloc`/`printf`/`stdlib`. This is handled by `kernel/system/elf/dynlink.c`/`.h`, called from `elf_load_to_process()`'s callers right after all of the executable's own `PT_LOAD` segments are mapped, copied, and permission-set — relocations below write directly into that already-present memory.
+
+**Eager resolution, not lazy binding.** A classic `ld.so` defers resolving each symbol until its first call (lazy PLT binding), which needs a separate runtime resolver and an assembly trampoline around it. LufiraOS has neither: `dynlink_process()` resolves **every** symbol the executable needs, right here, at `exec()` time, inside the kernel. The standard PLT stubs GCC/`ld` emit (`endbr64; jmp *GOT_slot`) don't care whether the GOT was filled lazily or eagerly — if it already holds the final address before the first call, the stub just jumps straight there.
+
+**What's shared vs. private per process:**
+
+| Segment | Sharing |
+|---------|---------|
+| `libc.so` text/rodata (`PF_X` and/or `!PF_W`) | Loaded and relocated **once**, ever, then mapped at the same fixed virtual address (`DYNLINK_LIBC_BASE`, `0x0000580000000000`) in every process that needs it. Backed by the existing `shm.c` registry (`PAGE_MMAP_SHARED` + ref-counting) — the same machinery `fork()`'s `MAP_SHARED` regions and `unmap_page()`/`free_user_address_space()` already use, with no changes needed for this to work. |
+| `libc.so` data/bss (`PF_W`) | A fresh **private** copy per process — each process's `malloc()` needs its own heap state, so two processes must not share these pages the way they share the text. |
+| The executable itself | Unchanged: still `ET_EXEC`, fixed base address (`0x400000`), loaded exactly as before — only `libc.so` needs to be position-independent. |
+
+**Process:**
+1. If the executable's `PT_DYNAMIC` segment has no `DT_NEEDED` entry, `dynlink_process()` returns `0` immediately — an ordinary static binary, full backward compatibility with earlier releases.
+2. Otherwise, `/lib/libc.so` is loaded from disk and cached forever on first use (surviving every process, not just the one that triggered the load) — later processes just reuse the cached mapping.
+3. The executable's own `.rela.plt`/`.rela.dyn` relocations (`R_X86_64_JUMP_SLOT`, `GLOB_DAT`, `COPY`) are processed, writing final `libc.so` symbol addresses into the executable's GOT.
+4. Returns `0` on success (including the "nothing to do" case above) or `-1` on a real failure — `/lib/libc.so` missing, an unresolvable `DT_NEEDED`, a missing symbol, or corrupt relocations.
+
+`libc.so` is built by the sibling `lufira-packages` repository's `build.py` (`-fPIC -shared`, `--hash-style=sysv` — `dynlink.c` reads the exported-symbol count from the classic `DT_HASH`'s `nchain` field, not `GNU_HASH`), not by anything in this repository; see [`05_build_system.md`](05_build_system.md) and [`06_libraries.md`](06_libraries.md#userspace-libc-libc).
 
 ### Command-Line Arguments (argv/envp)
 
@@ -464,6 +488,7 @@ while (1) {
 | Component | Depends On | Purpose |
 |-----------|------------|---------|
 | ELF Loader | PMM, Paging, Heap | Memory allocation and mapping. |
+| Dynamic Linking (`dynlink.c`) | ELF Loader, `shm.c` | Resolves/relocates `libc.so` symbols at `exec()` time; shares `libc.so`'s text/rodata pages across processes via the `shm.c` ref-counted registry. |
 | Process Manager | PMM, Paging, Heap, GDT, TSS | Process creation and context switching. |
 | fork()/exec()/wait()/kill | Process Manager, VFS | Address-space cloning, fd-table duplication, pipes. |
 | Scheduler | PIT, Process Manager | Timer interrupts for scheduling and preemption. |

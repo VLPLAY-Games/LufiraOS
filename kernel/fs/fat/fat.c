@@ -60,22 +60,16 @@ static void mark_fat_sector_dirty(fat_fs_t *fs, uint32_t cluster) {
 
 /* ======== Инициализация FAT с выделением dirty‑map ======== */
 
-// НАЙДЕННЫЙ БАГ (v0.7, этап 5, под-этап 6 продолжение — "VFS-интеграция
-// монтирования"): fat_mkdir()/fat_rm()/fat_create_file()/fat_write_file()/
+// НАЙДЕННЫЙ БАГ: fat_mkdir()/fat_rm()/fat_create_file()/fat_write_file()/
 // fat_truncate_file() раньше сами звали fat_sync(fs) в конце. fat_sync()
-// жёстко пишет через disk_write_sectors() — это ATA-диск САМОЙ LufiraFS,
-// а fat_init() во всём дереве вызывается ТОЛЬКО из mount.c для USB-флешек
-// (grep подтверждает — других вызывающих нет). Значит эти 5 внутренних
-// fat_sync() всегда писали FAT-метаданные USB-флешки по LBA, ПЕРЕСЧИТАННЫМ
-// от начала флешки, НА РЕАЛЬНЫЙ СИСТЕМНЫЙ ДИСК — то есть тихо портили
-// LufiraFS при первом же fat_create_file()/fat_write_file() на смонтированной
-// флешке (mountwrite уже наступал бы на эти грабли). mount.c's собственный
-// header-комментарий ошибочно утверждает, что fat_sync()/fat_flush() "не
-// используются" — это было верно для ПРЯМЫХ вызовов, но не для вызовов
-// через эти 5 функций. Исправление: убрать внутренние fat_sync(fs) отсюда,
-// синхронизация — ответственность вызывающего (тот же принцип, что у
-// lufirafs_write()/lufirafs_sync() в VFS-обвязке LufiraFS) — см.
-// fat_mount.c, который синхронизирует явно и правильно, на USB.
+// пишет через disk_write_sectors() — ATA-диск самой LufiraFS, а fat_init()
+// во всём дереве вызывается только из mount.c для USB-флешек. Значит эти
+// внутренние fat_sync() писали FAT-метаданные USB по LBA, пересчитанным от
+// начала флешки, НА РЕАЛЬНЫЙ СИСТЕМНЫЙ ДИСК — тихо портили LufiraFS при
+// первой же записи на смонтированную флешку (старый комментарий mount.c
+// про "fat_sync не используется" был верен только для прямых вызовов).
+// Исправление: синхронизация — ответственность вызывающего (см.
+// fat_mount.c, который синхронизирует явно и правильно, на USB).
 int fat_init(fat_fs_t *fs, void *image, uint32_t image_size) {
     if (!image || image_size < 512) return -1;
     fs->image = (uint8_t*)image;
@@ -503,9 +497,6 @@ int fat_mkdir(fat_fs_t *fs,
     char sname[11];
     to_short_name(name, sname);
 
-    /*
-     * Проверяем существование.
-     */
     fat_dir_entry_t *existing =
         find_entry_in_dir(
             fs,
@@ -520,9 +511,6 @@ int fat_mkdir(fat_fs_t *fs,
     if (existing)
         return -2;
 
-    /*
-     * Свободная dir entry.
-     */
     fat_dir_entry_t *next_entry = NULL;
 
     fat_dir_entry_t *free_entry =
@@ -535,18 +523,12 @@ int fat_mkdir(fat_fs_t *fs,
     if (!free_entry)
         return -3;
 
-    /*
-     * Выделяем кластер каталога.
-     */
     uint32_t new_cluster =
         find_free_cluster(fs);
 
     if (!new_cluster)
         return -4;
 
-    /*
-     * Помечаем как EOC.
-     */
     if (fs->fat_type == 12)
         set_fat_entry(fs, new_cluster, 0xFFF);
     else if (fs->fat_type == 16)
@@ -554,9 +536,6 @@ int fat_mkdir(fat_fs_t *fs,
     else
         set_fat_entry(fs, new_cluster, 0x0FFFFFFF);
 
-    /*
-     * Очищаем каталог.
-     */
     uint8_t *data =
         (uint8_t*)cluster_to_sector(
             fs,
@@ -572,9 +551,6 @@ int fat_mkdir(fat_fs_t *fs,
            0,
            fs->cluster_size * 512);
 
-    /*
-     * "."
-     */
     fat_dir_entry_t *dot =
         (fat_dir_entry_t*)data;
 
@@ -595,9 +571,6 @@ int fat_mkdir(fat_fs_t *fs,
         );
     }
 
-    /*
-     * ".."
-     */
     fat_dir_entry_t *dotdot =
         (fat_dir_entry_t*)(data + 32);
 
@@ -619,9 +592,6 @@ int fat_mkdir(fat_fs_t *fs,
         );
     }
 
-    /*
-     * Реальная directory entry.
-     */
     memset(free_entry,
            0,
            sizeof(fat_dir_entry_t));
@@ -649,9 +619,6 @@ int fat_mkdir(fat_fs_t *fs,
         0
     );
 
-    /*
-     * Dirty.
-     */
     uint32_t parent_lba;
 
     if (parent_cluster == 0 &&
@@ -688,10 +655,8 @@ int fat_mkdir(fat_fs_t *fs,
 
     fat_mark_sector_dirty(fs, parent_lba);
 
-    /*
-     * Если использовалась последняя запись старого
-     * конца каталога — сохраняем новый конец.
-     */
+    // free_entry был концом каталога (0x00) и теперь занят — next_entry
+    // становится новым концом, если он ещё не отмечен таковым.
     if (next_entry &&
         next_entry->name[0] != 0x00)
     {
@@ -748,14 +713,9 @@ int fat_rm(fat_fs_t *fs,
     uint32_t cluster =
         ((uint32_t)high << 16) | low;
 
-    /*
-     * Каталог?
-     */
+    // Каталог — проверяем всю цепочку кластеров: удаление непустого
+    // каталога запрещено.
     if (entry->attr & 0x10) {
-
-        /*
-         * Проверяем ВСЮ цепочку каталога.
-         */
         uint32_t dir_cluster = cluster;
 
         while (dir_cluster >= 2) {
@@ -787,9 +747,7 @@ int fat_rm(fat_fs_t *fs,
                     continue;
                 }
 
-                /*
-                 * "." и ".." разрешены.
-                 */
+                // "." и ".." не считаются содержимым.
                 if (e->name[0] == '.' &&
                     (e->name[1] == ' ' ||
                      e->name[1] == '.'))
@@ -797,10 +755,7 @@ int fat_rm(fat_fs_t *fs,
                     continue;
                 }
 
-                /*
-                 * Нашли реальный объект.
-                 */
-                return -4;
+                return -4; // непустой каталог
             }
 
             uint32_t next =
@@ -819,20 +774,11 @@ int fat_rm(fat_fs_t *fs,
         }
     }
 
-    /*
-     * Освобождаем цепочку.
-     */
     if (cluster >= 2)
         free_cluster_chain(fs, cluster);
 
-    /*
-     * Удаляем dir entry.
-     */
-    entry->name[0] = 0xE5;
+    entry->name[0] = 0xE5; // lazy-delete marker
 
-    /*
-     * Dirty parent entry.
-     */
     uint32_t parent_lba;
 
     if (parent_cluster == 0 &&

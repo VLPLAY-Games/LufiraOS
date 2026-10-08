@@ -162,12 +162,10 @@ static void *map_mmio(uint64_t phys, uint64_t size) {
 
 #define TRB_COMPLETION_CODE_SHIFT   24
 #define TRB_COMPLETION_SUCCESS      1
-// Short Packet — устройство вернуло МЕНЬШЕ байт, чем было запрошено в TRB.
-// Для interrupt IN HID-эндпоинтов это НОРМАЛЬНОЕ, ожидаемое завершение, а
-// не ошибка (см. xhci_service_hid_event() ниже) — именно так xHCI сообщает
-// "отчёт короче буфера", что типично для boot-протокольной мыши (report
-// обычно 3-4 байта), пока размер запроса в TRB завязан на 8 (под
-// клавиатуру, см. комментарий у hid_report_expected_len).
+// Short Packet — устройство вернуло меньше байт, чем запрошено в TRB. Для
+// interrupt IN HID-эндпоинтов это нормальное завершение, не ошибка (см.
+// xhci_service_hid_event()) — типично для boot-мыши (report 3-4 байта),
+// пока размер запроса в TRB завязан на 8 (под клавиатуру).
 #define TRB_COMPLETION_SHORT_PACKET 13
 
 /* ======================================================================== */
@@ -181,10 +179,10 @@ typedef struct __attribute__((packed, aligned(16))) {
 } xhci_trb_t;
 
 // Одна страница (256 TRB) на кольцо. У командных/transfer-колец последний
-// слот занят постоянным Link TRB — 255 используемых слотов. Event Ring
-// использует все 256 напрямую (перенос по перевороту Cycle-бита, без Link
-// TRB). pmm_alloc_page() не гарантирует физическую непрерывность между
-// вызовами, поэтому многостраничные структуры здесь не используются.
+// слот занят постоянным Link TRB — 255 используемых. Event Ring использует
+// все 256 напрямую (перенос по перевороту Cycle-бита, без Link TRB).
+// pmm_alloc_page() не гарантирует физическую непрерывность между вызовами,
+// поэтому многостраничные структуры здесь не используются.
 #define XHCI_RING_TRB_CAPACITY 256
 #define XHCI_RING_USABLE_TRBS  255
 
@@ -224,11 +222,9 @@ static int xhci_ring_init(xhci_ring_t *ring, int is_event_ring) {
     return 0;
 }
 
-// Записывает TRB на текущей позиции enqueue (Cycle-бит подставляется
-// автоматически из ring->cycle_state), продвигает индекс (перепрыгивая
-// через постоянный Link TRB и переворачивая cycle_state при заворачивании),
-// возвращает указатель на только что записанный TRB — вызывающий сам
-// переводит его в физический адрес для сопоставления с Event TRB.
+// Записывает TRB на позиции enqueue (Cycle-бит из ring->cycle_state),
+// продвигает индекс (перепрыгивая Link TRB, переворачивая cycle_state при
+// заворачивании), возвращает указатель на записанный TRB.
 static xhci_trb_t *xhci_ring_enqueue(xhci_ring_t *ring, uint64_t parameter,
                                       uint32_t status, uint32_t control_no_cycle)
 {
@@ -241,11 +237,10 @@ static xhci_trb_t *xhci_ring_enqueue(xhci_ring_t *ring, uint64_t parameter,
     ring->enqueue_index++;
     if (ring->enqueue_index >= XHCI_RING_USABLE_TRBS) {
         ring->enqueue_index = 0;
-        // Cycle-бит постоянного Link TRB иначе остаётся тем, что был при
-        // xhci_ring_init() — начиная со ВТОРОГО оборота кольца контроллер
-        // видит на нём "старый" бит, считает его непроизведённым (TC лишь
-        // указывает, что делать ПОСЛЕ перехода) и зависает на границе круга.
-        // Обновляем синхронно с ring->cycle_state при каждом заворачивании.
+        // Без обновления Link TRB.control тут контроллер со второго оборота
+        // увидит "старый" Cycle-бит (TC лишь говорит, что делать после
+        // перехода) и зависнет на границе круга — обновляем синхронно с
+        // ring->cycle_state при каждом заворачивании.
         xhci_trb_t *link = &ring->trbs[XHCI_RING_USABLE_TRBS];
         link->control = TRB_CONTROL_TYPE_SET(TRB_TYPE_LINK) | TRB_CONTROL_TC
             | ((uint32_t)ring->cycle_state & TRB_CONTROL_CYCLE);
@@ -393,11 +388,10 @@ static uint64_t    xhci_erst_phys = 0;
 static uint64_t xhci_dma_scratch_phys = 0;
 static uint8_t *xhci_dma_scratch_virt = NULL;
 
-// Второй, больший DMA-буфер — только для batched MSD read/write (см.
-// xhci_msd_read_blocks()/write_blocks() ниже). CBW/CSW/control-передачи
-// энумерации по-прежнему используют xhci_dma_scratch (1 страница) — они
-// никогда не превышают её. 64KB = 16 физически ПОДРЯД идущих страниц
-// (pmm_alloc_contiguous_pages(), уже существует для RTL8139 RX-кольца) —
+// Второй, больший DMA-буфер — только для batched MSD read/write.
+// CBW/CSW/control-передачи энумерации используют xhci_dma_scratch (1
+// страница), никогда не превышают её. 64KB = 16 физически подряд идущих
+// страниц (pmm_alloc_contiguous_pages(), уже есть для RTL8139 RX-кольца) —
 // обычный pmm_alloc_page() такой гарантии не даёт.
 #define XHCI_MSD_BIG_SCRATCH_PAGES 16
 #define XHCI_MSD_BIG_SCRATCH_BYTES (XHCI_MSD_BIG_SCRATCH_PAGES * PAGE_SIZE)
@@ -588,34 +582,23 @@ static void xhci_write_erdp(void) {
     reg_write64(xhci_ir0_base, XHCI_IR_ERDP, ptr);
 }
 
-// Декодирует один завершённый interrupt IN HID-отчёт и НЕМЕДЛЕННО
-// перевооружает конвейер (та же логика, что раньше жила только в
-// usb_poll()). Вынесено в общий хелпер по важной причине: Event Ring один
-// на все endpoint'ы разом, и синхронное ожидание MSD/control-передачи
-// (xhci_wait_for_event с ненулевым want_ptr) неизбежно попутно вычитывает
-// из очереди и чужие события — например, ровно те же interrupt IN отчёты
-// клавиатуры/мыши, которые иначе обслуживал бы только usb_poll(). Если
-// такое событие просто отбросить (как раньше), клавиатура/мышь навсегда
-// остаётся без перевооружённого TD — их endpoint "молчит" до перезагрузки.
-// Обслуживая HID-событие ПРЯМО ТУТ, независимо от того, кто именно сейчас
-// дренирует кольцо, конвейер клавиатуры/мыши никогда не голодает.
+// Декодирует один завершённый interrupt IN HID-отчёт и немедленно
+// перевооружает конвейер. Вынесено в общий хелпер: Event Ring один на все
+// endpoint'ы, и синхронное ожидание MSD/control-передачи (xhci_wait_for_event
+// с ненулевым want_ptr) попутно вычитывает и чужие события — те же interrupt
+// IN отчёты клавиатуры/мыши. Отброшенное событие оставляло бы HID-endpoint
+// без перевооружённого TD навсегда; обслуживая его прямо тут, конвейер не
+// голодает независимо от того, кто дренирует кольцо.
 static void xhci_service_hid_event(uint8_t slot_id, uint32_t status) {
     xhci_slot_t *slot = xhci_slot_for_id(slot_id);
-    if (!slot || !slot->hid_ep_dci) return; // не HID-событие (например, MSD) — не наше дело
+    if (!slot || !slot->hid_ep_dci) return; // не HID-событие (например, MSD)
 
-    // НАЙДЕННЫЙ БАГ (репорт пользователя: мышь вообще не двигается, ни в
-    // QEMU-мониторе, ни живым курсором в GUI-окне — при этом клавиатура
-    // работает) — здесь принимался ТОЛЬКО TRB_COMPLETION_SUCCESS.
-    // hid_report_expected_len (ниже) захардкожен в 8 байт под boot-
-    // протокольную клавиатуру (её отчёт действительно всегда ровно 8
-    // байт) — но тот же размер транзакции запрашивался и у мыши, чей
-    // boot-отчёт (buttons+dX+dY) обычно 3-4 байта. xHCI в этом случае
-    // честно репортит Short Packet (устройство прислало меньше, чем было
-    // запрошено) — это ОЖИДАЕМОЕ завершение интеррапт-трансфера, не
-    // ошибка, но строгая проверка "== SUCCESS" отбрасывала КАЖДЫЙ отчёт
-    // мыши молча, так что usb_hid_mouse_report() не вызывался никогда,
-    // хотя эндпоинт исправно перевооружался (мышь выглядела как будто
-    // "зависла" — events просто никогда не доходили до input_mouse_event()).
+    // Баг: мышь не двигалась (клавиатура работала) — здесь принимался только
+    // TRB_COMPLETION_SUCCESS. hid_report_expected_len захардкожен в 8 байт
+    // под клавиатуру, но тот же размер запрашивался и у мыши (boot-отчёт
+    // обычно 3-4 байта) — xHCI честно репортит Short Packet, ожидаемое
+    // завершение, не ошибку; строгая проверка "== SUCCESS" отбрасывала
+    // каждый отчёт мыши молча.
     uint8_t cc = (uint8_t)((status >> TRB_COMPLETION_CODE_SHIFT) & 0xFFu);
     if (cc == TRB_COMPLETION_SUCCESS || cc == TRB_COMPLETION_SHORT_PACKET) {
         if (slot->hid_protocol == USB_HID_PROTOCOL_KEYBOARD) {
@@ -632,21 +615,16 @@ static void xhci_service_hid_event(uint8_t slot_id, uint32_t status) {
     xhci_ring_doorbell(slot->slot_id, (uint8_t)slot->hid_ep_dci);
 }
 
-// Один общий Event Ring обслуживает и синхронное ожидание конкретного
-// события (want_ptr != 0: энумерация, MSD bulk-передачи), и неблокирующий
-// опрос usb_poll() (want_ptr == 0, из таймерного тика) — оба дренируют одно
-// и то же кольцо. Каждое просмотренное, но не совпавшее событие не
-// отбрасывается: если это HID Transfer Event, оно обслуживается через
-// xhci_service_hid_event(), чтобы клавиатура/мышь не оставались без
-// перевооружённого TD. Жёсткий предел итераций внутреннего цикла — защита
-// от зависания всей системы (usb_poll() вызывается с запрещёнными
-// прерываниями; если тут зависнуть, останавливаются все тики).
+// Один общий Event Ring обслуживает синхронное ожидание (want_ptr != 0:
+// энумерация, MSD) и неблокирующий опрос usb_poll() (want_ptr == 0). Каждое
+// просмотренное, но не совпавшее событие не отбрасывается: HID Transfer
+// Event обслуживается через xhci_service_hid_event(), чтобы клавиатура/мышь
+// не остались без перевооружённого TD. Жёсткий предел итераций — защита от
+// зависания (usb_poll() вызывается с запрещёнными прерываниями).
 //
-// xhci_sync_wait_depth: пока > 0 (идёт синхронное ожидание), usb_poll() не
-// трогает Event Ring вообще — сам синхронный вызов уже дренирует кольцо и
-// обслуживает HID-события сам. Без этой защиты периодический usb_poll()
-// (want_ptr=0 — "любое" событие) мог перехватить именно то событие, которого
-// ждёт синхронный вызов, и тот таймаутил бы, хотя контроллер уже ответил.
+// xhci_sync_wait_depth > 0 — синхронное ожидание идёт, usb_poll() не трогает
+// Event Ring: иначе он мог бы перехватить событие, которого ждёт синхронный
+// вызов, и тот таймаутил бы напрасно.
 static volatile int xhci_sync_wait_depth = 0;
 
 static int xhci_wait_for_event_impl(uint32_t want_type, uint64_t want_ptr,
@@ -687,23 +665,14 @@ static int xhci_wait_for_event_impl(uint32_t want_type, uint64_t want_ptr,
       no_new_event:
         if (want_ptr == 0) return -1; // usb_poll(): "сейчас ничего нет" — не ошибка
 
-        // НАЙДЕННЫЙ БАГ (v0.7, этап 5, под-этап 6 — VFS-интеграция
-        // монтирования, первый вызыватель этого синхронного пути НЕ из
-        // кернел-native кода): pit_wait_ms() ждёт продвижения pit_ticks
-        // через hlt, а pit_ticks продвигает только таймерный IRQ. Раньше
-        // этот синхронный путь звался ТОЛЬКО из кернел-native кода (boot-
-        // time энумерация устройств, kernel/shell/commands/mount.c), где
-        // прерывания всегда были включены — никто не замечал, что сам
-        // pit_wait_ms() ниже не гарантирует этого сам. Теперь он же зовётся
-        // из SYS_MOUNT (syscall.c) — а IA32_FMASK (syscall_init(), syscall.c)
-        // маскирует EFLAGS.IF на вход в ЛЮБОЙ syscall. Результат: hlt внутри
-        // pit_wait_ms() ждёт прерывание, которое никогда не придёт —
-        // наглухо зависший процесс (подтверждено: info registers показывает
-        // HLT=1, RIP неподвижен). Фикс — тот же приём save/restore EFLAGS.IF,
-        // что у console_write_lock()/console_write_unlock() (vfs.c), только
-        // в обратную сторону: временно ВКЛЮЧАЕМ прерывания на время ожидания
-        // одного тика, затем возвращаем ровно то, что было у вызывающего
-        // (boot-time путь не заметит разницы — там и так было включено).
+        // Баг: SYS_MOUNT зависал навсегда (HLT=1, RIP неподвижен). pit_wait_ms()
+        // ждёт продвижения pit_ticks через hlt, которое двигает только
+        // таймерный IRQ — но IA32_FMASK маскирует EFLAGS.IF на вход в любой
+        // syscall, так что hlt внутри pit_wait_ms(), вызванного из SYS_MOUNT,
+        // ждал прерывания, которое не могло прийти (boot-time вызыватели
+        // работали, т.к. у них IF было включено). Фикс: временно включаем
+        // прерывания на время ожидания одного тика, затем восстанавливаем
+        // EFLAGS.IF вызывающего.
         {
             uint64_t saved_flags;
             asm volatile("pushfq; popq %0" : "=r"(saved_flags) :: "memory");
@@ -993,12 +962,9 @@ static int xhci_bulk_transfer(xhci_slot_t *slot, xhci_ring_t *ring, uint8_t dci,
     xhci_ring_doorbell(slot->slot_id, dci);
 
     uint32_t status; uint8_t got_slot;
-    // Таймаут одной bulk-передачи. Раньше здесь стояло 100мс "для быстрой
-    // итерации при диагностике" — в 5 раз короче, чем таймаут control-передач
-    // (500мс) — и это было основной причиной нестабильности mount/unmount
-    // (пере)читывающих сотни/тысячи секторов подряд: под нагрузкой
-    // контроллер иногда не укладывался в 100мс на одну bulk-передачу.
-    // Приведено к тому же порядку, что и control-передачи.
+    // Таймаут 1000мс (было 100мс — в 5 раз короче control-передач, 500мс —
+    // основная причина нестабильности mount/unmount под нагрузкой на
+    // сотнях/тысячах секторов). Приведено к тому же порядку.
     if (xhci_wait_for_event(TRB_TYPE_TRANSFER_EVENT, trb_phys, &status, &got_slot, 1000) != 0) {
         printf("[XHCI] MSD bulk transfer timed out (slot=%u dci=%u)\n", slot->slot_id, dci);
         return -1;
@@ -1470,12 +1436,9 @@ void xhci_init(void) {
         return;
     }
 
-    // Каждый порт энумерируется ПОЛНОСТЬЮ, прежде чем переходить к
-    // следующему — тот же принцип, что и раньше в UHCI (на "адресе по
-    // умолчанию" в любой момент может отвечать не более одного устройства;
-    // у xHCI явного "адреса 0" больше нет, но Address Device Command всё
-    // равно должна выполняться для одного слота за раз, пока энумерация
-    // синхронна).
+    // Каждый порт энумерируется полностью, прежде чем переходить к
+    // следующему (как в UHCI) — Address Device Command выполняется для
+    // одного слота за раз, пока энумерация синхронна.
     for (uint8_t port = 1; port <= xhci_max_ports; port++) {
         uint8_t speed = 0;
         if (xhci_check_port(port, &speed)) {
@@ -1507,16 +1470,12 @@ int xhci_msd_get_info(int index, uint32_t *out_max_lba, uint32_t *out_block_size
     return 0;
 }
 
-// count блоков одной командой READ10/WRITE10 (реальный transfer-length —
-// 16-битное поле cdb[7..8], big-endian) через большой scratch-буфер
-// (xhci_dma_scratch_big_*, см. xhci_init()) — то, что раньше требовало
-// одного bulk-transfer/SCSI-команды НА КАЖДЫЙ 512-байтовый блок, теперь
-// делается пачками до XHCI_MSD_MAX_BATCH_BLOCKS за раз. Если большой буфер
-// не выделился при инициализации (редкий случай нехватки подряд идущих
-// страниц), xhci_msd_command() сам откатится на ограничение в PAGE_SIZE —
-// эти функции просто передают дальше настоящий data_len, ничего не решая
-// сами. Предел вынесен в xhci.h (XHCI_MSD_MAX_BATCH_BLOCKS) — вызывающие
-// вроде mount.c батчат свои собственные циклы по тому же числу.
+// count блоков одной командой READ10/WRITE10 через большой scratch-буфер
+// (xhci_dma_scratch_big_*) — пачками до XHCI_MSD_MAX_BATCH_BLOCKS вместо
+// одной SCSI-команды на каждый 512-байтовый блок. Если большой буфер не
+// выделился (нехватка подряд идущих страниц), xhci_msd_command() сам
+// откатится на PAGE_SIZE. Предел в xhci.h — вызывающие (mount.c) батчат
+// свои циклы по тому же числу.
 
 int xhci_msd_read_blocks(int index, uint32_t lba, uint32_t count, void *buf, uint32_t block_size) {
     xhci_slot_t *slot = xhci_msd_slot_for_index(index);
@@ -1573,12 +1532,10 @@ void usb_poll(void) {
     // перехватить событие, которого ждут они (см. xhci_sync_wait_depth).
     if (xhci_sync_wait_depth > 0) return;
 
-    // want_ptr=0 (любой Transfer Event) означает, что xhci_wait_for_event()
-    // возвращает управление на КАЖДОМ событии, не заходя в свою ветку
-    // "чужое — обслужить и продолжать драться дальше" (та ветка нужна
-    // только когда кто-то ждёт конкретное ДРУГОЕ событие, например MSD
-    // control-передача) — поэтому обслуживание тут делает сам usb_poll(),
-    // тем же общим хелпером xhci_service_hid_event().
+    // want_ptr=0 — xhci_wait_for_event() возвращает управление на каждом
+    // событии без своей ветки "обслужить чужое и продолжать" (та нужна
+    // только когда кто-то ждёт конкретное другое событие), так что
+    // обслуживание тут делает сам usb_poll(), тем же xhci_service_hid_event().
     for (int i = 0; i < XHCI_POLL_MAX_EVENTS_PER_TICK; i++) {
         uint32_t status; uint8_t slot_id;
         if (xhci_wait_for_event(TRB_TYPE_TRANSFER_EVENT, 0, &status, &slot_id, 0) != 0)

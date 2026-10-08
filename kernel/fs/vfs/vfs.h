@@ -94,13 +94,11 @@ int vfs_rmdir(const char *path);
 int vfs_readdir(int fd, void *buf);
 
 // 1=POLLIN, 2=POLLOUT — те же значения, что в kernel/system/syscall/
-// syscall.h и userspace libc/include/lufira/syscall.h (см. комментарий
-// там, почему не #include друг друга — тот же приём, что уже у O_*/E*
-// по всему этому ABI). Неблокирующая проверка готовности fd — для
-// SYS_POLL (v0.8-мост, пункт 3). Обычные файлы готовы всегда (LufiraFS
-// целиком в RAM); pipe/консоль проверяют своё реальное состояние.
-// Возвращает 0 и *out_revents (подмножество events, которое реально
-// готово — 0, если ничего), или -1 если fd невалиден.
+// syscall.h и userspace libc (см. комментарий там). Неблокирующая
+// проверка готовности fd для SYS_POLL. Обычные файлы готовы всегда
+// (LufiraFS целиком в RAM); pipe/консоль проверяют реальное состояние.
+// Возвращает 0 и *out_revents (подмножество events, что реально готово),
+// или -1 если fd невалиден.
 int vfs_poll_check(int fd, int events, int *out_revents);
 inode_t* vfs_lookup(const char *path);
 inode_t* vfs_get_root(void);

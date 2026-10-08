@@ -2,6 +2,111 @@
 
 All notable changes to LufiraOS are documented in this file.
 
+## [0.8.0] - 2026-10-08
+
+The largest release so far: a package manager, a GUI with a userspace window
+manager, and a real network stack (DNS/TLS/HTTPS) — plus two critical bugs
+found and fixed only once those features were tested end-to-end over a real
+network. The shell and every userspace program now live in their own
+repository, [lufira-packages](https://github.com/VLPLAY-Games/lufira-packages),
+built/staged by a third repo, [LufiraOS-Builder](https://github.com/VLPLAY-Games/LufiraOS-Builder);
+this repository is kernel + bootloader only from this release on.
+
+### Added
+
+- **Package manager.** `.lpg` format (`tools/lpg_format.h`: header, dependency
+  table, file table) plus `dlpg` (install/update/list/remove, dependency
+  version checks, `/etc/packages/` bookkeeping) — see `lufira-packages`.
+- **`dlpg sync`/`dlpg upgrade`** — fetch the package index and newer `.lpg`s
+  straight from `lufira-packages`' published `index.json`/`release/` on
+  GitHub, over the new network stack below. `LufiraOS-Builder` does the same
+  by default now (prebuilt packages, sha256-verified) instead of requiring a
+  local source build; `--build-packages-from-source` keeps the old path.
+  `LufiraOS-Builder` also auto-clones a missing `LufiraOS` checkout.
+- **GUI + userspace window manager.** New generic per-process mailbox IPC
+  (`SYS_IPC_SEND`/`RECV`, `kernel/system/ipc/mailbox.c`) and a GUI syscall
+  surface (`SYS_WIN_*`, `SYS_WM_REGISTER`, `SYS_FB_*`) — the compositor
+  itself (`wm.c`: z-order, drag, resize/maximize/minimize, taskbar with a
+  Start menu, desktop launcher icons, dirty-rectangle presentation) is an
+  ordinary ring-3 client of these syscalls, not kernel code. GUI apps
+  (terminal, notepad, file manager, calculator, system info) in
+  `lufira-packages`.
+- **Dynamic linking.** Packages now link against one shared `/lib/libc.so`
+  (`kernel/system/elf/dynlink.c`, ET_DYN) instead of a static copy each.
+- **Real userspace shell**, replacing the old kernel-native one — a ring-3
+  ELF (`lufira-packages/shell/shell.c`) reading `/dev/console` via blocking
+  `SYS_READ`, `fork`/`exec`/`wait` for every command.
+- **UDP + DNS resolver** (`kernel/net/udp.c`, `dns.c`) — networking no longer
+  requires literal IP addresses.
+- **TLS 1.2 client + HTTPS**, from scratch (`kernel/net/tls.c`,
+  `kernel/net/crypto/`: SHA-256, HMAC, AES-128-GCM, X25519, bignum/RSA) —
+  ECDHE X25519 key exchange, AES-128-GCM records, SNI, RSA PKCS#1v1.5
+  verification of the server's ServerKeyExchange signature against its own
+  certificate. **Does not validate the certificate chain against a root CA
+  store** — defeats a naive on-path attacker, not a CA-capable one. No
+  hardware RNG either (handshake randomness is `rdtsc`+PIT through SHA-256),
+  so no real forward secrecy. Good enough for fetching public package files
+  over SLIRP, not a general-purpose secure channel yet.
+- **`SYS_NET_FETCH` (66)** — one syscall, `http_fetch()` underneath: resolves
+  the host, connects (TCP or TLS for `https://`), sends the request, parses
+  the response (`Content-Length` or chunked), writes the body straight into
+  the caller's buffer. `dlpg sync`/`upgrade` are its only caller today.
+- **`SYS_DUP2` (65)** — redirect a child's stdio; used by the terminal app to
+  wrap a real `shell.elf` behind two pipes instead of reimplementing a shell.
+- QEMU KVM acceleration in `LufiraOS-Builder` (`-machine pc,accel=kvm:tcg`,
+  falls back to software emulation automatically).
+
+### Fixed
+
+- **USB HID mouse input silently dropped** — boot-protocol mice send 3-byte
+  reports against an 8-byte requested transfer, producing a legitimate Short
+  Packet completion that `xhci.c` was treating as failure.
+- **Terminal app pipe deadlock** — `pipe_read()` waited to fill the full
+  requested buffer instead of returning as soon as any data arrived.
+- **Lost-wakeup race in `mailbox_recv()`** — a message could arrive in the
+  gap between the empty-check and registering as a waiter and be lost.
+- **WM: black fill on window resize/maximize** — the newly exposed area
+  wasn't painted with the window's own background color.
+- **WM: visible cursor lag** — every mouse-move event was doing a full-frame
+  recomposite+present; now a cursor-only move does a small dirty-rect copy.
+- **Boot screen freeze after the cursor-lag fix** — `put_pixel()` and three
+  other direct framebuffer writers were setting the dirty flag without
+  updating the dirty *rectangle*, so `gfx_present()` flushed nothing.
+- **GUI freeze while a terminal command is producing output** — the WM's
+  message-coalescing loop had no time cap, so a steady stream of draw
+  requests (any chatty command) could starve it indefinitely; capped at
+  ~30 ms per batch.
+- **`SYS_NET_FETCH` hanging forever instead of timing out** — `syscall`
+  masks CPU interrupts on entry and nothing re-enabled them; every
+  network-stack timeout is measured via the PIT interrupt, so with
+  interrupts masked, every deadline silently became infinite.
+- **TCP silently dropping almost all received data** — the receive path kept
+  only a single one-segment buffer, so any burst of back-to-back segments
+  (how every response longer than one MSS arrives) kept just the first and
+  dropped the rest, recoverable only by the peer's retransmission timeout.
+  Replaced with a real receive queue and an honest advertised window, so the
+  sender itself never sends more than there's room for.
+
+### Changed
+
+- `index.json`'s `"lpg"` field (and new `"shell_elf"`/`"libc_so"` entries) in
+  `lufira-packages` are now real download URLs, not local build paths.
+- Taskbar: the bare "Exit" button is now a "Start" menu (Exit GUI / Shutdown
+  / Reboot), matching the request to be able to power off without a shell.
+- Package versions normalized to 1.0.0 across the board (a few had drifted
+  ahead to 1.0.1/1.1.0, inconsistent for a first release).
+
+### Known Issues
+
+- **TLS has no certificate chain validation** (see Added, above) and no
+  strong entropy source — treat it as "keeps a passive listener out", not as
+  a hardened channel.
+- **`SYS_NET_FETCH` stalls the whole system for the duration of the
+  fetch** — same synchronous model as `wget` always had; a big download
+  blocks every other process until it finishes or times out.
+- **No DHCP** — still a static IP plus QEMU SLIRP's built-in DNS forwarder.
+- All prior Known Issues not superseded above still apply.
+
 ## [0.6.5] - 2026-09-29
 
 ### Added

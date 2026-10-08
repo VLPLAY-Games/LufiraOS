@@ -30,7 +30,7 @@ The driver subsystem provides hardware abstraction for essential peripherals:
 - **Keyboard** – PS/2 keyboard with scancode translation, modifier handling, and IRQ1 interrupt support.
 - **Mouse** – PS/2 mouse initialisation and packet decoding.
 - **USB** – an xHCI host‑controller driver providing boot‑protocol HID keyboard/mouse input and Bulk‑Only Transport USB Mass Storage (block read/write), unified with PS/2 through a shared input dispatcher.
-- **Network** – an RTL8139 Fast Ethernet driver providing raw frame TX/RX to the protocol stack in `kernel/net/` (see [`16_networking.md`](16_networking.md) for Ethernet/ARP/IP/ICMP/TCP and the `ifconfig`/`ping`/`wget` shell commands built on top).
+- **Network** – an RTL8139 Fast Ethernet driver providing raw frame TX/RX to the protocol stack in `kernel/net/` (see [`16_networking.md`](16_networking.md) for the full Ethernet/ARP/IP/ICMP/TCP/UDP/DNS/TLS/HTTP stack built on top). There is no interactive `ifconfig`/`ping`/`wget` anymore — the only userspace consumer today is `dlpg sync`/`dlpg upgrade` via `SYS_NET_FETCH`.
 - **PCI** – bus enumeration, configuration space access, and BAR (Base Address Register) management.
 - **AC’97** – audio controller (Intel ICH‑compatible) with DMA‑based playback and tone generation.
 

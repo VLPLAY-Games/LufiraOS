@@ -1,53 +1,47 @@
 # Build System
 
-This document describes the build system used to compile the LufiraOS bootloader, kernel, and disk image. The build is managed by a comprehensive Makefile that handles all build steps, dependency checking, and QEMU execution.
+This document describes how LufiraOS is built, assembled into a disk image, and run. Since v0.7, this is **two separate tools in two separate repositories**:
+
+- **This repository's `Makefile`** compiles only the UEFI bootloader and the kernel — `BOOTX64.EFI` and `kernel.bin`. It knows nothing about disk images, QEMU, or userspace packages.
+- **The sibling [`LufiraOS-Builder`](https://github.com/VLPLAY-Games/LufiraOS-Builder) repository** (pure tooling, no OS code of its own) takes those two files, stages seed files and userspace `.lpg` packages from the sibling [`lufira-packages`](https://github.com/VLPLAY-Games/lufira-packages) repository onto a LufiraFS region, assembles the bootable `disk.img`, and launches QEMU.
+
+Before v0.7 this was all one Makefile (`make run`/`make debug`/`make monitor`, a disk-image recipe, QEMU invocations, and all). That Makefile has been **cut down to just the kernel/bootloader build** — anything else described by an older version of this document no longer applies here, only in `LufiraOS-Builder`.
 
 ---
 
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Prerequisites](#prerequisites)
-3. [Build Commands](#build-commands)
-4. [Build Outputs](#build-outputs)
-5. [Build Process](#build-process)
-   - [Bootloader Compilation](#bootloader-compilation)
-   - [Kernel Compilation](#kernel-compilation)
-   - [Disk Image Creation](#disk-image-creation)
-6. [Running in QEMU](#running-in-qemu)
-   - [Standard Run](#standard-run)
-   - [Debug Mode](#debug-mode)
-   - [Monitor Mode](#monitor-mode)
-7. [Adding Files to the Disk Image](#adding-files-to-the-disk-image)
-8. [Directory Structure](#directory-structure)
-9. [Troubleshooting](#troubleshooting)
-10. [Future Extensions](#future-extensions)
+2. [This Repository: `LufiraOS/Makefile`](#this-repository-lufiraosmakefile)
+   - [Prerequisites](#prerequisites)
+   - [Build Commands](#build-commands)
+   - [Build Process](#build-process)
+3. [The Sibling Repository: `LufiraOS-Builder`](#the-sibling-repository-lufiraos-builder)
+   - [What It Does](#what-it-does)
+   - [Where Packages Come From](#where-packages-come-from)
+   - [Disk Image Assembly](#disk-image-assembly)
+   - [Running in QEMU](#running-in-qemu)
+4. [Adding Files to the Disk Image](#adding-files-to-the-disk-image)
+5. [Directory Structure](#directory-structure)
+6. [Troubleshooting](#troubleshooting)
+7. [Dependencies](#dependencies)
+8. [Conclusion](#conclusion)
 
 ---
 
 ## Overview
 
-The LufiraOS build system is designed to be simple, fast, and self-contained. It uses GNU Make and standard Unix tools to:
-
-- Compile the UEFI bootloader using the GNU-EFI framework.
-- Compile the kernel using GCC with custom flags.
-- Link the kernel using a custom linker script.
-- Build the host-side `mkfs_lufirafs` tool and use it to format/populate the LufiraFS region of the disk image.
-- Create a bootable disk image with a small FAT12 ESP (for UEFI firmware) followed by a LufiraFS region.
-- Launch the system in QEMU for testing and debugging.
-
-**Key Features:**
-- **Modular Build** – bootloader and kernel can be built separately.
-- **Automatic Dependency Checking** – required tools are verified before building.
-- **Clean Separation** – source, build artefacts, and outputs are kept separate.
-- **QEMU Integration** – the system can be launched directly from the Makefile.
-- **Debugging Support** – special targets for verbose logging and QEMU monitor.
+**Key facts:**
+- `LufiraOS/Makefile` produces exactly two artifacts: `build/BOOTX64.EFI` (UEFI bootloader) and `build/kernel.bin` (raw kernel binary). It has no `run`/`debug`/`monitor`/`disk` targets anymore.
+- `LufiraOS-Builder/build.py` is a standalone Python CLI (with an optional Tkinter GUI, `gui.py`) that drives everything downstream of those two files: compiling the host-side `mkfs_lufirafs` tool, fetching or building userspace `.lpg` packages, assembling `disk.img`, and launching QEMU.
+- `LufiraOS-Builder` expects sibling checkouts (`../LufiraOS`, `../lufira-packages` relative to itself) by default, both overridable with `--lufira-repo`/`--lufira-packages-repo`, and will `git clone` them automatically if missing (`tools.ensure_repo()`).
+- By default, `LufiraOS-Builder` does **not** need a local `lufira-packages` checkout or toolchain at all: it downloads prebuilt `.lpg` packages (plus `shell.elf`/`libc.so`) straight from `lufira-packages`' own published `index.json`/`release/` on GitHub, the same place `dlpg sync`/`dlpg upgrade` pull from at runtime (see [`17_package_manager.md`](17_package_manager.md)). Pass `--build-packages-from-source` to build a local `lufira-packages` checkout instead, for package development.
 
 ---
 
-## Prerequisites
+## This Repository: `LufiraOS/Makefile`
 
-### Required Tools
+### Prerequisites
 
 | Tool | Purpose | Package (Ubuntu/Debian) |
 |------|---------|-------------------------|
@@ -57,386 +51,177 @@ The LufiraOS build system is designed to be simple, fast, and self-contained. It
 | `nm` | Symbol listing | `binutils` |
 | `make` | Build automation | `make` |
 | `truncate` | File size manipulation | `coreutils` |
-| `dd` | Raw disk writing | `coreutils` |
-| `mkfs.fat` | FAT filesystem creation | `dosfstools` |
-| `mmd` | Create FAT directory | `mtools` |
-| `mcopy` | Copy to FAT image | `mtools` |
-| `qemu-system-x86_64` | Emulator | `qemu-system-x86` |
-| OVMF firmware | UEFI boot in QEMU | `ovmf` or `edk2-ovmf` |
+| GNU-EFI headers/libs | UEFI bootloader | `gnu-efi` (or distro equivalent) |
 
 ### Environment Setup
 
-The Makefile assumes the following default paths:
+The Makefile assumes:
 - GNU-EFI headers: `/usr/include/efi`
 - GNU-EFI libraries: `/usr/lib`
-- OVMF firmware: `/usr/share/ovmf/OVMF.fd`
 
-**Note:** On some distributions, OVMF may be located in `/usr/share/edk2-ovmf/x64/OVMF.fd` or similar. You may need to adjust the `-bios` path in the `run` target.
-
----
-
-## Build Commands
+### Build Commands
 
 | Command | Description |
 |---------|-------------|
-| `make run` | Builds the complete disk image (bootloader + kernel). |
-| `make bootloader` | Builds only the UEFI bootloader (`BOOTX64.EFI`). |
-| `make kernel` | Builds only the kernel binary (`kernel.bin`). |
-| `make disk` | Creates the disk image (requires bootloader and kernel). |
-| `make clean` | Removes all build artefacts. |
-| `make run` | Launches QEMU with the disk image. |
-| `make debug` | Launches QEMU with debug logging enabled. |
-| `make monitor` | Launches QEMU with a telnet monitor. |
-| `make check-disk` | Lists the contents of the disk image. |
-| `make info` | Shows build configuration and file lists. |
-| `make quick` | Cleans and rebuilds everything from scratch. |
+| `make all` (default) | Builds `BOOTX64.EFI` and `kernel.bin`. |
+| `make bootloader` | Builds only `BOOTX64.EFI`. |
+| `make kernel` | Builds only `kernel.bin` (and `kernel.elf`, with debug symbols). |
+| `make clean` | Removes `build/`. |
+| `make info` | Prints the configured source-file lists (bootloader/kernel C/kernel ASM). |
+| `make quick` | `clean` then `all`. |
+
+There is no `make run`, `make debug`, `make monitor`, `make disk`, or `make check-disk` — those all moved to `LufiraOS-Builder` (see below). `LufiraOS-Builder`'s own `--no-build-kernel` flag, when set, skips invoking this Makefile at all and uses whatever `build/BOOTX64.EFI`/`build/kernel.bin` are already on disk.
+
+### Build Process
+
+**Bootloader compilation** (unchanged from earlier versions): each `boot/*.c` file is compiled with GNU-EFI flags (`-fpic -ffreestanding -fno-stack-protector -fshort-wchar -mno-red-zone -std=gnu11`), linked against `-lefi -lgnuefi` with the EFI linker script, then `objcopy`'d to `efi-app-x86_64` format.
+
+**Kernel compilation:** every file in `KERNEL_C_SOURCES`/`KERNEL_ASM_SOURCES` (`Makefile`, kept in sync by hand with the actual `kernel/` tree — this now includes `kernel/net/{udp,dns,tls,http_client}.c` and `kernel/net/crypto/*.c`, `kernel/system/elf/dynlink.c`, and `kernel/system/ipc/mailbox.c`, none of which existed in earlier releases) is compiled with `-m64 -ffreestanding -fno-stack-protector -fno-stack-check -fno-asynchronous-unwind-tables -fno-builtin -mno-red-zone -mgeneral-regs-only -std=gnu11`, linked statically (`-static -nostdlib -z max-page-size=0x1000 -z separate-code --gc-sections`) against the custom `kernel/linker.ld` script, then `objcopy`'d to a raw binary and truncated to the size computed from the linker-defined `__kernel_end` symbol.
+
+`kernel/shell/shell.c` and `kernel/shell/commands/*.c` are still listed in `KERNEL_C_SOURCES` and still compiled into `kernel.bin` — they are dead code (unreachable since the shell moved to userspace, see [`14_shell_commands.md`](14_shell_commands.md)), not something the build system special-cases.
 
 ---
 
-## Build Outputs
+## The Sibling Repository: `LufiraOS-Builder`
 
-All build artefacts are placed in the `build/` directory:
-
-| File | Description |
-|------|-------------|
-| `BOOTX64.EFI` | UEFI bootloader binary. |
-| `kernel.bin` | Raw kernel binary (for bootloader to load). |
-| `kernel.elf` | Kernel ELF file with debug symbols. |
-| `mkfs_lufirafs` | Host-compiled tool for formatting/populating the LufiraFS region (see [`08_filesystem.md`](08_filesystem.md)). |
-| `disk.img` | Complete bootable disk image: a FAT12 ESP followed by a LufiraFS region. |
-| `*.o` | Object files for each source file. |
-
-**Build Directory Structure:**
-```
-
-
-build/
-├── boot/ # Bootloader object files
-│ ├── boot.o
-│ ├── boot\_modes/
-│ ├── loaders/
-│ ├── system/
-│ └── ui/
-├── kernel/ # Kernel object files
-│ ├── drivers/
-│ ├── fs/
-│ ├── lib/
-│ ├── shell/
-│ └── system/
-├── BOOTX64.EFI # UEFI bootloader
-├── kernel.bin # Kernel binary (stripped)
-├── kernel.elf # Kernel with debug symbols
-└── disk.img # Complete disk image
-
-
-```
----
-
-## Build Process
-
-### Bootloader Compilation
-
-1. **Compile each C file** with GNU-EFI flags:
-   - Position-independent code (`-fpic`)
-   - Freestanding environment (`-ffreestanding`)
-   - No stack protection (`-fno-stack-protector`)
-   - Short wchar support (`-fshort-wchar`)
-   - No red zone (`-mno-red-zone`)
-   - GNU C11 standard (`-std=gnu11`)
-
-2. **Link the object files** with GNU-EFI libraries:
-   - Uses the EFI linker script (`elf_x86_64_efi.lds`)
-   - Shared library format (`-shared`, `-Bsymbolic`)
-   - Links against `-lefi` and `-lgnuefi`
-
-3. **Convert to EFI binary** using `objcopy`:
-   - Targets `efi-app-x86_64`
-   - Selects only relevant sections (`.text`, `.data`, `.dynamic`, `.reloc`, etc.)
-
-### Kernel Compilation
-
-1. **Compile C sources** with kernel flags:
-   - 64-bit target (`-m64`)
-   - Freestanding (`-ffreestanding`)
-   - No stack protection or checking
-   - No built-in functions (`-fno-builtin`)
-   - No red zone (`-mno-red-zone`)
-   - General-purpose registers only (`-mgeneral-regs-only`)
-   - GNU C11 standard (`-std=gnu11`)
-
-2. **Compile assembly sources** with preprocessor support (`-x assembler-with-cpp`).
-
-3. **Link the object files** with the custom linker script (`linker.ld`):
-   - Static linking (`-static`)
-   - No standard libraries (`-nostdlib`)
-   - Custom page alignment (`-z max-page-size=0x1000`)
-   - Dead code elimination (`--gc-sections`)
-
-4. **Extract the binary** using `objcopy`:
-   - Raw binary output (`-O binary`)
-   - The linker script defines `__kernel_end` symbol for size calculation.
-
-5. **Calculate kernel size** from the `__kernel_end` symbol using `nm` and `truncate`.
-
-### Disk Image Creation
-
-The disk image (16 MiB by default, `DISK_TOTAL_SIZE`) is built in two independent stages that are then concatenated. `LUFIRAFS_ESP_SIZE` (4 MiB) must match the constant of the same name in `kernel/fs/lufirafs/lufirafs_format.h` — a mismatch means `mkfs_lufirafs` formats a different byte range than the one the kernel actually mounts.
-
-**Stage 1 — the ESP (FAT12, read by UEFI firmware):**
-
-1. Create an empty `build/esp.img` sized `LUFIRAFS_ESP_SIZE` using `dd`.
-2. Format it as FAT12 using `mkfs.fat -F 12 -S 512`.
-3. Create `::/EFI` and `::/EFI/BOOT` using `mmd`.
-4. Copy `build/BOOTX64.EFI` → `::/EFI/BOOT/BOOTX64.EFI` and `build/kernel.bin` → `::/kernel.bin` using `mcopy`.
-5. `dd` this ESP image into `disk.img` at offset 0 (`conv=notrunc`).
-
-**Stage 2 — the LufiraFS region:**
-
-6. Build `build/mkfs_lufirafs` (a normal hosted C program) from `tools/mkfs_lufirafs.c`.
-7. `mkfs_lufirafs format` writes a fresh LufiraFS superblock/bitmap/inode table into the remaining `LUFIRAFS_REGION_SIZE` bytes of `disk.img`.
-8. `mkfs_lufirafs mkdir`/`put` create `/test`, `/system`, `/logs`, and `/readme.txt`.
-
-See [`08_filesystem.md`](08_filesystem.md) for the on-disk format itself.
-
----
-
-## Running in QEMU
-
-### Standard Run
+### What It Does
 
 ```bash
-make run
+# From a sibling checkout: ../LufiraOS and ../lufira-packages (overridable).
+python3 build.py run
 ```
 
+| Subcommand | Description |
+|------------|-------------|
+| `build` | Assembles `disk.img` without launching anything. |
+| `run` | `build`, then launches QEMU with serial on stdio. |
+| `debug` | `build` plus the `/tests` payload and an attached USB stick image, then launches QEMU with debug logging. |
+| `monitor` | `build`, then launches QEMU with the HMP monitor exposed on `telnet:127.0.0.1:4444`. |
+| `clear` | Removes all build output — this repository's own `make clean` plus `LufiraOS-Builder`'s `--out-dir`. |
 
-**QEMU Parameters:**
+Useful flags (full list: `python3 build.py <subcommand> --help`):
 
-- **BIOS:** OVMF UEFI firmware (`/usr/share/ovmf/OVMF.fd`)
-- **Disk:** `build/disk.img` as IDE drive (raw format, index 0)
-- **Memory:** 128 MB (`-m 128M`)
-- **Network:** Disabled (`-net none`)
-- **Audio:** PC speaker and AC'97 audio (`-machine pcspk-audiodev=audio`, `-audiodev driver=alsa,id=audio`, `-device AC97,audiodev=audio`)
-- **Output:** Serial port redirected to stdio (`-serial stdio`)
+| Flag | Effect |
+|------|--------|
+| `--lufira-repo PATH` | Path to the `LufiraOS` checkout (default: sibling `../LufiraOS`). |
+| `--lufira-packages-repo PATH` | Path to the `lufira-packages` checkout (default: sibling `../lufira-packages`; only used with `--build-packages-from-source`). |
+| `--out-dir PATH` | Where `disk.img` and intermediate files go (default: `build/`). |
+| `--no-build-kernel` | Skip invoking `LufiraOS`'s `Makefile`; use whatever `build/BOOTX64.EFI`/`build/kernel.bin` are already there. |
+| `--package PATH.lpg` | Install one extra `.lpg` during image assembly (repeatable). |
+| `--no-default-packages` | Don't install the default package set (`shell.elf`/`libc.so` are still staged — not optional, the kernel loads `shell.elf` directly on every boot). |
+| `--only-package NAME` | Install only the named default package(s), instead of all of them. |
+| `--build-packages-from-source` | Build `lufira-packages` locally instead of downloading its prebuilt release. |
 
-**Run Customisations:**
+A thin Tkinter GUI, `gui.py`, sits on top of the same CLI — every button runs the corresponding `build.py` subcommand as a subprocess and streams its output, so it can never drift from the CLI's own behavior.
 
-- Adjust memory size: `-m 256M`
-- Disable audio: remove `-audiodev` and `-device AC97`
-- Use different OVMF path: change `-bios` parameter
+### Where Packages Come From
 
-### Debug Mode
+By default (`fetch_default_packages_remote()`, `lufira_builder/packages.py`), `LufiraOS-Builder` downloads `index.json` and every default package's `.lpg` from `lufira-packages`' own GitHub repository (`raw.githubusercontent.com` — the same index `dlpg sync` fetches at runtime, see [`17_package_manager.md`](17_package_manager.md)), plus `shell.elf`/`libc.so` directly (these two are staged files, not `.lpg` packages — see below). Downloads are cached by SHA-256 so repeat builds only re-fetch what changed, and a checksum mismatch against what `index.json` claims is a hard build error rather than a silently-corrupt image.
 
+Passing `--build-packages-from-source` instead builds a local `lufira-packages` checkout via its own `build.py` (see that repository's README) — needed for actually developing packages, not for a normal build.
 
-```
-make debug
-```
+### Disk Image Assembly
 
+`lufira_builder/image.py` (this logic used to be the `Makefile`'s disk-image recipe) builds `disk.img` in the same two stages as before the split:
 
-**Additional QEMU Parameters:**
+**Stage 1 — the ESP (FAT12):** a `LUFIRAFS_ESP_SIZE`-sized (4 MiB) FAT12 image holding `/EFI/BOOT/BOOTX64.EFI` and `/kernel.bin`, written via `mkfs.fat`/`mmd`/`mcopy`, then `dd`'d into `disk.img` at offset 0. `ESP_SIZE` (`lufira_builder/config.py`) must stay in sync with `LUFIRAFS_ESP_SIZE` in this repository's `kernel/fs/lufirafs/lufirafs_format.h` — the same constraint the old Makefile recipe had, just checked from the other repository now.
 
-- No reboot (`-no-reboot`)
-- No shutdown (`-no-shutdown`)
-- Debug logging: `-d cpu_reset,guest_errors`
-- Log output: `build/qemu_debug.log`
+**Stage 2 — the LufiraFS region:** built with the host-compiled `mkfs_lufirafs` (`tools/mkfs_lufirafs.c`, compiled fresh by `LufiraOS-Builder` itself — see [`08_filesystem.md`](08_filesystem.md#the-mkfs_lufirafs-tool)):
+1. `format` — fresh superblock/bitmap/inode table.
+2. `mkdir` — `/system`, `/logs`, `/etc`, `/bin`, `/lib`.
+3. `put` — `/readme.txt`, `/etc/passwd`/`/etc/group` (from this repository's `tools/seed/`), `/bin/shell.elf` and `/lib/libc.so` (from `lufira-packages`, staged directly — **not** `.lpg` packages: the kernel loads `shell.elf` by hardcoded path on every boot/shell-respawn, and `dlpg` has no mechanism to "remove" either one, so they can't go through the normal package-install path).
+4. Every default (or `--package`/`--only-package`-selected) `.lpg` is then unpacked straight onto the image using the **same install logic as `dlpg install`** (`lufira_builder/lpg.py`'s `plan_install()`, shared code with `dlpg` itself) — dependency checking, file extraction, and `/etc/packages/installed`/`/etc/packages/<name>.files` receipts — just writing through `mkfs_lufirafs put` instead of through a running kernel's syscalls. The practical effect: a freshly built image already has every default package "installed" from the very first boot, exactly as if someone had run `dlpg install` on each one by hand; `dlpg` itself only matters for packages added *after* boot.
 
-Before launching QEMU, the `debug` target writes a `/system/devmode.flag` marker file into `disk.img` (via `mkfs_lufirafs put`), which enables [developer mode](04_logging.md) automatically — every `make debug` run shows the full verbose boot/driver log. This step is idempotent, so running `make debug` repeatedly against the same image is safe. `make run` does **not** touch the flag, so it always starts with whatever developer-mode state the disk image already has (off, by default, on a freshly built image).
+### Running in QEMU
 
-**Use Case:** Useful for diagnosing early boot failures, page faults, CPU exceptions, and driver issues that developer mode's verbose log would otherwise hide.
-
-### Monitor Mode
-
-
-```
-make monitor
-```
-
-
-**Additional QEMU Parameters:**
-
-- Telnet monitor on port 4444 (`-monitor telnet:127.0.0.1:4444,server,nowait`)
-
-**Connect to Monitor:**
-
+`lufira_builder/qemu.py` replaces the old Makefile's `run`/`debug`/`monitor` targets. All three share a common prefix:
 
 ```
-telnet localhost 4444
+qemu-system-x86_64 -machine pc,accel=kvm:tcg -bios <OVMF path> -drive file=disk.img,format=raw,if=ide,index=0
 ```
 
+`accel=kvm:tcg` opportunistically uses hardware acceleration (`/dev/kvm`) when available and falls back to software emulation otherwise — this matters more than it used to, because `dlpg sync`/`upgrade`'s TLS handshake (RSA modular exponentiation, see [`16_networking.md`](16_networking.md)) is noticeably slower under pure TCG and can otherwise look like a hang.
 
-**Useful Monitor Commands:**
+| Mode | Extra flags |
+|------|-------------|
+| `run` | 128 MB RAM, `-netdev user,id=net0 -device rtl8139,netdev=net0` (real network, unlike the old `-net none`), AC'97 audio, xHCI + USB keyboard/mouse, serial on stdio. |
+| `debug` | 256 MB RAM, same networking/USB, plus `-no-reboot -no-shutdown`, `-d int,cpu_reset,guest_errors` logged to `build/qemu_debug.log`, a `/system/devmode.flag` dropped onto the image first (enabling [developer mode](04_logging.md) for that run), the `lufira-tests` `.elf` payload staged under `/tests`, and an attached FAT12 USB stick image with a test file on it. |
+| `monitor` | Same as `run`, plus `-monitor telnet:127.0.0.1:4444,server,nowait` and an attached (blank) USB stick image. |
 
-- `info registers` – show CPU state
-- `info mem` – show memory mapping
-- `xp /x ADDR` – examine physical memory
-- `stop` / `cont` – pause/resume execution
-- `system_reset` – reset the emulator
+Networking is no longer disabled by default — the whole point of `run`/`debug`/`monitor` using QEMU's user-mode networking (SLIRP) is so the real network stack (DNS/TCP/TLS/HTTP, see [`16_networking.md`](16_networking.md)) and `dlpg sync`/`upgrade` have something to talk to.
 
 ---
 
 ## Adding Files to the Disk Image
 
-**Important:** `mtools` (`mcopy`/`mmd`) only understands the FAT12 ESP region — it cannot see or modify the LufiraFS region at all. Since the ESP is meant to hold only `/EFI/BOOT/BOOTX64.EFI` and `/kernel.bin` (see [`08_filesystem.md`](08_filesystem.md)), use `mkfs_lufirafs` to add anything else to the disk image.
+- **A new default package:** add it to `lufira-packages` (own build/release process — see that repository's README) and it will show up in `index.json`, picked up automatically by `fetch_default_packages_remote()`.
+- **A one-off extra package for a single build:** `python3 build.py run --package /path/to/thing.lpg`.
+- **A raw file outside the package system** (like the seed `/etc/passwd`/`/etc/group` or `/readme.txt`): add a `mkfs(mkfs_bin, "put", ...)` call in `lufira_builder/image.py`'s `populate_lufirafs()`, following the existing pattern.
 
-### Using `mkfs_lufirafs`
-
-```bash
-build/mkfs_lufirafs put   build/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) hello.elf /hello.elf
-build/mkfs_lufirafs mkdir build/disk.img $(LUFIRAFS_ESP_SIZE) $(LUFIRAFS_REGION_SIZE) /newdir
-```
-
-`put` creates parent directories as needed; `mkdir` behaves like `mkdir -p`.
-
-### Using Automatic Copy with Make
-
-The `run` target already does this for the bundled test programs — see the `$(BUILD_DIR)/mkfs_lufirafs put ...` lines right before the `qemu-system-x86_64` invocation in the Makefile. Add another line there, following the same pattern, to bundle additional files on every `make run`.
-
-### Checking Disk Contents
-
-```bash
-make check-disk        # runs `file build/disk.img` — confirms it is a valid disk image
-```
-
-There is currently no `mkfs_lufirafs` subcommand to list a directory's contents from the host side — boot the image and use the shell's `ls`/`cat` commands instead.
+There is no host-side way to list a directory's contents inside `disk.img` — boot the image and use the shell's `ls`/`cat` (see [`14_shell_commands.md`](14_shell_commands.md)).
 
 ---
 
 ## Directory Structure
 
-
 ```
-lufiraos/
+LufiraOS/                      # this repository — kernel + bootloader ONLY
 ├── boot/                      # Bootloader sources
-│   ├── boot.c                 # Main entry
-│   ├── boot_modes/            # Boot mode implementations
-│   ├── loaders/               # Kernel and FAT loaders
-│   ├── system/                # System services
-│   └── ui/                    # UI utilities
-├── kernel/                    # Kernel sources
-│   ├── kernel.c               # Kernel entry and init
-│   ├── linker.ld              # Linker script
-│   ├── drivers/               # Device drivers (incl. usb/, input/)
-│   ├── fs/                    # Filesystem (lufirafs/, vfs/, legacy fat/)
-│   ├── lib/                   # System libraries
-│   ├── shell/                 # Shell and commands
-│   └── system/                # Kernel subsystems (incl. devmode/, klog/)
-├── tools/                     # Host-side build tools
-│   └── mkfs_lufirafs.c        # LufiraFS formatting/populating tool
-├── build/                     # Build artefacts (created)
-│   ├── BOOTX64.EFI            # EFI bootloader
-│   ├── kernel.bin             # Kernel binary
-│   ├── kernel.elf             # Kernel with symbols
-│   ├── mkfs_lufirafs          # Host tool binary
-│   └── disk.img               # Complete disk image (ESP + LufiraFS)
-├── Makefile                   # Build system
-└── README.md                  # Project documentation
-```
+├── kernel/                    # Kernel sources (incl. net/, system/elf/dynlink.c, system/ipc/)
+├── tools/                     # Host-side build tools (mkfs_lufirafs, lpg_pack, lpg_format.h) + seed/
+├── libc/                      # Userspace libc sources (built by lufira-packages' build.py, not this Makefile)
+├── build/                     # BOOTX64.EFI, kernel.bin, kernel.elf, object files — NOTHING ELSE
+├── Makefile                   # kernel.bin + BOOTX64.EFI only
+└── documentation/             # this directory
 
+LufiraOS-Builder/               # sibling repository — disk image + QEMU
+├── build.py                   # CLI entry point (build/run/debug/monitor/clear)
+├── gui.py                     # optional Tkinter front-end
+└── lufira_builder/
+    ├── config.py               # sizes, defaults, repo URLs
+    ├── image.py                 # disk.img assembly
+    ├── packages.py               # .lpg fetch/build selection
+    ├── lpg.py                     # .lpg format helpers (shared install logic with dlpg)
+    ├── qemu.py                     # QEMU invocation
+    └── tools.py                     # host-tool wrappers, sibling-repo auto-clone
+
+lufira-packages/                # sibling repository — userspace: shell, packages, GUI/WM, dlpg
+```
 
 ---
 
 ## Troubleshooting
 
-### Missing Tools
+### Missing Tools (this repository)
 
-**Error:** `Required tool 'xxx' not found in PATH`
+**Error:** `Required tool 'xxx' not found in PATH`
 
-**Solution:** Install the missing package:
+**Solution:** install `gcc binutils make` plus GNU-EFI headers/libraries for your distribution.
 
+### Missing Tools / OVMF (`LufiraOS-Builder`)
 
-```
-# Ubuntu/Debian
-sudo apt install gcc binutils make dosfstools mtools qemu-system-x86 ovmf
+`LufiraOS-Builder` needs `qemu-system-x86_64`, `mkfs.fat`, `mmd`/`mcopy` (`mtools`), `dd`, and OVMF firmware, same as the old Makefile did. If OVMF isn't at `/usr/share/ovmf/OVMF.fd`, adjust `BIOS_PATH` in `lufira_builder/config.py`.
 
-# Arch Linux
-sudo pacman -S gcc binutils make dosfstools mtools qemu-system-x86 edk2-ovmf
+### Kernel Size Calculation (this repository)
 
-# Fedora
-sudo dnf install gcc binutils make dosfstools mtools qemu-system-x86 edk2-ovmf
-```
+**Error:** `__kernel_end` symbol not found.
 
+**Solution:** ensure `kernel/linker.ld` defines `__kernel_end = .;` and that `nm build/kernel.elf` can find it.
 
-### OVMF Not Found
+### `disk.img` / QEMU issues
 
-**Error:** `Could not open ROM file /usr/share/ovmf/OVMF.fd`
-
-**Solution:** Update the `-bios` path in the Makefile:
-
-
-```
-# Ubuntu/Debian
--bios /usr/share/ovmf/OVMF.fd
-
-# Arch Linux
--bios /usr/share/edk2-ovmf/x64/OVMF.fd
-
-# Fedora
--bios /usr/share/edk2/ovmf/OVMF.fd
-```
-
-
-### Build Directory Cleanup
-
-**Error:** Stale object files causing issues.
-
-**Solution:** Clean and rebuild:
-
-
-```
-make clean
-make run
-```
-
-
-### QEMU Audio Issues
-
-**Error:** `audiodev driver=alsa` fails.
-
-**Solution:** Use PulseAudio instead:
-
-
-```
--audiodev driver=pa,id=audio
-```
-
-
-Or disable audio:
-
-
-```
-# Remove -audiodev and -device AC97 lines
-```
-
-
-### Kernel Size Calculation
-
-**Error:** `__kernel_end` symbol not found.
-
-**Solution:** Ensure `linker.ld` defines the symbol correctly:
-
-
-```
-__kernel_end = .;
-```
-
-
-And the Makefile uses `nm` to read it:
-
-
-```
-KERNEL_END=$$(nm $(BUILD_DIR)/kernel.elf | awk '$$3=="__kernel_end"{print $$1}')
-```
-
+Anything related to disk-image assembly, package staging, or QEMU flags is now in `LufiraOS-Builder`, not here — check that repository's own output and `--help` text first.
 
 ---
 
 ## Conclusion
 
-The LufiraOS build system is designed to be simple, reliable, and easy to use. By leveraging standard Unix tools and GNU Make, it provides a consistent build experience across different systems. The integration with QEMU makes testing and debugging straightforward, and the modular structure allows developers to build only the components they need.
+The build is now two small, single-purpose tools instead of one large Makefile: `LufiraOS/Makefile` only ever has to know how to turn this repository's own sources into `kernel.bin`/`BOOTX64.EFI`, and `LufiraOS-Builder` owns everything that depends on *other* repositories (`lufira-packages`' packages) or external tools (QEMU, `mkfs.fat`, `mtools`) to assemble and run a bootable image. This mirrors the same split that moved the shell and package manager out of the kernel binary itself (see [`14_shell_commands.md`](14_shell_commands.md), [`17_package_manager.md`](17_package_manager.md)): the kernel repository stays small and focused, and everything downstream of it lives where it actually belongs.
 
-For more details, refer to the source code in the `Makefile` and the individual build configurations.
+For more details, refer to the source in this repository's `Makefile`, and in `LufiraOS-Builder`'s `build.py`/`lufira_builder/`.
 
 ---
 
-**Document Version:** 1.0
-**Last Updated:** September 2026
-**Project:** LufiraOS
+**Document Version:** 2.0
+**Last Updated:** October 2026
+**Project:** LufiraOS

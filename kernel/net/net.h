@@ -4,13 +4,12 @@
 
 /*
  * Общие типы/утилиты сетевого стека (kernel/net/) и точка входа
- * (net_init()/net_poll()). Стек — Ethernet/ARP/IPv4/ICMP/TCP поверх
- * kernel/drivers/net/rtl8139.c, без DNS и без UDP (см. план: wget работает
- * только с IP-адресами, IP настраивается статически через ifconfig).
+ * (net_init()/net_poll()). Стек: Ethernet/ARP/IPv4/ICMP/TCP/UDP/DNS/TLS
+ * поверх kernel/drivers/net/rtl8139.c.
  *
  * IP-адреса везде в этом стеке хранятся как uint32_t В ХОСТОВОМ порядке
- * байт (то есть a.b.c.d == (a<<24)|(b<<16)|(c<<8)|d) — сеть/провода видят
- * только через htonl()/ntohl() на границе сборки/разбора заголовков.
+ * байт (a.b.c.d == (a<<24)|(b<<16)|(c<<8)|d) — сеть видит их только через
+ * htonl()/ntohl() на границе сборки/разбора заголовков.
  */
 
 static inline uint16_t htons(uint16_t v) { return (uint16_t)((v << 8) | (v >> 8)); }
@@ -42,11 +41,9 @@ typedef struct {
     uint32_t our_ip;
     uint32_t netmask;
     uint32_t gateway;
-    // Резолвер для dns_resolve() (dns.c) — нужен dlpg sync/upgrade, чтобы
-    // ходить по имени хоста (raw.githubusercontent.com), а не только по IP,
-    // как раньше умел только wget (см. его комментарий в net.c/shell/
-    // commands/net.c). Дефолт — встроенный DNS-форвардер QEMU SLIRP
-    // (10.0.2.3, тот же /24, что и наш статический IP/шлюз, см. net.c).
+    // Резолвер для dns_resolve() (dns.c) — нужен dlpg sync/upgrade для
+    // обращения по имени хоста, а не только по IP. Дефолт — встроенный
+    // DNS-форвардер QEMU SLIRP (10.0.2.3, см. net.c).
     uint32_t dns_server;
 } net_config_t;
 
