@@ -55,8 +55,21 @@ void gfx_present(void);
 // прошлого раза — зовётся из pit_timer_handler() каждый тик.
 void console_tick_present(void);
 // Для кода, который пишет в framebuffer[] напрямую в обход put_pixel()
-// (graphics2d.c).
+// (graphics2d.c). Метит "грязным" ВЕСЬ экран — используется там, где
+// вызывающий не знает точных границ (скролл/очистка и т.п.). Для
+// вызывающих, которые границы ЗНАЮТ (gfx_blit()/gfx_fill_rect()),
+// см. console_mark_dirty_rect() ниже — она не раздувает grязную область
+// до целого экрана по каждому мелкому изменению.
 void console_mark_dirty(void);
+// То же самое, но только для прямоугольника (x,y,w,h), экранные
+// координаты — накапливается как объединение с уже грязной областью с
+// прошлого flush'а (gfx_present()). НАЙДЕННЫЙ БАГ (жалоба пользователя:
+// курсор WM идёт с заметной задержкой в реальном использовании) —
+// gfx_present() раньше копировал ВЕСЬ кадр в hw-framebuffer (часто MMIO,
+// заметно дороже RAM) на КАЖДЫЙ "грязный" тик, даже когда реально
+// поменялся один маленький курсор поверх уже готовой сцены. См. подробный
+// разбор в gfx_present()/gfx_blit().
+void console_mark_dirty_rect(int x, int y, int w, int h);
 void put_pixel(uint32_t x, uint32_t y, uint32_t color);
 uint32_t convert_color(uint32_t color);
 void put_char_graphic(int c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color);

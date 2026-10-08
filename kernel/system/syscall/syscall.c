@@ -1624,10 +1624,10 @@ static uint64_t sys_fb_info(uint64_t out_ptr, uint64_t unused1, uint64_t unused2
     return 0;
 }
 
-// SYS_FB_PRESENT (61) — см. syscall.h. Только зарегистрированный WM pid.
+// SYS_FB_PRESENT (61) — см. подробный разбор dirty_xy/dirty_wh в
+// syscall.h. Только зарегистрированный WM pid.
 static uint64_t sys_fb_present(uint64_t buf_ptr, uint64_t w, uint64_t h,
-                               uint64_t unused3, uint64_t unused4) {
-    (void)unused3; (void)unused4;
+                               uint64_t dirty_xy, uint64_t dirty_wh) {
     if (!current_process) return (uint64_t)-EFAULT;
     if (current_process->pid != process_get_wm_pid()) return (uint64_t)-EPERM;
     if (w != screen_width_pixels || h != screen_height_pixels) return (uint64_t)-EINVAL;
@@ -1636,7 +1636,27 @@ static uint64_t sys_fb_present(uint64_t buf_ptr, uint64_t w, uint64_t h,
     if (!is_user_range_valid(current_process->page_table, buf_ptr, bytes, 0))
         return (uint64_t)-EFAULT;
 
-    gfx_blit(0, 0, (const uint32_t *)buf_ptr, (uint32_t)w, (uint32_t)h, (uint32_t)w);
+    uint32_t drw = (uint32_t)(dirty_wh >> 32);
+    uint32_t drh = (uint32_t)(dirty_wh & 0xFFFFFFFFu);
+    if (drw == 0 || drh == 0) {
+        // Сентинел "нет dirty rect" — презентуем кадр целиком (прежнее
+        // поведение, и то, что получается при dirty_xy=dirty_wh=0 у
+        // старого/неосведомлённого вызывающего).
+        gfx_blit(0, 0, (const uint32_t *)buf_ptr, (uint32_t)w, (uint32_t)h, (uint32_t)w);
+        return 0;
+    }
+
+    int32_t dx = (int32_t)(dirty_xy >> 32);
+    int32_t dy = (int32_t)(dirty_xy & 0xFFFFFFFFu);
+    // buf_ptr — ПОЛНЫЙ кадр со stride==w (проверено выше), dirty-прямоугольник
+    // просто его под-окно — та же арифметика смещения, что и у клиента
+    // (lufira-packages/apps/wm.c, copy_rect_from_fb()) при подготовке буфера.
+    if (dx < 0 || dy < 0 || (uint32_t)dx >= w || (uint32_t)dy >= h ||
+        drw > w - (uint32_t)dx || drh > h - (uint32_t)dy)
+        return (uint64_t)-EINVAL;
+
+    const uint32_t *sub = (const uint32_t *)buf_ptr + (size_t)dy * w + (size_t)dx;
+    gfx_blit(dx, dy, sub, drw, drh, (uint32_t)w);
     return 0;
 }
 

@@ -57,6 +57,20 @@ uint32_t pixel_format = 0;
 static uint32_t *hw_framebuffer = NULL;
 static int double_buffering_enabled = 0;
 static int fb_dirty = 0;
+// Грязный ПРЯМОУГОЛЬНИК, а не весь экран — НАЙДЕННЫЙ БАГ (жалоба
+// пользователя: курсор WM заметно "тормозит" в реальном использовании,
+// хотя по скриншотам выглядит нормально) — раньше fb_dirty был просто
+// bool'ом, и gfx_present() ниже на каждый грязный тик копировал ВЕСЬ
+// кадр (pixels_per_scan_line*screen_height_pixels*4 — для 1280x800 это
+// ~4МБ) из back buffer в hw_framebuffer, который чаще всего MMIO/VRAM —
+// запись туда ощутимо дороже обычной RAM, особенно под QEMU TCG. WM
+// (lufira-packages/apps/wm.c) на каждое ОДНО движение мыши зовёт
+// SYS_FB_PRESENT -> gfx_blit() -> эту самую отметку "грязного" — то есть
+// каждое шевеление мыши стоило полного кадра на следующем тике (до 100
+// раз/сек), независимо от того, что реально изменился только маленький
+// силуэт курсора. Теперь область накапливается как объединение
+// прямоугольников с прошлого flush'а — gfx_present() копирует только её.
+static int32_t dirty_x0 = 0, dirty_y0 = 0, dirty_x1 = 0, dirty_y1 = 0;
 
 void console_enable_double_buffering(void) {
     if (double_buffering_enabled || !framebuffer) return;
@@ -71,13 +85,17 @@ void console_enable_double_buffering(void) {
     double_buffering_enabled = 1;
 }
 
-// Копирует back buffer в hw-буфер целиком, безусловно — вызывать только
-// когда реально нужно (gfx_present()) или когда fb_dirty уже проверен
-// (console_tick_present()).
+// Копирует ТОЛЬКО накопленный грязный прямоугольник back buffer -> hw-буфер
+// (если ничего не грязно — no-op, дешевле лишней проверки у вызывающего).
+// Вызывать когда реально нужно (прямые вызовы вроде дампа исключения,
+// idt.c) или когда fb_dirty уже проверен (console_tick_present()).
 void gfx_present(void) {
-    if (!double_buffering_enabled) return;
-    size_t fb_bytes = (size_t)pixels_per_scan_line * screen_height_pixels * sizeof(uint32_t);
-    memcpy(hw_framebuffer, framebuffer, fb_bytes);
+    if (!double_buffering_enabled || !fb_dirty) return;
+    for (int32_t py = dirty_y0; py < dirty_y1; py++) {
+        uint32_t *dst = hw_framebuffer + (uint32_t)py * pixels_per_scan_line + (uint32_t)dirty_x0;
+        uint32_t *src = framebuffer + (uint32_t)py * pixels_per_scan_line + (uint32_t)dirty_x0;
+        memcpy(dst, src, (size_t)(dirty_x1 - dirty_x0) * sizeof(uint32_t));
+    }
     fb_dirty = 0;
 }
 
@@ -88,13 +106,37 @@ void console_tick_present(void) {
     if (double_buffering_enabled && fb_dirty) gfx_present();
 }
 
+static void mark_dirty_rect_raw(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int32_t)screen_width_pixels) x1 = (int32_t)screen_width_pixels;
+    if (y1 > (int32_t)screen_height_pixels) y1 = (int32_t)screen_height_pixels;
+    if (x0 >= x1 || y0 >= y1) return;
+
+    if (!fb_dirty) {
+        dirty_x0 = x0; dirty_y0 = y0; dirty_x1 = x1; dirty_y1 = y1;
+    } else {
+        if (x0 < dirty_x0) dirty_x0 = x0;
+        if (y0 < dirty_y0) dirty_y0 = y0;
+        if (x1 > dirty_x1) dirty_x1 = x1;
+        if (y1 > dirty_y1) dirty_y1 = y1;
+    }
+    fb_dirty = 1;
+}
+
 // Для вызывающих, которые пишут в framebuffer[] напрямую, в обход
 // put_pixel() (gfx_fill_rect()/gfx_blit() в graphics2d.c — построчно
-// через указатель/memcpy ради скорости, см. их же комментарии) — иначе
-// их изменения просто не попадут на экран до следующего put_pixel()
-// где-нибудь ещё.
+// через указатель/memcpy ради скорости, см. их же комментарии), но НЕ
+// знают точных границ (скролл, очистка экрана) — иначе их изменения
+// просто не попадут на экран до следующего put_pixel() где-нибудь ещё.
+// Метит ВЕСЬ экран — см. console_mark_dirty_rect() для вызывающих,
+// которые границы знают.
 void console_mark_dirty(void) {
-    fb_dirty = 1;
+    mark_dirty_rect_raw(0, 0, (int32_t)screen_width_pixels, (int32_t)screen_height_pixels);
+}
+
+void console_mark_dirty_rect(int x, int y, int w, int h) {
+    mark_dirty_rect_raw(x, y, x + w, y + h);
 }
 
 // Переменные для мигающего курсора

@@ -579,8 +579,27 @@ static inline long sys_fb_info(struct lufira_fb_info *out) {
 // buf —w*h пикселей, УЖЕ в финальном формате экрана (pixel_format выше);
 // w/h обязаны точно совпадать с текущим разрешением (sys_fb_info()).
 // Доступно только зарегистрированному sys_wm_register() процессу.
+// Презентует кадр ЦЕЛИКОМ — см. sys_fb_present_rect() ниже для дешёвого
+// частичного обновления (например, когда поменялся только курсор).
 static inline long sys_fb_present(const uint32_t *buf, unsigned int w, unsigned int h) {
     return __syscall5(SYS_FB_PRESENT, (long)buf, w, h, 0, 0);
+}
+
+// То же самое, но в реальный framebuffer копируется ТОЛЬКО под-
+// прямоугольник (x,y,rw,rh) буфера buf (buf всё ещё обязан быть ПОЛНЫМ
+// кадром размера w*h — stride для под-прямоугольника берётся как w, см.
+// подробности в SYS_FB_PRESENT, syscall.h ядра). На порядки дешевле
+// полного sys_fb_present() для маленьких изменений (типичный случай —
+// один только сдвинувшийся курсор поверх уже отрисованной сцены) —
+// именно это убирает заметную задержку движения мыши, когда прошлая
+// версия presentила весь кадр (возможно, в MMIO/VRAM) на каждое
+// шевеление. rw/rh обязаны быть > 0 — с rw==0 или rh==0 используй обычный
+// sys_fb_present().
+static inline long sys_fb_present_rect(const uint32_t *buf, unsigned int w, unsigned int h,
+                                        int x, int y, unsigned int rw, unsigned int rh) {
+    long dirty_xy = ((long)(int64_t)x << 32) | (long)(uint32_t)y;
+    long dirty_wh = ((long)rw << 32) | (long)rh;
+    return __syscall5(SYS_FB_PRESENT, (long)buf, w, h, dirty_xy, dirty_wh);
 }
 
 // Копирует битмап-шрифт 8x8 (console.c::full_font_data, glyph 0 = ASCII 32

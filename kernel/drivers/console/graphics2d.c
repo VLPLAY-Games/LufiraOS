@@ -19,8 +19,9 @@ void gfx_fill_rect(int32_t x, int32_t y, uint32_t w, uint32_t h, uint32_t color)
         for (int32_t px = x0; px < x1; px++) *row++ = color;
     }
     // В обход put_pixel() — он и выставляет "грязный" флаг для двойной
-    // буферизации (console.c), сами ставим здесь.
-    if (y1 > y0) console_mark_dirty();
+    // буферизации (console.c), сами ставим здесь. Точный прямоугольник
+    // (не весь экран) — см. подробный комментарий у console_mark_dirty_rect().
+    if (y1 > y0 && x1 > x0) console_mark_dirty_rect(x0, y0, x1 - x0, y1 - y0);
 }
 
 void gfx_draw_rect(int32_t x, int32_t y, uint32_t w, uint32_t h, uint32_t color) {
@@ -69,5 +70,9 @@ void gfx_blit(int32_t dst_x, int32_t dst_y, const uint32_t *src,
         uint32_t *dst_row = framebuffer + (uint32_t)py * pixels_per_scan_line + (uint32_t)x0;
         memcpy(dst_row, src_row, copy_w * sizeof(uint32_t));
     }
-    console_mark_dirty(); // см. комментарий в gfx_fill_rect() выше
+    // Точный прямоугольник, не весь экран — см. подробный комментарий у
+    // console_mark_dirty_rect() (console.h/.c): именно этот вызов (через
+    // SYS_FB_PRESENT) WM гонит на КАЖДОЕ движение мыши, раньше это
+    // раздувало "грязную" область до целого кадра на каждый тик.
+    console_mark_dirty_rect(x0, y0, (int)copy_w, (int)(y1 - y0));
 }
