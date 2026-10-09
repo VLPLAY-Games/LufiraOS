@@ -16,6 +16,8 @@
 #include "system/users/users.h"
 #include "fs/fat/fat_mount.h"
 #include "fs/ramfs/ramfs.h"
+#include "fs/ext2/ext2_mount.h"
+#include "fs/exfat/exfat_mount.h"
 #include "system/acpi/acpi.h"
 #include "drivers/usb/xhci.h"
 #include "drivers/console/graphics2d.h"
@@ -520,21 +522,24 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
 
     const char *path = (const char *)path_ptr;
 
-    // Смонтированные FAT и RAMFS — до LufiraFS, тот же приоритет, что у
-    // vfs_open()/sys_mkdir()/sys_remove() (баг: "cd /mnt/a" отвечал ENOENT
-    // после успешного mount — sys_chdir() не получил этот фикс сразу).
+    // Смонтированные FAT/RAMFS/ext2/exFAT — до LufiraFS, тот же приоритет,
+    // что у vfs_open()/sys_mkdir()/sys_remove() (баг: "cd /mnt/a" отвечал
+    // ENOENT после успешного mount — sys_chdir() не получил этот фикс сразу).
     if (path[0] == '/') {
-        struct inode *fat_inode = vfs_fat_lookup(path);
-        struct inode *mount_inode = fat_inode;
-        if (!mount_inode) mount_inode = vfs_ramfs_lookup(path);
+        // private_data освобождаем для ВСЕХ, КРОМЕ RAMFS: у FAT (корень
+        // монтирования)/ext2/exFAT это одноразовая обёртка под конкретный
+        // lookup() (fat_root_dir_private_t / ext2_file_private_t / аналог
+        // в exfat_mount.c); у RAMFS private_data — указатель на ЖИВОЙ узел
+        // постоянного дерева (ramfs.c), который освобождает только
+        // vfs_ramfs_unlink()/ramfs_unmount(), не это lookup.
+        struct inode *mount_inode = vfs_fat_lookup(path);
+        int is_ramfs = 0;
+        if (!mount_inode) { mount_inode = vfs_ramfs_lookup(path); is_ramfs = (mount_inode != NULL); }
+        if (!mount_inode) mount_inode = vfs_ext2_lookup(path);
+        if (!mount_inode) mount_inode = vfs_exfat_lookup(path);
         if (mount_inode) {
             int is_dir = (mount_inode->type == FT_DIRECTORY);
-            // private_data освобождаем ТОЛЬКО для FAT: там это одноразовая
-            // fat_root_dir_private_t-копия под конкретный lookup() (см.
-            // fat_mount.c). У RAMFS private_data — указатель на ЖИВОЙ узел
-            // постоянного дерева (ramfs.c) — его освобождает только
-            // vfs_ramfs_unlink()/ramfs_unmount(), не это lookup.
-            if (fat_inode && mount_inode->private_data) kfree(mount_inode->private_data);
+            if (!is_ramfs && mount_inode->private_data) kfree(mount_inode->private_data);
             kfree(mount_inode);
             if (!is_dir) return (uint64_t)-ENOTDIR;
 
@@ -587,11 +592,13 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
         }
 
         struct inode *sub_inode = vfs_fat_lookup(target);
-        int sub_from_fat = (sub_inode != NULL);
-        if (!sub_inode) sub_inode = vfs_ramfs_lookup(target);
+        int sub_is_ramfs = 0;
+        if (!sub_inode) { sub_inode = vfs_ramfs_lookup(target); sub_is_ramfs = (sub_inode != NULL); }
+        if (!sub_inode) sub_inode = vfs_ext2_lookup(target);
+        if (!sub_inode) sub_inode = vfs_exfat_lookup(target);
         if (sub_inode) {
             int is_dir = (sub_inode->type == FT_DIRECTORY);
-            if (sub_from_fat && sub_inode->private_data) kfree(sub_inode->private_data);
+            if (!sub_is_ramfs && sub_inode->private_data) kfree(sub_inode->private_data);
             kfree(sub_inode);
             if (!is_dir) return (uint64_t)-ENOTDIR;
 
@@ -790,14 +797,18 @@ static uint64_t sys_mkdir(uint64_t path_ptr, uint64_t mode, uint64_t unused1,
     if (slen == 0) return (uint64_t)-EINVAL;
     const char *path = (const char *)path_ptr;
 
-    // Смонтированные FAT и RAMFS — до всех проверок прав на LufiraFS: путь
-    // не существует как lufirafs-inode, lufirafs_resolve_parent() вернул бы
-    // -ENOENT (mkdir.elf зовёт SYS_MKDIR, не vfs_mkdir() напрямую — более
-    // ранний фикс в vfs.c сюда не доходил).
+    // Смонтированные FAT/RAMFS/ext2/exFAT — до всех проверок прав на
+    // LufiraFS: путь не существует как lufirafs-inode, lufirafs_resolve_parent()
+    // вернул бы -ENOENT (mkdir.elf зовёт SYS_MKDIR, не vfs_mkdir() напрямую —
+    // более ранний фикс в vfs.c сюда не доходил).
     if (path[0] == '/') {
         int r = vfs_fat_mkdir(path);
         if (r != -2) return (r == 0) ? 0 : (uint64_t)-1;
         r = vfs_ramfs_mkdir(path);
+        if (r != -2) return (r == 0) ? 0 : (uint64_t)-1;
+        r = vfs_ext2_mkdir(path);
+        if (r != -2) return (r == 0) ? 0 : (uint64_t)-1;
+        r = vfs_exfat_mkdir(path);
         if (r != -2) return (r == 0) ? 0 : (uint64_t)-1;
     }
 
@@ -832,11 +843,16 @@ static uint64_t sys_remove(uint64_t path_ptr, int is_rmdir) {
     if (slen == 0) return (uint64_t)-EINVAL;
     const char *path = (const char *)path_ptr;
 
-    // Смонтированные FAT и RAMFS — см. тот же комментарий в sys_mkdir() выше.
+    // Смонтированные FAT/RAMFS/ext2/exFAT — см. тот же комментарий в
+    // sys_mkdir() выше.
     if (path[0] == '/') {
         int r = vfs_fat_unlink(path);
         if (r != -2) return (r == 0) ? 0 : (uint64_t)-1;
         r = vfs_ramfs_unlink(path);
+        if (r != -2) return (r == 0) ? 0 : (uint64_t)-1;
+        r = vfs_ext2_unlink(path);
+        if (r != -2) return (r == 0) ? 0 : (uint64_t)-1;
+        r = vfs_exfat_unlink(path);
         if (r != -2) return (r == 0) ? 0 : (uint64_t)-1;
     }
 
@@ -1046,8 +1062,12 @@ static void lufirafs_mkdir_p(const char *path) {
 }
 
 // SYS_MOUNT (33) / SYS_UNMOUNT (34): тонкие обёртки — логика уже в
-// vfs_fat_mount()/vfs_fat_unmount() (fat_mount.c), т.к. её нужно звать и
-// из vfs.c (open/mkdir/unlink на уже смонтированном пути).
+// vfs_fat_mount()/vfs_fat_unmount() (fat_mount.c) и их ext2/exFAT
+// эквивалентах. Один syscall без выбора формата — автоопределение:
+// пробуем по очереди (FAT, затем ext2, затем exFAT), каждый сам
+// отказывается монтировать образ не своего формата (неверный magic),
+// так что успевает ровно один. Тот же порядок проб и в sys_unmount() —
+// снять то монтирование, которое реально держит этот prefix.
 static uint64_t sys_mount(uint64_t prefix_ptr, uint64_t usb_index, uint64_t unused1,
                           uint64_t unused2, uint64_t unused3) {
     (void)unused1; (void)unused2; (void)unused3;
@@ -1059,6 +1079,8 @@ static uint64_t sys_mount(uint64_t prefix_ptr, uint64_t usb_index, uint64_t unus
     lufirafs_mkdir_p((const char *)prefix_ptr);
 
     int res = vfs_fat_mount((int)usb_index, (const char *)prefix_ptr);
+    if (res < 0) res = vfs_ext2_mount((int)usb_index, (const char *)prefix_ptr);
+    if (res < 0) res = vfs_exfat_mount((int)usb_index, (const char *)prefix_ptr);
     return (uint64_t)(int64_t)res;
 }
 
@@ -1071,6 +1093,8 @@ static uint64_t sys_unmount(uint64_t prefix_ptr, uint64_t unused1, uint64_t unus
     if (slen <= 0) return (uint64_t)-EFAULT;
 
     int res = vfs_fat_unmount((const char *)prefix_ptr);
+    if (res != 0) res = vfs_ext2_unmount((const char *)prefix_ptr);
+    if (res != 0) res = vfs_exfat_unmount((const char *)prefix_ptr);
     return (uint64_t)(int64_t)res;
 }
 

@@ -7,6 +7,8 @@
 #include "lib/string.h"
 #include "fs/fat/fat_mount.h"
 #include "fs/ramfs/ramfs.h"
+#include "fs/ext2/ext2_mount.h"
+#include "fs/exfat/exfat_mount.h"
 
 extern int vfs_open_lufirafs(const char *path, int flags);
 
@@ -539,6 +541,14 @@ int vfs_open(const char *path, int flags)
         int ramfs_fd = vfs_ramfs_open(path, flags);
         if (ramfs_fd != -2) return ramfs_fd;
     }
+    {
+        int ext2_fd = vfs_ext2_open(path, flags);
+        if (ext2_fd != -2) return ext2_fd;
+    }
+    {
+        int exfat_fd = vfs_exfat_open(path, flags);
+        if (exfat_fd != -2) return exfat_fd;
+    }
 
     int fd =
         vfs_open_lufirafs(path, flags);
@@ -578,6 +588,10 @@ int vfs_open_at(uint32_t base_inode, const char *path, int flags)
         if (fat_fd != -2) return fat_fd;
         int ramfs_fd = vfs_ramfs_open(path, flags);
         if (ramfs_fd != -2) return ramfs_fd;
+        int ext2_fd = vfs_ext2_open(path, flags);
+        if (ext2_fd != -2) return ext2_fd;
+        int exfat_fd = vfs_exfat_open(path, flags);
+        if (exfat_fd != -2) return exfat_fd;
     }
 
     int fd = vfs_lufirafs_open_at(base_inode, path, flags);
@@ -751,6 +765,18 @@ int vfs_create(const char *path)
         vfs_close(ramfs_fd);
         return 0;
     }
+    int ext2_fd = vfs_ext2_open(path, O_CREAT | O_RDONLY);
+    if (ext2_fd != -2) {
+        if (ext2_fd < 0) return -1;
+        vfs_close(ext2_fd);
+        return 0;
+    }
+    int exfat_fd = vfs_exfat_open(path, O_CREAT | O_RDONLY);
+    if (exfat_fd != -2) {
+        if (exfat_fd < 0) return -1;
+        vfs_close(exfat_fd);
+        return 0;
+    }
 
     return vfs_lufirafs_create(path);
 }
@@ -764,6 +790,10 @@ int vfs_mkdir(const char *path)
     int r = vfs_fat_mkdir(path);
     if (r != -2) return r;
     r = vfs_ramfs_mkdir(path);
+    if (r != -2) return r;
+    r = vfs_ext2_mkdir(path);
+    if (r != -2) return r;
+    r = vfs_exfat_mkdir(path);
     if (r != -2) return r;
 
     return vfs_lufirafs_mkdir(path);
@@ -779,6 +809,10 @@ int vfs_unlink(const char *path)
     if (r != -2) return r;
     r = vfs_ramfs_unlink(path);
     if (r != -2) return r;
+    r = vfs_ext2_unlink(path);
+    if (r != -2) return r;
+    r = vfs_exfat_unlink(path);
+    if (r != -2) return r;
 
     return vfs_lufirafs_unlink(path);
 }
@@ -792,6 +826,10 @@ int vfs_rmdir(const char *path)
     int r = vfs_fat_unlink(path);
     if (r != -2) return r;
     r = vfs_ramfs_unlink(path);
+    if (r != -2) return r;
+    r = vfs_ext2_unlink(path);
+    if (r != -2) return r;
+    r = vfs_exfat_unlink(path);
     if (r != -2) return r;
 
     return vfs_lufirafs_unlink(path);
@@ -847,6 +885,10 @@ inode_t* vfs_lookup(const char *path)
     if (fat_inode) return fat_inode;
     inode_t *ramfs_inode = vfs_ramfs_lookup(path);
     if (ramfs_inode) return ramfs_inode;
+    inode_t *ext2_inode = vfs_ext2_lookup(path);
+    if (ext2_inode) return ext2_inode;
+    inode_t *exfat_inode = vfs_exfat_lookup(path);
+    if (exfat_inode) return exfat_inode;
 
     return vfs_lufirafs_lookup(path);
 }
@@ -861,6 +903,10 @@ int vfs_mkdir_at(uint32_t base_inode, const char *path)
         int r = vfs_fat_mkdir(path);
         if (r != -2) return r;
         r = vfs_ramfs_mkdir(path);
+        if (r != -2) return r;
+        r = vfs_ext2_mkdir(path);
+        if (r != -2) return r;
+        r = vfs_exfat_mkdir(path);
         if (r != -2) return r;
     }
 
@@ -878,6 +924,10 @@ int vfs_rmdir_at(uint32_t base_inode, const char *path)
         if (r != -2) return r;
         r = vfs_ramfs_unlink(path);
         if (r != -2) return r;
+        r = vfs_ext2_unlink(path);
+        if (r != -2) return r;
+        r = vfs_exfat_unlink(path);
+        if (r != -2) return r;
     }
 
     return vfs_lufirafs_unlink_at(base_inode, path);
@@ -893,6 +943,10 @@ int vfs_unlink_at(uint32_t base_inode, const char *path)
         int r = vfs_fat_unlink(path);
         if (r != -2) return r;
         r = vfs_ramfs_unlink(path);
+        if (r != -2) return r;
+        r = vfs_ext2_unlink(path);
+        if (r != -2) return r;
+        r = vfs_exfat_unlink(path);
         if (r != -2) return r;
     }
 
@@ -918,6 +972,18 @@ int vfs_create_at(uint32_t base_inode, const char *path)
             vfs_close(ramfs_fd);
             return 0;
         }
+        int ext2_fd = vfs_ext2_open(path, O_CREAT | O_RDONLY);
+        if (ext2_fd != -2) {
+            if (ext2_fd < 0) return -1;
+            vfs_close(ext2_fd);
+            return 0;
+        }
+        int exfat_fd = vfs_exfat_open(path, O_CREAT | O_RDONLY);
+        if (exfat_fd != -2) {
+            if (exfat_fd < 0) return -1;
+            vfs_close(exfat_fd);
+            return 0;
+        }
     }
 
     return vfs_lufirafs_create_at(base_inode, path);
@@ -934,6 +1000,10 @@ inode_t* vfs_lookup_at(uint32_t base_inode, const char *path)
         if (fat_inode) return fat_inode;
         inode_t *ramfs_inode = vfs_ramfs_lookup(path);
         if (ramfs_inode) return ramfs_inode;
+        inode_t *ext2_inode = vfs_ext2_lookup(path);
+        if (ext2_inode) return ext2_inode;
+        inode_t *exfat_inode = vfs_exfat_lookup(path);
+        if (exfat_inode) return exfat_inode;
     }
 
     return vfs_lufirafs_lookup_at(base_inode, path);

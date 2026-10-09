@@ -65,7 +65,9 @@ $(shell mkdir -p $(BUILD_DIR) \
 	$(BUILD_DIR)/kernel/fs/vfs \
     $(BUILD_DIR)/kernel/fs/lufirafs \
 	$(BUILD_DIR)/kernel/fs/fat \
-	$(BUILD_DIR)/kernel/fs/ramfs)
+	$(BUILD_DIR)/kernel/fs/ramfs \
+	$(BUILD_DIR)/kernel/fs/ext2 \
+	$(BUILD_DIR)/kernel/fs/exfat)
 
 BOOTLOADER_CFLAGS := -I$(EFI_INC) -I$(EFI_INC_ARCH) \
                      -I$(BOOTLOADER_DIR) \
@@ -152,7 +154,11 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/fs/lufirafs/lufirafs_vfs.c \
 	$(KERNEL_DIR)/fs/fat/fat.c \
 	$(KERNEL_DIR)/fs/fat/fat_mount.c \
-	$(KERNEL_DIR)/fs/ramfs/ramfs.c
+	$(KERNEL_DIR)/fs/ramfs/ramfs.c \
+	$(KERNEL_DIR)/fs/ext2/ext2.c \
+	$(KERNEL_DIR)/fs/ext2/ext2_mount.c \
+	$(KERNEL_DIR)/fs/exfat/exfat.c \
+	$(KERNEL_DIR)/fs/exfat/exfat_mount.c
 
 KERNEL_ASM_SOURCES := \
     $(KERNEL_DIR)/system/cpu/interrupts.S \

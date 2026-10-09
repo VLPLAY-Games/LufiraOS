@@ -72,8 +72,18 @@ static void mark_fat_sector_dirty(fat_fs_t *fs, uint32_t cluster) {
 // fat_mount.c, который синхронизирует явно и правильно, на USB).
 int fat_init(fat_fs_t *fs, void *image, uint32_t image_size) {
     if (!image || image_size < 512) return -1;
-    fs->image = (uint8_t*)image;
     const uint8_t *raw = (const uint8_t*)image;
+
+    // Сигнатура загрузочного сектора — ДО любого разбора полей. v0.9, фаза
+    // 1: без этой проверки fat_init() и auto-detect'ное sys_mount() (пробует
+    // FAT первым на ЛЮБОМ образе, в т.ч. ext2/exFAT) доходили до деления на
+    // bpb.sectors_per_cluster ниже ещё ДО того, как могли понять, что это
+    // вообще не FAT — у ext2-образа начало тома обычно нулевое (загрузочная
+    // область не используется), sectors_per_cluster=0 → #DE (живой краш,
+    // найден именно так: "mount" на ext2-флешке ронял систему).
+    if (read_le16(raw+510) != 0xAA55) return -1;
+
+    fs->image = (uint8_t*)image;
     fs->bpb.bytes_per_sector = read_le16(raw+11);
     fs->bpb.sectors_per_cluster = raw[13];
     fs->bpb.reserved_sectors = read_le16(raw+14);
@@ -90,6 +100,12 @@ int fat_init(fat_fs_t *fs, void *image, uint32_t image_size) {
     uint8_t fats = fs->bpb.num_fats;
     uint32_t total_sec = fs->bpb.total_sectors_16 ?
                          fs->bpb.total_sectors_16 : fs->bpb.total_sectors_32;
+
+    // Те же поля ниже используются как делители (bytes_per_sec — в
+    // округлении root_entries, sec_per_cl — в count_of_clusters) — ноль у
+    // любого из них (валидная сигнатура 0xAA55 не исключает дальше мусорных
+    // полей сама по себе) привёл бы к той же #DE.
+    if (bytes_per_sec == 0 || sec_per_cl == 0 || fats == 0 || total_sec == 0) return -1;
 
     if (total_sec * bytes_per_sec > image_size) return -2;
 
