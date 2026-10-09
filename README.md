@@ -66,6 +66,10 @@ This repository is the kernel and UEFI bootloader. Everything that runs in users
 
 ![ELF Programs](documentation/screenshots/elf.jpg)
 
+### GUI + Window Manager
+
+![GUI](documentation/screenshots/gui.jpg)
+
 ## Table of Contents
 
 1. [Overview](#overview)
