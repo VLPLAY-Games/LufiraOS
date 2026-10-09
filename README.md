@@ -168,7 +168,7 @@ LufiraOS is a from-scratch operating system that boots via UEFI, features a grap
   - Dirty block tracking and flushing back to disk.
   - Full path resolution (multi-level directories, per-process cwd) and directory operations (`mkdir`, `rm`, `opendir`, `readdir`).
   - Host-side `mkfs_lufirafs` tool for formatting/populating the disk image at build time.
-  - **FAT driver** (`kernel/fs/fat/`) — used to `mount`/`unmount` a USB flash drive's FAT12/16/32 filesystem (read/write); not integrated into the VFS, the whole device image is read into RAM (capped at 8 MB).
+  - **FAT driver** (`kernel/fs/fat/`) — `mount`/`unmount` a USB flash drive's FAT12/16/32 filesystem (read/write) under a path prefix (e.g. `/mnt/usb0`), wired straight into the VFS: ordinary `open`/`read`/`write`/`mkdir`/`unlink`/`readdir`/`cat`/`cp`/`ls`/`rm` work on it directly, no separate mount-specific commands needed. Root-directory-only per mount (no subdirectory traversal on the flash drive yet) and the whole device image is read into RAM up front.
 
 - **Networking**
   - **Ethernet/ARP/IPv4/ICMP/TCP** — a polled (no interrupts) stack over an RTL8139 driver; TCP does stop-and-wait retransmission and a real advertised receive window (no congestion control).
@@ -442,8 +442,7 @@ LufiraOS/
 - **TLS has no certificate chain validation.** The from-scratch TLS 1.2 client verifies the server actually controls the key in the certificate it presents, but does not check that certificate against any trusted root CA — fine against a naive on-path attacker, not against one who can present their own certificate. No hardware RNG either, so no real forward secrecy. See `documentation/16_networking.md`.
 - **`SYS_NET_FETCH` stalls the whole system for the duration of a fetch** — the same synchronous model `wget` always had; a large download blocks every other process until it completes or times out.
 - **No DHCP.** Static IP configuration plus QEMU SLIRP's built-in DNS forwarder only.
-- **Keyboard auto-repeat does not work.** Holding down a key registers as a single keypress instead of repeating.
-- **`mount` reads the whole USB device into RAM up front** (capped at 8 MB) — no lazy/streaming FAT access, and files on a mounted USB drive aren't reachable through `cat`/`cp`/`ls` (only through `mount`'s own directory listing) — see [`08_filesystem.md`](documentation/08_filesystem.md).
+- **`mount` reads the whole USB device into RAM up front** (capped at 8 MB) — no lazy/streaming FAT access, and only the root directory of a mounted drive is reachable (no subdirectory traversal yet) — see [`08_filesystem.md`](documentation/08_filesystem.md).
 - **No memory protection beyond paging permissions and mmap's own bookkeeping.** `mmap` is anonymous-only, eagerly allocated, and never reclaims address space after `munmap`.
 - **No setuid/setgid, no multi-group membership, and a non-cryptographic password hash.** The users/permissions model is a straightforward `uid`/`gid`/9-bit implementation, not a hardened one — see [`15_users_permissions.md`](documentation/15_users_permissions.md).
 - **Real hardware is untested.** The system is developed and tested exclusively in QEMU; UEFI/ACPI/USB quirks on real firmware are unknown.
@@ -455,7 +454,7 @@ LufiraOS/
 
 Contributions are welcome! Here are some areas for improvement:
 
-- **Filesystem**: Long file name (LFN) support, additional filesystem drivers (ext2, ISO9660), LufiraFS indirect-block-chain growth beyond a single indirect block, real VFS multi-mount support (so a mounted USB drive is reachable through ordinary filesystem commands).
+- **Filesystem**: Long file name (LFN) support, additional filesystem drivers (ext2, ISO9660), LufiraFS indirect-block-chain growth beyond a single indirect block, subdirectory traversal on a mounted USB drive (currently root-directory-only).
 - **Drivers**: AHCI/SATA, graphics acceleration, multi-block USB Mass Storage transfers.
 - **Networking**: DHCP, TLS certificate chain/root-CA validation, a real entropy source, TCP congestion control.
 - **Processes**: Copy-on-write address spaces, demand-paged `mmap`.

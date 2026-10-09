@@ -20,22 +20,33 @@ this repository is kernel + bootloader only from this release on.
 - **`dlpg sync`/`dlpg upgrade`** — fetch the package index and newer `.lpg`s
   straight from `lufira-packages`' published `index.json`/`release/` on
   GitHub, over the new network stack below. `LufiraOS-Builder` does the same
-  by default now (prebuilt packages, sha256-verified) instead of requiring a
-  local source build; `--build-packages-from-source` keeps the old path.
-  `LufiraOS-Builder` also auto-clones a missing `LufiraOS` checkout.
+  by default now (prebuilt packages, sha256-verified, `index.json`'s `"lpg"`
+  field is a real download URL) instead of requiring a local source build;
+  `--build-packages-from-source` keeps the old path. `LufiraOS-Builder` also
+  auto-clones a missing `LufiraOS` checkout.
 - **GUI + userspace window manager.** New generic per-process mailbox IPC
   (`SYS_IPC_SEND`/`RECV`, `kernel/system/ipc/mailbox.c`) and a GUI syscall
   surface (`SYS_WIN_*`, `SYS_WM_REGISTER`, `SYS_FB_*`) — the compositor
-  itself (`wm.c`: z-order, drag, resize/maximize/minimize, taskbar with a
-  Start menu, desktop launcher icons, dirty-rectangle presentation) is an
-  ordinary ring-3 client of these syscalls, not kernel code. GUI apps
-  (terminal, notepad, file manager, calculator, system info) in
-  `lufira-packages`.
+  itself (`wm.c`: z-order, drag, window resize/maximize/minimize, a taskbar
+  with a Start menu (Exit GUI/Shutdown/Reboot), desktop launcher icons,
+  dirty-rectangle compositing for responsive cursor movement) is an ordinary
+  ring-3 client of these syscalls, not kernel code. GUI apps (terminal —
+  wraps a real shell behind two pipes, notepad, file manager, calculator,
+  system info) in `lufira-packages`.
 - **Dynamic linking.** Packages now link against one shared `/lib/libc.so`
   (`kernel/system/elf/dynlink.c`, ET_DYN) instead of a static copy each.
 - **Real userspace shell**, replacing the old kernel-native one — a ring-3
   ELF (`lufira-packages/shell/shell.c`) reading `/dev/console` via blocking
   `SYS_READ`, `fork`/`exec`/`wait` for every command.
+- **Mounted USB/FAT drives are now real VFS citizens.** `SYS_MOUNT` wires a
+  mounted prefix (e.g. `/mnt/usb0`) straight into the normal
+  `open`/`read`/`write`/`mkdir`/`unlink`/`readdir` path (`kernel/fs/fat/
+  fat_mount.c`) — ordinary `cat`/`cp`/`ls`/`rm` just work on it, no more
+  separate `mountls`/`mountcat`/`mountwrite`. Writes sync to the USB device
+  immediately, not just on `unmount`. Resolves a limitation called out as
+  deferred in 0.6.5. Still root-directory-only per mount (no subdirectory
+  traversal on the flash drive) and the whole device is still read into RAM
+  up front — see Known Issues.
 - **UDP + DNS resolver** (`kernel/net/udp.c`, `dns.c`) — networking no longer
   requires literal IP addresses.
 - **TLS 1.2 client + HTTPS**, from scratch (`kernel/net/tls.c`,
@@ -58,43 +69,28 @@ this repository is kernel + bootloader only from this release on.
 
 ### Fixed
 
-- **USB HID mouse input silently dropped** — boot-protocol mice send 3-byte
+Three latent bugs in code that predates this release, each sitting
+unnoticed until new 0.8.0 functionality finally exercised it hard enough to
+expose it — genuine regressions against 0.6.5 behavior, not new-feature
+teething problems:
+
+- **USB HID mouse input silently dropped.** Boot-protocol mice send 3-byte
   reports against an 8-byte requested transfer, producing a legitimate Short
-  Packet completion that `xhci.c` was treating as failure.
-- **Terminal app pipe deadlock** — `pipe_read()` waited to fill the full
-  requested buffer instead of returning as soon as any data arrived.
-- **Lost-wakeup race in `mailbox_recv()`** — a message could arrive in the
-  gap between the empty-check and registering as a waiter and be lost.
-- **WM: black fill on window resize/maximize** — the newly exposed area
-  wasn't painted with the window's own background color.
-- **WM: visible cursor lag** — every mouse-move event was doing a full-frame
-  recomposite+present; now a cursor-only move does a small dirty-rect copy.
-- **Boot screen freeze after the cursor-lag fix** — `put_pixel()` and three
-  other direct framebuffer writers were setting the dirty flag without
-  updating the dirty *rectangle*, so `gfx_present()` flushed nothing.
-- **GUI freeze while a terminal command is producing output** — the WM's
-  message-coalescing loop had no time cap, so a steady stream of draw
-  requests (any chatty command) could starve it indefinitely; capped at
-  ~30 ms per batch.
-- **`SYS_NET_FETCH` hanging forever instead of timing out** — `syscall`
-  masks CPU interrupts on entry and nothing re-enabled them; every
-  network-stack timeout is measured via the PIT interrupt, so with
-  interrupts masked, every deadline silently became infinite.
-- **TCP silently dropping almost all received data** — the receive path kept
+  Packet completion that `xhci.c` was treating as failure — the mouse simply
+  didn't move. Present since the HID driver shipped in 0.6.0.
+- **Pipes could deadlock instead of short-reading.** `pipe_read()` waited to
+  fill the entire requested buffer instead of returning as soon as any data
+  arrived, violating normal pipe semantics; harmless until a reader asked
+  for more than a writer was sending at once (the new GUI terminal, reading
+  the shell's small prompt writes, was the first to hit it in practice).
+- **TCP silently dropped almost all received data.** The receive path kept
   only a single one-segment buffer, so any burst of back-to-back segments
   (how every response longer than one MSS arrives) kept just the first and
-  dropped the rest, recoverable only by the peer's retransmission timeout.
+  dropped the rest, recoverable only by the peer's retransmission timeout —
+  present since TCP shipped in 0.6.5. Fine for `wget`'s generous 10-second
+  no-new-data timeout, fatal for TLS's much tighter per-read budget.
   Replaced with a real receive queue and an honest advertised window, so the
   sender itself never sends more than there's room for.
-
-### Changed
-
-- `index.json`'s `"lpg"` field (and new `"shell_elf"`/`"libc_so"` entries) in
-  `lufira-packages` are now real download URLs, not local build paths.
-- Taskbar: the bare "Exit" button is now a "Start" menu (Exit GUI / Shutdown
-  / Reboot), matching the request to be able to power off without a shell.
-- Package versions normalized to 1.0.0 across the board (a few had drifted
-  ahead to 1.0.1/1.1.0, inconsistent for a first release).
 
 ### Known Issues
 
@@ -105,6 +101,8 @@ this repository is kernel + bootloader only from this release on.
   fetch** — same synchronous model as `wget` always had; a big download
   blocks every other process until it finishes or times out.
 - **No DHCP** — still a static IP plus QEMU SLIRP's built-in DNS forwarder.
+- **Mounted FAT drives are still root-directory-only and read whole into
+  RAM** — see Added, above, for what did improve this release.
 - All prior Known Issues not superseded above still apply.
 
 ## [0.6.5] - 2026-09-29
