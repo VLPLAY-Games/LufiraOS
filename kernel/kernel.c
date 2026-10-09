@@ -11,6 +11,7 @@
 #include "drivers/mouse/mouse.h"
 #include "drivers/console/console.h"
 #include "drivers/sound/ac97.h"
+#include "drivers/disk/disk.h"
 #include "drivers/usb/xhci.h"
 #include "net/net.h"
 #include "system/cpu/gdt.h"
@@ -23,6 +24,7 @@
 #include "system/timer/pit.h"
 #include "system/syscall/syscall.h"
 #include "fs/vfs/vfs.h"
+#include "fs/ramfs/ramfs.h"
 #include "system/devmode/devmode.h"
 #include "system/klog/klog.h"
 #include "system/users/users.h"
@@ -291,6 +293,16 @@ void _start(BootInfo* bi) {
     vfs_init();
     LOG_DONE_OK("VFS initialized");
 
+    // v0.9, фаза 1 — RAMFS: монтируем /tmp по умолчанию, тем же способом,
+    // каким пользователь монтировал бы любой другой RAMFS-инстанс
+    // (ramfs_mount(), fs/ramfs/ramfs.h) — не особый случай в самом RAMFS.
+    LOG_PENDING("Mounting /tmp (ramfs)...");
+    if (ramfs_mount("/tmp") == 0) {
+        LOG_DONE_OK("/tmp mounted (ramfs)");
+    } else {
+        LOG_DONE_WARN("/tmp (ramfs) mount failed");
+    }
+
     LOG_PENDING("Initializing keyboard...");
     keyboard_init();
     LOG_DONE_OK("Keyboard %s", keyboard_is_initialized() ? "ready" : "not found");
@@ -302,6 +314,14 @@ void _start(BootInfo* bi) {
     // pcspeaker_init();
 
     pci_init();
+
+    // v0.9, фаза 1 — пробует AHCI (ahci.c) перед первым реальным
+    // disk_read_sectors()/disk_write_sectors() (тот случается намного
+    // позже, при первой записи LufiraFS — само монтирование идёт из уже
+    // загруженного бутлоадером в RAM образа, см. комментарий выше). На
+    // контроллерах без AHCI (или без активного порта) остаётся легаси
+    // ATA PIO, как раньше.
+    disk_init();
 
     if (ac97_init()) {
         DLOG("[ OK ] AC'97 ready\n");

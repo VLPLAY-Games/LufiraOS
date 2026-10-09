@@ -15,6 +15,7 @@
 #include "system/devmode/devmode.h"
 #include "system/users/users.h"
 #include "fs/fat/fat_mount.h"
+#include "fs/ramfs/ramfs.h"
 #include "system/acpi/acpi.h"
 #include "drivers/usb/xhci.h"
 #include "drivers/console/graphics2d.h"
@@ -490,12 +491,15 @@ static uint64_t sys_getcwd(uint64_t buffer, uint64_t size,
 
 // SYS_CHDIR (15): та же логика, что command_cd() (shell/commands/filesystem.c),
 // но на current_process->cwd_*, с проверкой указателя вместо разыменования.
-// Смонтированный FAT (/mnt/...) не имеет lufirafs-inode (fat_mount.h), так
-// что cwd_inode не может на него ссылаться обычным образом.
-// LUFIRAFS_FAT_MOUNT_CWD_INODE — заведомо невалидный номер инода (отвергается
-// lufirafs_read_inode()/lufirafs_lookup()), безопасный часовой — случайная
-// операция с ним вернёт ENOENT, а не мусор. Источник истины — cwd_path.
-#define LUFIRAFS_FAT_MOUNT_CWD_INODE 0xFFFFFFFFu
+// Смонтированные FAT (/mnt/...) и RAMFS (/tmp и т.п.) не имеют lufirafs-
+// inode (fat_mount.h/ramfs.h), так что cwd_inode не может на них ссылаться
+// обычным образом.
+// NON_LUFIRAFS_MOUNT_CWD_INODE — заведомо невалидный номер инода (отвергается
+// lufirafs_read_inode()/lufirafs_lookup()), безопасный часовой, общий для
+// ОБОИХ видов монтирования — случайная операция с ним вернёт ENOENT, а не
+// мусор. Источник истины — cwd_path; ".."/"." ниже реконструируют путь из
+// него и не зависят от того, какая именно ФС стоит за монтированием.
+#define NON_LUFIRAFS_MOUNT_CWD_INODE 0xFFFFFFFFu
 
 // "cd" — единственная команда, отправляющая сюда сырой (возможно
 // относительный) путь, не склеенный заранее с cwd (см. pathutil.h) —
@@ -516,15 +520,22 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
 
     const char *path = (const char *)path_ptr;
 
-    // Смонтированный FAT — до LufiraFS, тот же приоритет, что у
+    // Смонтированные FAT и RAMFS — до LufiraFS, тот же приоритет, что у
     // vfs_open()/sys_mkdir()/sys_remove() (баг: "cd /mnt/a" отвечал ENOENT
     // после успешного mount — sys_chdir() не получил этот фикс сразу).
     if (path[0] == '/') {
         struct inode *fat_inode = vfs_fat_lookup(path);
-        if (fat_inode) {
-            int is_dir = (fat_inode->type == FT_DIRECTORY);
-            if (fat_inode->private_data) kfree(fat_inode->private_data);
-            kfree(fat_inode);
+        struct inode *mount_inode = fat_inode;
+        if (!mount_inode) mount_inode = vfs_ramfs_lookup(path);
+        if (mount_inode) {
+            int is_dir = (mount_inode->type == FT_DIRECTORY);
+            // private_data освобождаем ТОЛЬКО для FAT: там это одноразовая
+            // fat_root_dir_private_t-копия под конкретный lookup() (см.
+            // fat_mount.c). У RAMFS private_data — указатель на ЖИВОЙ узел
+            // постоянного дерева (ramfs.c) — его освобождает только
+            // vfs_ramfs_unlink()/ramfs_unmount(), не это lookup.
+            if (fat_inode && mount_inode->private_data) kfree(mount_inode->private_data);
+            kfree(mount_inode);
             if (!is_dir) return (uint64_t)-ENOTDIR;
 
             int n = 0;
@@ -533,41 +544,75 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
                 n++;
             }
             current_process->cwd_path[n] = '\0';
-            current_process->cwd_inode = LUFIRAFS_FAT_MOUNT_CWD_INODE;
+            current_process->cwd_inode = NON_LUFIRAFS_MOUNT_CWD_INODE;
             return 0;
         }
     }
 
-    // ".."/"." из смонтированного FAT (нет lufirafs-inode для такого
-    // относительного вопроса) — строим родительский путь из cwd_path и
-    // уходим в обычную lufirafs-ветку ниже. Условие на path[0] != '/'
-    // обязательно (баг: раньше перехватывало и абсолютные пути вроде
-    // "cd /mnt2", отвечая ENOENT вместо проваливания в lufirafs_lookup(),
-    // который и так резолвит абсолютные пути от корня независимо от cwd_inode).
-    if (current_process->cwd_inode == LUFIRAFS_FAT_MOUNT_CWD_INODE && path[0] != '/') {
+    // Относительный "cd" из смонтированного FAT/RAMFS (нет lufirafs-inode
+    // для такого вопроса — у cwd_inode тут сентинел, не настоящий инод) —
+    // строим ЦЕЛЕВОЙ абсолютный путь из cwd_path и пробуем его СНАЧАЛА как
+    // (воз)можно другое место внутри того же (или другого) FAT/RAMFS-
+    // монтирования — обязательно для RAMFS: в отличие от FAT (только
+    // корневой уровень), у неё есть настоящие вложенные каталоги, и "cd bar"
+    // из "/tmp/foo" ("/tmp/foo/bar") иначе ничем не резолвился бы, кроме как
+    // абсолютным путём. Условие на path[0] != '/' обязательно (баг: раньше
+    // перехватывало и абсолютные пути вроде "cd /mnt2", отвечая ENOENT
+    // вместо проваливания в lufirafs_lookup(), который и так резолвит
+    // абсолютные пути от корня независимо от cwd_inode).
+    if (current_process->cwd_inode == NON_LUFIRAFS_MOUNT_CWD_INODE && path[0] != '/') {
         if (strcmp(path, ".") == 0) return 0;
+
+        char target[sizeof(current_process->cwd_path)];
+        if (strcmp(path, "..") == 0) {
+            int len = (int)strlen(current_process->cwd_path);
+            int last_slash = -1;
+            for (int i = 0; i < len; i++) if (current_process->cwd_path[i] == '/') last_slash = i;
+
+            if (last_slash <= 0) {
+                target[0] = '/'; target[1] = '\0';
+            } else {
+                int i = 0;
+                for (; i < last_slash; i++) target[i] = current_process->cwd_path[i];
+                target[i] = '\0';
+            }
+        } else {
+            int n = 0;
+            int clen = (int)strlen(current_process->cwd_path);
+            while (n < clen && n < (int)sizeof(target) - 1) { target[n] = current_process->cwd_path[n]; n++; }
+            if (n > 0 && n < (int)sizeof(target) - 1 && target[n - 1] != '/') target[n++] = '/';
+            int pn = 0;
+            while (path[pn] && n < (int)sizeof(target) - 1) { target[n++] = path[pn++]; }
+            target[n] = '\0';
+        }
+
+        struct inode *sub_inode = vfs_fat_lookup(target);
+        int sub_from_fat = (sub_inode != NULL);
+        if (!sub_inode) sub_inode = vfs_ramfs_lookup(target);
+        if (sub_inode) {
+            int is_dir = (sub_inode->type == FT_DIRECTORY);
+            if (sub_from_fat && sub_inode->private_data) kfree(sub_inode->private_data);
+            kfree(sub_inode);
+            if (!is_dir) return (uint64_t)-ENOTDIR;
+
+            int tn = 0;
+            while (target[tn] && tn < (int)sizeof(current_process->cwd_path) - 1) {
+                current_process->cwd_path[tn] = target[tn];
+                tn++;
+            }
+            current_process->cwd_path[tn] = '\0';
+            return 0; // cwd_inode остаётся тем же сентинелом
+        }
 
         if (strcmp(path, "..") != 0) return (uint64_t)-ENOENT;
 
-        char parent[sizeof(current_process->cwd_path)];
-        int len = (int)strlen(current_process->cwd_path);
-        int last_slash = -1;
-        for (int i = 0; i < len; i++) if (current_process->cwd_path[i] == '/') last_slash = i;
-
-        if (last_slash <= 0) {
-            parent[0] = '/'; parent[1] = '\0';
-        } else {
-            int i = 0;
-            for (; i < last_slash; i++) parent[i] = current_process->cwd_path[i];
-            parent[i] = '\0';
-        }
-
-        // "mount" регистрирует только префикс (vfs_fat_mount()), не создаёт
-        // его родителя в lufirafs — "/mnt" может вообще не существовать
-        // как inode. Откат на корень — безопасный край, лучше чем ENOENT
-        // на обычное "выйти из флешки".
+        // ".." вышла за пределы ЛЮБОГО FAT/RAMFS-монтирования — обычный
+        // lufirafs-путь. "mount"/ramfs_mount() регистрируют только префикс,
+        // не создают его родителя в lufirafs — "/mnt"/"/tmp" может вообще
+        // не существовать как inode. Откат на корень — безопасный край,
+        // лучше чем ENOENT на обычное "выйти из флешки/ramfs".
         uint32_t new_inode = lufirafs.sb.root_inode;
-        lufirafs_lookup(&lufirafs, lufirafs.sb.root_inode, parent, &new_inode);
+        lufirafs_lookup(&lufirafs, lufirafs.sb.root_inode, target, &new_inode);
 
         lufirafs_inode_t inode;
         if (lufirafs_read_inode(&lufirafs, new_inode, &inode) != 0 ||
@@ -745,12 +790,14 @@ static uint64_t sys_mkdir(uint64_t path_ptr, uint64_t mode, uint64_t unused1,
     if (slen == 0) return (uint64_t)-EINVAL;
     const char *path = (const char *)path_ptr;
 
-    // Смонтированный FAT — до всех проверок прав на LufiraFS: путь не
-    // существует как lufirafs-inode, lufirafs_resolve_parent() вернул бы
+    // Смонтированные FAT и RAMFS — до всех проверок прав на LufiraFS: путь
+    // не существует как lufirafs-inode, lufirafs_resolve_parent() вернул бы
     // -ENOENT (mkdir.elf зовёт SYS_MKDIR, не vfs_mkdir() напрямую — более
     // ранний фикс в vfs.c сюда не доходил).
     if (path[0] == '/') {
         int r = vfs_fat_mkdir(path);
+        if (r != -2) return (r == 0) ? 0 : (uint64_t)-1;
+        r = vfs_ramfs_mkdir(path);
         if (r != -2) return (r == 0) ? 0 : (uint64_t)-1;
     }
 
@@ -785,9 +832,11 @@ static uint64_t sys_remove(uint64_t path_ptr, int is_rmdir) {
     if (slen == 0) return (uint64_t)-EINVAL;
     const char *path = (const char *)path_ptr;
 
-    // Смонтированный FAT — см. тот же комментарий в sys_mkdir() выше.
+    // Смонтированные FAT и RAMFS — см. тот же комментарий в sys_mkdir() выше.
     if (path[0] == '/') {
         int r = vfs_fat_unlink(path);
+        if (r != -2) return (r == 0) ? 0 : (uint64_t)-1;
+        r = vfs_ramfs_unlink(path);
         if (r != -2) return (r == 0) ? 0 : (uint64_t)-1;
     }
 

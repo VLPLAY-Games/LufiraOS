@@ -524,3 +524,29 @@ void sync_kernel_mappings(uint64_t dest_pml4_phys, uint64_t src_pml4_phys) {
         }
     }
 }
+
+// Общий для всех MMIO-потребителей бамп-указатель — см. комментарий у
+// mmio_map() в paging.h про то, почему он не может быть частным для
+// каждого драйвера по отдельности.
+static uint64_t mmio_next_free = KERNEL_MMIO_BASE;
+
+void *mmio_map(uint64_t phys, uint64_t size) {
+    if (size == 0) size = 0x2000; // защитный дефолт на случай нулевого BAR.size
+
+    uint64_t phys_page = phys & ~((uint64_t)PAGE_SIZE - 1);
+    uint64_t phys_offset = phys - phys_page;
+    uint64_t map_size = (phys_offset + size + PAGE_SIZE - 1) & ~((uint64_t)PAGE_SIZE - 1);
+
+    uint64_t virt_base = mmio_next_free;
+    mmio_next_free += map_size;
+
+    for (uint64_t off = 0; off < map_size; off += PAGE_SIZE) {
+        if (map_page(virt_base + off, phys_page + off,
+                      PAGE_PRESENT | PAGE_WRITE | PAGE_PCD) != 0)
+        {
+            printf("[MMIO] mmio_map: map_page failed at phys 0x%lx\n", phys_page + off);
+            return NULL;
+        }
+    }
+    return (void *)(uintptr_t)(virt_base + phys_offset);
+}

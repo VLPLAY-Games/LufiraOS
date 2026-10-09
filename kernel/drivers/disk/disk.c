@@ -1,5 +1,8 @@
 #include "disk.h"
+#include "ahci.h"
 #include "lib/types.h"
+#include "drivers/console/console.h"
+#include "system/devmode/devmode.h"
 
 #define ATA_PRIMARY_IO  0x1F0
 #define ATA_DATA        0x1F0
@@ -59,7 +62,18 @@ static void ata_select_drive_lba(uint32_t lba) {
     outb(ATA_LBA_HIGH, (lba >> 16) & 0xFF);
 }
 
+void disk_init(void) {
+    if (ahci_init() == 0) {
+        DLOG("[DISK] Using AHCI\n");
+    } else {
+        DLOG("[DISK] No AHCI controller/port — falling back to legacy ATA PIO\n");
+    }
+}
+
 int disk_read_sectors(uint32_t lba, uint8_t sector_count, void *buffer) {
+    if (ahci_available())
+        return ahci_read_sectors(lba, sector_count, buffer);
+
     uint16_t *buf = (uint16_t*)buffer;
     for (uint8_t s = 0; s < sector_count; s++) {
         if (ata_wait_ready() != 0) return -1;
@@ -73,6 +87,9 @@ int disk_read_sectors(uint32_t lba, uint8_t sector_count, void *buffer) {
 }
 
 int disk_write_sectors(uint32_t lba, uint8_t sector_count, const void *buffer) {
+    if (ahci_available())
+        return ahci_write_sectors(lba, sector_count, buffer);
+
     const uint16_t *buf = (const uint16_t*)buffer;
     for (uint8_t s = 0; s < sector_count; s++) {
         if (ata_wait_ready() != 0) return -1;

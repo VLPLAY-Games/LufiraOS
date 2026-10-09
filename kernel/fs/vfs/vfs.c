@@ -6,6 +6,7 @@
 #include "lib/stddef.h"
 #include "lib/string.h"
 #include "fs/fat/fat_mount.h"
+#include "fs/ramfs/ramfs.h"
 
 extern int vfs_open_lufirafs(const char *path, int flags);
 
@@ -526,12 +527,17 @@ int vfs_open(const char *path, int flags)
     if (!path || !*path)
         return -1;
 
-    // Смонтированный FAT (/mnt/...) — перед LufiraFS: примонтированный
-    // путь должен перекрывать то, что там было раньше. -2 значит "path
-    // не под монтированием", тогда просто продолжаем как обычно.
+    // Смонтированный FAT (/mnt/...) и RAMFS (/tmp и т.п.) — перед
+    // LufiraFS: примонтированный путь должен перекрывать то, что там
+    // было раньше. -2 значит "path не под этим монтированием", тогда
+    // просто продолжаем как обычно.
     {
         int fat_fd = vfs_fat_open(path, flags);
         if (fat_fd != -2) return fat_fd;
+    }
+    {
+        int ramfs_fd = vfs_ramfs_open(path, flags);
+        if (ramfs_fd != -2) return ramfs_fd;
     }
 
     int fd =
@@ -570,6 +576,8 @@ int vfs_open_at(uint32_t base_inode, const char *path, int flags)
     if (path[0] == '/') {
         int fat_fd = vfs_fat_open(path, flags);
         if (fat_fd != -2) return fat_fd;
+        int ramfs_fd = vfs_ramfs_open(path, flags);
+        if (ramfs_fd != -2) return ramfs_fd;
     }
 
     int fd = vfs_lufirafs_open_at(base_inode, path, flags);
@@ -737,6 +745,12 @@ int vfs_create(const char *path)
         vfs_close(fat_fd);
         return 0;
     }
+    int ramfs_fd = vfs_ramfs_open(path, O_CREAT | O_RDONLY);
+    if (ramfs_fd != -2) {
+        if (ramfs_fd < 0) return -1;
+        vfs_close(ramfs_fd);
+        return 0;
+    }
 
     return vfs_lufirafs_create(path);
 }
@@ -748,6 +762,8 @@ int vfs_mkdir(const char *path)
         return -1;
 
     int r = vfs_fat_mkdir(path);
+    if (r != -2) return r;
+    r = vfs_ramfs_mkdir(path);
     if (r != -2) return r;
 
     return vfs_lufirafs_mkdir(path);
@@ -761,6 +777,8 @@ int vfs_unlink(const char *path)
 
     int r = vfs_fat_unlink(path);
     if (r != -2) return r;
+    r = vfs_ramfs_unlink(path);
+    if (r != -2) return r;
 
     return vfs_lufirafs_unlink(path);
 }
@@ -772,6 +790,8 @@ int vfs_rmdir(const char *path)
         return -1;
 
     int r = vfs_fat_unlink(path);
+    if (r != -2) return r;
+    r = vfs_ramfs_unlink(path);
     if (r != -2) return r;
 
     return vfs_lufirafs_unlink(path);
@@ -825,6 +845,8 @@ inode_t* vfs_lookup(const char *path)
 
     inode_t *fat_inode = vfs_fat_lookup(path);
     if (fat_inode) return fat_inode;
+    inode_t *ramfs_inode = vfs_ramfs_lookup(path);
+    if (ramfs_inode) return ramfs_inode;
 
     return vfs_lufirafs_lookup(path);
 }
@@ -837,6 +859,8 @@ int vfs_mkdir_at(uint32_t base_inode, const char *path)
 
     if (path[0] == '/') {
         int r = vfs_fat_mkdir(path);
+        if (r != -2) return r;
+        r = vfs_ramfs_mkdir(path);
         if (r != -2) return r;
     }
 
@@ -852,6 +876,8 @@ int vfs_rmdir_at(uint32_t base_inode, const char *path)
     if (path[0] == '/') {
         int r = vfs_fat_unlink(path);
         if (r != -2) return r;
+        r = vfs_ramfs_unlink(path);
+        if (r != -2) return r;
     }
 
     return vfs_lufirafs_unlink_at(base_inode, path);
@@ -865,6 +891,8 @@ int vfs_unlink_at(uint32_t base_inode, const char *path)
 
     if (path[0] == '/') {
         int r = vfs_fat_unlink(path);
+        if (r != -2) return r;
+        r = vfs_ramfs_unlink(path);
         if (r != -2) return r;
     }
 
@@ -884,6 +912,12 @@ int vfs_create_at(uint32_t base_inode, const char *path)
             vfs_close(fat_fd);
             return 0;
         }
+        int ramfs_fd = vfs_ramfs_open(path, O_CREAT | O_RDONLY);
+        if (ramfs_fd != -2) {
+            if (ramfs_fd < 0) return -1;
+            vfs_close(ramfs_fd);
+            return 0;
+        }
     }
 
     return vfs_lufirafs_create_at(base_inode, path);
@@ -898,6 +932,8 @@ inode_t* vfs_lookup_at(uint32_t base_inode, const char *path)
     if (path[0] == '/') {
         inode_t *fat_inode = vfs_fat_lookup(path);
         if (fat_inode) return fat_inode;
+        inode_t *ramfs_inode = vfs_ramfs_lookup(path);
+        if (ramfs_inode) return ramfs_inode;
     }
 
     return vfs_lufirafs_lookup_at(base_inode, path);

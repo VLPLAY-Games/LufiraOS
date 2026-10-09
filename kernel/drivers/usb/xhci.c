@@ -37,30 +37,13 @@ static inline void reg_write64(void *base, uint32_t off, uint64_t val) {
     *(volatile uint64_t *)((uint8_t *)base + off) = val;
 }
 
-// Бамп-аллокатор поверх KERNEL_MMIO_BASE — единственный потребитель этого
-// диапазона здесь один (BAR0 xHCI), поэтому полноценный менеджер MMIO-окон
-// был бы избыточен.
-static uint64_t xhci_mmio_next_free = KERNEL_MMIO_BASE;
-
+// Отображение BAR0 — общий mmio_map() (system/mm/paging.h/.c), не частная
+// копия: v0.9, фаза 1, добавила AHCI как второго MMIO-потребителя этого же
+// KERNEL_MMIO_BASE-диапазона, и два независимых bump-аллокатора, каждый
+// заново стартующий с одного и того же базового адреса, перезаписывали бы
+// отображения друг друга (см. комментарий у mmio_map() в paging.h).
 static void *map_mmio(uint64_t phys, uint64_t size) {
-    if (size == 0) size = 0x2000; // защитный дефолт на случай нулевого BAR.size
-
-    uint64_t phys_page = phys & ~((uint64_t)PAGE_SIZE - 1);
-    uint64_t phys_offset = phys - phys_page;
-    uint64_t map_size = (phys_offset + size + PAGE_SIZE - 1) & ~((uint64_t)PAGE_SIZE - 1);
-
-    uint64_t virt_base = xhci_mmio_next_free;
-    xhci_mmio_next_free += map_size;
-
-    for (uint64_t off = 0; off < map_size; off += PAGE_SIZE) {
-        if (map_page(virt_base + off, phys_page + off,
-                      PAGE_PRESENT | PAGE_WRITE | PAGE_PCD) != 0)
-        {
-            printf("[XHCI] map_mmio: map_page failed at phys 0x%lx\n", phys_page + off);
-            return NULL;
-        }
-    }
-    return (void *)(uintptr_t)(virt_base + phys_offset);
+    return mmio_map(phys, size);
 }
 
 /* ======================================================================== */

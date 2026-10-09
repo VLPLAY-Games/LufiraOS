@@ -63,7 +63,9 @@ $(shell mkdir -p $(BUILD_DIR) \
 	$(BUILD_DIR)/kernel/system/devmode \
 	$(BUILD_DIR)/kernel/system/klog \
 	$(BUILD_DIR)/kernel/fs/vfs \
-    $(BUILD_DIR)/kernel/fs/lufirafs)
+    $(BUILD_DIR)/kernel/fs/lufirafs \
+	$(BUILD_DIR)/kernel/fs/fat \
+	$(BUILD_DIR)/kernel/fs/ramfs)
 
 BOOTLOADER_CFLAGS := -I$(EFI_INC) -I$(EFI_INC_ARCH) \
                      -I$(BOOTLOADER_DIR) \
@@ -96,6 +98,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/drivers/keyboard/keyboard.c \
     $(KERNEL_DIR)/drivers/mouse/mouse.c \
     $(KERNEL_DIR)/drivers/disk/disk.c \
+	$(KERNEL_DIR)/drivers/disk/ahci.c \
 	$(KERNEL_DIR)/drivers/sound/ac97.c \
 	$(KERNEL_DIR)/drivers/usb/xhci.c \
 	$(KERNEL_DIR)/drivers/usb/usb_hid.c \
@@ -148,7 +151,8 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/fs/lufirafs/lufirafs.c \
 	$(KERNEL_DIR)/fs/lufirafs/lufirafs_vfs.c \
 	$(KERNEL_DIR)/fs/fat/fat.c \
-	$(KERNEL_DIR)/fs/fat/fat_mount.c
+	$(KERNEL_DIR)/fs/fat/fat_mount.c \
+	$(KERNEL_DIR)/fs/ramfs/ramfs.c
 
 KERNEL_ASM_SOURCES := \
     $(KERNEL_DIR)/system/cpu/interrupts.S \
