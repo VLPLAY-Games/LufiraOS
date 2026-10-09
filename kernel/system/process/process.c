@@ -25,6 +25,97 @@ volatile uint32_t g_wm_pid = 0;
 volatile int shell_is_respawn = 0;
 static process_t *(*shell_spawner_fn)(void) = NULL;
 
+// ============================================================
+// FPU/SSE context (FXSAVE/FXRSTOR) — see process.h for the field comment.
+//
+// Kernel code itself is built with -mgeneral-regs-only (Makefile) and never
+// touches XMM/x87/MMX, so this exists purely for ring3 processes — today
+// none of them use SSE either (lufira-packages' build.py uses the same
+// -mgeneral-regs-only flag), but nothing enforces that at the ABI level,
+// and the planned DOOM port will need real floats. Without this, two ring3
+// processes that both happened to use XMM registers would silently
+// corrupt each other's FPU state across every preemption.
+// ============================================================
+
+#define FPU_STATE_SIZE 512 // fixed size/layout of the legacy FXSAVE area
+
+// Clean reference FXSAVE image, captured once in process_init() and
+// memcpy()'d into every new process's own area — NOT just zeroed: FCW/MXCSR
+// all-zero would mean every FPU/SSE exception is UNMASKED (bit layout is
+// "0 = enabled"), so the first float operation of any new process would
+// immediately fault (#MF/#XM) instead of just computing. fninit + a known
+// MXCSR gives a real, correctly-masked default state regardless of
+// whatever CR0/CR4/MXCSR the firmware happened to leave behind.
+static uint8_t fpu_init_template[FPU_STATE_SIZE] __attribute__((aligned(16)));
+
+static inline void fpu_save(uint8_t *area) {
+    asm volatile("fxsave64 (%0)" :: "r"(area) : "memory");
+}
+
+static inline void fpu_restore(uint8_t *area) {
+    asm volatile("fxrstor64 (%0)" :: "r"(area) : "memory");
+}
+
+// CR4.OSFXSR (bit 9) / CR4.OSXMMEXCPT (bit 10) must be set by the OS for
+// FXSAVE/FXRSTOR and SSE in general to be usable without #UD — the kernel
+// never set these itself (grepped: no CR4 write anywhere before this),
+// it has only ever "worked" because UEFI firmware (OVMF included) leaves
+// them set from its own long-mode SSE use. That's not something to rely
+// on — in particular the planned legacy-BIOS boot path (v0.9) will reach
+// long mode WITHOUT ever going through UEFI, with no guarantee CR4 is in
+// that state. Set both explicitly instead of inheriting firmware state.
+static void fpu_enable(void) {
+    uint64_t cr4;
+    asm volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= (1 << 9) | (1 << 10);
+    asm volatile("mov %0, %%cr4" :: "r"(cr4));
+
+    // CR0.EM (bit 2) must be clear (no x87/SSE emulation trap) and CR0.MP
+    // (bit 1) set (so WAIT/FPU instructions respect TS) — same reasoning
+    // as CR4 above: never touched before, only "worked" via firmware state.
+    uint64_t cr0;
+    asm volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 &= ~(1ULL << 2);
+    cr0 |= (1ULL << 1);
+    asm volatile("mov %0, %%cr0" :: "r"(cr0));
+}
+
+// Captures fpu_init_template — must run after fpu_enable() (FXSAVE itself
+// needs CR4.OSFXSR) and before the first process_create()/idle_process
+// setup that will memcpy() this template.
+static void fpu_init(void) {
+    fpu_enable();
+
+    asm volatile("fninit");
+    uint32_t default_mxcsr = 0x1F80; // all exceptions masked, round-to-nearest
+    asm volatile("ldmxcsr %0" :: "m"(default_mxcsr));
+    fpu_save(fpu_init_template);
+}
+
+// fpu_state must be 16-byte aligned for FXSAVE/FXRSTOR; kmalloc() only
+// guarantees 8-byte alignment (heap.c), so over-allocate by 16 and align
+// the usable pointer up — fpu_state_raw (the real kmalloc() result, NOT
+// 16-byte aligned in general) is what free_fpu_state() below actually
+// kfree()'s. 0 on success, -1 on allocation failure.
+static int alloc_fpu_state(process_t *proc) {
+    proc->fpu_state_raw = kmalloc(FPU_STATE_SIZE + 16);
+    if (!proc->fpu_state_raw) {
+        proc->fpu_state = NULL;
+        return -1;
+    }
+    proc->fpu_state = (uint8_t*)(((uint64_t)proc->fpu_state_raw + 15) & ~15ULL);
+    memcpy(proc->fpu_state, fpu_init_template, FPU_STATE_SIZE);
+    return 0;
+}
+
+static void free_fpu_state(process_t *proc) {
+    if (proc->fpu_state_raw) {
+        kfree(proc->fpu_state_raw);
+        proc->fpu_state_raw = NULL;
+        proc->fpu_state = NULL;
+    }
+}
+
 void process_set_shell_spawner(process_t *(*spawner)(void)) {
     shell_spawner_fn = spawner;
 }
@@ -149,6 +240,7 @@ static void free_process_resources(process_t *proc) {
 
     if (proc->page_table) free_user_address_space(proc->page_table);
     free_ring0_stack(proc);
+    free_fpu_state(proc);
 }
 
 // Создаёт новое адресное пространство на основе КОРНЕВОГО ядерного PML4
@@ -309,7 +401,12 @@ static uint64_t clone_address_space_deep(uint64_t src_pml4_phys) {
 void process_init(void) {
     // Сохраняем корневой ядерный PML4 на раннем этапе (до загрузки процессов)
     asm volatile("mov %%cr3, %0" : "=r"(kernel_cr3));
-    
+
+    // Разрешаем CR4.OSFXSR/OSXMMEXCPT + строим fpu_init_template ДО первого
+    // alloc_fpu_state() ниже (idle_process) — см. комментарии у fpu_init()
+    // выше.
+    fpu_init();
+
     idle_process = (process_t*)kmalloc(sizeof(process_t));
     if (!idle_process) return;
     
@@ -345,6 +442,15 @@ void process_init(void) {
     idle_process->uid = 0;
     idle_process->gid = 0;
     idle_process->cpu_ticks = 0;
+    // idle участвует в switch_to_process() как контекст-получатель (см.
+    // prev_context там) — нужен собственный fpu_state не меньше, чем у
+    // обычного процесса, иначе первый же context_switch() туда/оттуда
+    // разыменует fpu_state==NULL.
+    if (alloc_fpu_state(idle_process) != 0) {
+        kfree(idle_process);
+        idle_process = NULL;
+        return;
+    }
 
     const char *name = "idle";
     for (int i = 0; i < 31 && name[i]; i++) idle_process->name[i] = name[i];
@@ -606,6 +712,17 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     // если бы обработчиков не было.
     proc->sig_stack_top = allocate_user_stack_in(SIGNAL_STACK_SIZE, new_pml4, proc->pid,
                                                   SIGNAL_STACK_AREA_START, 0);
+
+    // В отличие от sig_stack_top выше — фатально: без fpu_state первый же
+    // switch_to_process() этого процесса разыменует NULL в fpu_save()/
+    // fpu_restore().
+    if (alloc_fpu_state(proc) != 0) {
+        free_ring0_stack(proc);
+        free_user_address_space(new_pml4);
+        kfree(proc);
+        irq_enable();
+        return NULL;
+    }
 
     // Инициализируем контекст
     memset(&proc->context, 0, sizeof(process_context_t));
@@ -1126,16 +1243,36 @@ void switch_to_process(process_t *next) {
     // (process_deliver_pending_signal(), перед возвратом из каждого
     // syscall'а), где frame_ptr гарантированно настоящая ring3-точка.
 
+    // Сохраняем FPU/SSE родителя ДО переключения — после него регистры
+    // принадлежат следующему процессу. Тот же prev/idle fallback, что у
+    // prev_context выше (один и тот же случай: "переключаемся не из
+    // настоящего процесса" — ранний бут или prev==next).
+    process_t *fpu_save_owner = (prev && prev != next) ? prev : idle_process;
+    fpu_save(fpu_save_owner->fpu_state);
+
     // Первая активация идёт через настоящий ring0->ring3 переход (iretq,
     // см. process_t.first_run в process.h), не через обычный context_switch()
     // (jmp, CS/CPL не меняются). Все последующие резюме, включая вытесненный
     // из ring3 процесс, используют context_switch().
+    //
+    // ВАЖНО: ни один из них "не возвращается" в обычном смысле для ЭТОГО
+    // вызова — context_switch()/context_enter_ring3() захватывают RIP как
+    // "адрес возврата из CALL" и позже передают управление сюда же, но уже
+    // для ДРУГОГО (любого) процесса, когда-то переключённого прочь именно
+    // в этой точке кода. Поэтому fpu_restore() ниже обязан читать
+    // current_process (глобальная переменная, актуальная к этому моменту
+    // — её выставляет switch_to_process() ДО низкоуровневого переключения,
+    // см. выше), а НЕ локальный next — next пережил переключение как часть
+    // сохранённого состояния стека и может указывать совсем не на того,
+    // кто реально сейчас выполняется.
     if (next->first_run) {
         next->first_run = 0;
         context_enter_ring3(prev_context, &next->context);
     } else {
         context_switch(prev_context, &next->context);
     }
+
+    fpu_restore(current_process->fpu_state);
 }
 
 static const char *process_state_name(process_state_t state)
@@ -1529,6 +1666,15 @@ uint64_t process_fork(uint64_t frame_ptr) {
 
     // Ребёнок не выполнялся — счётчик CPU-тиков с нуля.
     child->cpu_ticks = 0;
+
+    // POSIX: fork() копирует FPU/SSE-состояние родителя. process_create()
+    // уже дала child копию fpu_init_template (чистое состояние) — заменяем
+    // её настоящим состоянием прямо из регистров: parent->fpu_state
+    // отражает состояние родителя только на момент его ПОСЛЕДНЕГО
+    // переключения (switch_to_process()), а родитель всё ещё исполняется
+    // прямо сейчас (это его собственный syscall) и мог использовать
+    // XMM-регистры уже после того, как в последний раз был возобновлён.
+    fpu_save(child->fpu_state);
 
     // Контекст ребёнка продолжает сразу после syscall в родителе (тот же
     // rip/rflags/callee-saved), но rax=0 — возвращаемое значение fork() для

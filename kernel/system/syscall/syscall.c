@@ -1762,7 +1762,11 @@ void syscall_init(void) {
     asm volatile("wrmsr" : : "c"(0xC0000080), "a"((uint32_t)efer),
                  "d"((uint32_t)(efer >> 32)));
     
-    DLOG("[SYSCALL] 27 system calls registered\n");
+    // Плоское число, не выведенное из syscall.h автоматически (нет единого
+    // SYS_COUNT — номера SYS_* просто #define'ы) — бумить вручную при
+    // добавлении нового syscall'а. Застало 0.8: тут всё ещё было "27" при
+    // 65 реально зарегистрированных (SYS_NET_FETCH=66 последний по номеру).
+    DLOG("[SYSCALL] 65 system calls registered\n");
 }
 
 // ========== ДИСПАТЧЕР ==========

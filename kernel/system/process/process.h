@@ -176,6 +176,19 @@ typedef struct process {
     // отдельный от родителя (как и у POSIX fork() message queues не
     // наследуются).
     ipc_mailbox_t mailbox;
+    // FXSAVE/FXRSTOR legacy area (x87/MMX/XMM0-15/MXCSR) — 512 bytes,
+    // MUST be 16-byte aligned (FXSAVE/FXRSTOR #GP on an unaligned operand).
+    // kmalloc() only guarantees 8-byte alignment (heap.c), so fpu_state is
+    // a manually-aligned pointer INTO fpu_state_raw, not a raw kmalloc()
+    // result — fpu_state_raw is what actually gets kfree()'d.
+    // Allocated/initialized to a clean FPU state by alloc_fpu_state() in
+    // process_create()/process_init(); fork() overwrites it with a live
+    // fxsave() of the parent instead (process_fork()). See switch_to_process()
+    // for where it's actually saved/restored on every context switch — the
+    // kernel itself never touches XMM/FPU (-mgeneral-regs-only), but ring3
+    // processes can (and for the planned DOOM port, will).
+    uint8_t *fpu_state;
+    void *fpu_state_raw;
     struct process *next;
 } process_t;
 
