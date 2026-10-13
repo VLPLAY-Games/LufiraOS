@@ -215,6 +215,69 @@ $(BUILD_DIR)/kernel.bin: $(BUILD_DIR)/kernel.elf
 	printf "  $(BOLD)$(BGREEN)✓ Kernel end:$(RESET)          $(BWHITE)0x%s$(RESET)\n" "$$KERNEL_END"; \
 	truncate -s $$KERNEL_SIZE $@
 
+# ============================================================
+# Legacy BIOS bootloader (opt-in — не часть `all`, см. documentation/
+# 01_bootloader.md). Три независимых плоских бинарника:
+#   stage1.bin — патчится LufiraOS-Builder в bootstrap-код область
+#                FAT12-загрузочного сектора (0x3E..0x1FD), сам в disk.img
+#                отдельным файлом не лежит;
+#   stage2.bin — грузится stage1 через LBA в резервные сектора ESP;
+#   legacy_main.bin — обычный freestanding x86-64 C, собран и объектно
+#                скопирован (objcopy -O binary) РОВНО как kernel.bin —
+#                см. длинный комментарий в boot_legacy/layout.inc про то,
+#                почему не слинкован с stage2.asm напрямую.
+# Границы размеров (448 байт / STAGE2_MAX_SECTORS / LEGACY_MAIN_MAX_SECTORS)
+# обязаны совпадать с boot_legacy/layout.inc — если он меняется, эти числа
+# тоже надо поправить руками (make-переменные тут не шарятся с NASM equ).
+LEGACY_BOOT_DIR := boot_legacy
+NASM := nasm
+
+LEGACY_MAIN_CFLAGS := -m64 -ffreestanding -fno-stack-protector -fno-stack-check \
+                 -fno-asynchronous-unwind-tables -fno-builtin \
+                 -mno-red-zone -mgeneral-regs-only \
+                 -Wall -Wextra -std=gnu11 -I$(LEGACY_BOOT_DIR)
+
+.PHONY: bootloader-bios
+bootloader-bios: $(BUILD_DIR)/legacy_boot/stage1.bin $(BUILD_DIR)/legacy_boot/stage2.bin $(BUILD_DIR)/legacy_boot/legacy_main.bin
+
+$(BUILD_DIR)/legacy_boot/stage1.bin: $(LEGACY_BOOT_DIR)/stage1.asm $(LEGACY_BOOT_DIR)/layout.inc
+	@printf "  $(BBLUE)NASM$(RESET)    $(DIM)$<$(RESET)\n"
+	@mkdir -p $(dir $@)
+	$(NASM) -f bin -I$(LEGACY_BOOT_DIR)/ -o $@ $<
+	@SIZE=$$(stat -c%s $@); \
+	if [ $$SIZE -gt 448 ]; then \
+		printf "$(BRED)ERROR: stage1.bin is %s bytes, must fit in 448 (boot sector bootstrap-code budget)$(RESET)\n" "$$SIZE"; \
+		exit 1; \
+	fi
+
+$(BUILD_DIR)/legacy_boot/stage2.bin: $(LEGACY_BOOT_DIR)/stage2.asm $(LEGACY_BOOT_DIR)/layout.inc
+	@printf "  $(BBLUE)NASM$(RESET)    $(DIM)$<$(RESET)\n"
+	@mkdir -p $(dir $@)
+	$(NASM) -f bin -I$(LEGACY_BOOT_DIR)/ -o $@ $<
+	@SIZE=$$(stat -c%s $@); \
+	if [ $$SIZE -gt 32768 ]; then \
+		printf "$(BRED)ERROR: stage2.bin is %s bytes, exceeds STAGE2_MAX_SECTORS budget (32768)$(RESET)\n" "$$SIZE"; \
+		exit 1; \
+	fi
+
+$(BUILD_DIR)/legacy_boot/legacy_main.o: $(LEGACY_BOOT_DIR)/legacy_main.c $(LEGACY_BOOT_DIR)/legacy_boot.h
+	@printf "  $(BGREEN)CC$(RESET)      $(DIM)$<$(RESET)\n"
+	@mkdir -p $(dir $@)
+	$(CC) $(LEGACY_MAIN_CFLAGS) -c -o $@ $<
+
+$(BUILD_DIR)/legacy_boot/legacy_main.elf: $(BUILD_DIR)/legacy_boot/legacy_main.o $(LEGACY_BOOT_DIR)/legacy_main.ld
+	@printf "  $(BMAGENTA)LD$(RESET)      $(DIM)$@$(RESET)\n"
+	$(LD) -static -nostdlib -z max-page-size=0x1000 --gc-sections -T $(LEGACY_BOOT_DIR)/legacy_main.ld -o $@ $(BUILD_DIR)/legacy_boot/legacy_main.o
+
+$(BUILD_DIR)/legacy_boot/legacy_main.bin: $(BUILD_DIR)/legacy_boot/legacy_main.elf
+	@printf "  $(BYELLOW)OBJCOPY$(RESET) $(DIM)$@$(RESET)\n"
+	$(OBJCOPY) -O binary $< $@
+	@SIZE=$$(stat -c%s $@); \
+	if [ $$SIZE -gt 16384 ]; then \
+		printf "$(BRED)ERROR: legacy_main.bin is %s bytes, exceeds LEGACY_MAIN_MAX_SECTORS budget (16384)$(RESET)\n" "$$SIZE"; \
+		exit 1; \
+	fi
+
 clean:
 	@printf "\n$(BOLD)$(BRED)═══ Cleaning ═══$(RESET)\n"
 	rm -rf $(BUILD_DIR)
