@@ -2,6 +2,8 @@
 #include "drivers/input/input.h"
 #include "drivers/keyboard/keyboard.h"
 #include "system/timer/pit.h"
+#include "lib/stddef.h"
+#include "lib/string.h"
 
 // Usage ID стрелок в таблице "Keyboard/Keypad" HID (стандартные для любой
 // boot-протокольной клавиатуры).
@@ -156,6 +158,11 @@ void usb_hid_keyboard_report(const uint8_t report[8]) {
         }
         if (!still_pressed) repeat_slots[j].usage = 0;
     }
+}
+
+void usb_hid_keyboard_detached(void) {
+    memset(repeat_slots, 0, sizeof(repeat_slots));
+    keyboard_set_ctrl_state(0);
 }
 
 void usb_hid_mouse_report(const uint8_t *report, int len) {

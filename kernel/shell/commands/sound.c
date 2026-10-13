@@ -1,6 +1,6 @@
 #include "lib/types.h"
 #include "drivers/console/console.h"
-#include "drivers/sound/ac97.h"
+#include "drivers/sound/sound.h"
 #include "../commands.h"
 
 
@@ -8,12 +8,12 @@ void command_beep(void)
 {
     printf("\nPlaying 440 Hz beep...\n");
 
-    if (!ac97_is_available()) {
-        printf("Error: AC'97 audio is not available.\n");
+    if (!sound_is_available()) {
+        printf("Error: audio is not available.\n");
         return;
     }
 
-    if (!ac97_play_tone(440, 250)) {
+    if (sound_play_tone(440, 250) != 0) {
         printf("Error: failed to play tone.\n");
         return;
     }
@@ -31,16 +31,16 @@ void command_mixer(const char* args)
         printf("\nAudio Mixer\n");
         printf("-----------\n");
 
-        if (!ac97_is_available()) {
-            printf("Device : AC'97\n");
+        if (!sound_is_available()) {
+            printf("Device : %s\n", sound_driver_name());
             printf("State  : offline\n");
             return;
         }
 
-        printf("Device : AC'97\n");
+        printf("Device : %s\n", sound_driver_name());
         printf("State  : ready\n");
-        printf("Volume : %u%%\n", ac97_get_volume());
-        printf("Rate   : %u Hz\n", ac97_get_sample_rate());
+        printf("Volume : %u%%\n", sound_get_volume());
+        printf("Rate   : %u Hz\n", sound_get_sample_rate());
 
         return;
     }
@@ -66,18 +66,20 @@ void command_mixer(const char* args)
         return;
     }
 
-    if (!ac97_is_available()) {
-        printf("\nError: AC'97 audio is not available.\n");
+    if (!sound_is_available()) {
+        printf("\nError: audio is not available.\n");
         return;
     }
 
-    ac97_set_volume((uint8_t)value);
+    sound_set_volume((uint8_t)value);
 
     printf("\nVolume set to %u%%\n", value);
 }
 
 
-static const ac97_tone_t test_melody[] = {
+typedef struct { uint32_t frequency, duration_ms; } sound_tone_t;
+
+static const sound_tone_t test_melody[] = {
     { 262, 180 },   /* C4 */
     { 294, 180 },   /* D4 */
     { 330, 180 },   /* E4 */
@@ -98,8 +100,8 @@ void command_music(void)
 {
     printf("\nPlaying test melody...\n");
 
-    if (!ac97_is_available()) {
-        printf("Error: AC'97 audio is not available.\n");
+    if (!sound_is_available()) {
+        printf("Error: audio is not available.\n");
         return;
     }
 
@@ -107,9 +109,9 @@ void command_music(void)
          i < sizeof(test_melody) / sizeof(test_melody[0]);
          i++) {
 
-        if (!ac97_play_tone(
+        if (sound_play_tone(
                 test_melody[i].frequency,
-                test_melody[i].duration_ms)) {
+                test_melody[i].duration_ms) != 0) {
 
             printf("Error: failed at note %u.\n", i);
             return;

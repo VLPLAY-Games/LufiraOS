@@ -10,7 +10,7 @@
 #include "drivers/keyboard/keyboard.h"
 #include "drivers/mouse/mouse.h"
 #include "drivers/console/console.h"
-#include "drivers/sound/ac97.h"
+#include "drivers/sound/sound.h"
 #include "drivers/disk/disk.h"
 #include "drivers/usb/xhci.h"
 #include "net/net.h"
@@ -323,12 +323,6 @@ void _start(BootInfo* bi) {
     // ATA PIO, как раньше.
     disk_init();
 
-    if (ac97_init()) {
-        DLOG("[ OK ] AC'97 ready\n");
-    } else {
-        printf("[WARN] AC'97 unavailable\n");
-    }
-    
     asm volatile("sti");
     irq_enable(0);  // таймер
     irq_enable(1);  // клавиатура
@@ -349,6 +343,18 @@ void _start(BootInfo* bi) {
     // net_init() (RTL8139 + статическая настройка IP) — по той же причине,
     // что и xhci_init(), требует уже тикающих таймерных прерываний.
     net_init();
+
+    // v0.9, фаза 1 — пробует HDA (hda.c) первым, затем AC'97 (ac97.c) —
+    // тот же disk.c-образный диспетчер, что и у AHCI/NVMe выше, см. sound.c.
+    // По ТОЙ ЖЕ причине, что и xhci_init()/net_init() выше — требует уже
+    // тикающего таймера (pit_wait_ms() внутри CORB/RIRB-обмена с кодеком и
+    // сброса контроллера) — раньше стоял перед sti (как ac97_init()
+    // когда-то), с pit_wait_ms() это зависало намертво, см. разбор в hda.c.
+    if (sound_init() == 0) {
+        DLOG("[ OK ] Audio ready (%s)\n", sound_driver_name());
+    } else {
+        printf("[WARN] No audio controller available\n");
+    }
 
     if (devmode_is_enabled()) {
         printf("\n");

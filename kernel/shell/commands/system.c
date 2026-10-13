@@ -109,8 +109,15 @@ void command_reboot(void) {
     printf("\nSyncing filesystem... ");
     lufirafs_flush(&lufirafs);
     printf("done.\nRebooting system...\n");
-    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64));
-    __asm__ volatile ("outw %0, %1" : : "a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
+    acpi_reset(); // спецификационный сброс через FADT RESET_REG, если платформа его поддерживает
+    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64)); // 8042-контроллер
+    // PCI RST_CNT (0xCF9) — универсальный fallback на i440fx/Q35 (и на реальном
+    // железе с совместимым чипсетом), НЕ ACPI-порт выключения. Раньше здесь
+    // стоял outw(0x604, 0x2000) — это код ACPI-ВЫКЛЮЧЕНИЯ (SLP_TYPa=0|SLP_EN),
+    // скопированный по ошибке из acpi_shutdown(): вместо перезагрузки он
+    // в реальности выключал машину, если 8042-сброс не срабатывал.
+    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0x06), "Nd"((uint16_t)0xCF9));
+    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0x0E), "Nd"((uint16_t)0xCF9));
     printf("Reboot failed. Please restart manually.\n");
 }
 void command_shutdown(void) {

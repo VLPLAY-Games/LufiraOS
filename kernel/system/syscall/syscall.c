@@ -1099,8 +1099,9 @@ static uint64_t sys_unmount(uint64_t prefix_ptr, uint64_t unused1, uint64_t unus
 }
 
 // SYS_REBOOT (35) / SYS_SHUTDOWN (36) — перенос command_reboot()/
-// command_shutdown() (shell/commands/system.c) без изменений в логике
-// сброса; root/синк диска гейтятся тут, а не в выводе на консоль.
+// command_shutdown() (shell/commands/system.c), логика сброса синхронизирована
+// с ними 1:1 (см. acpi_reset()/RST_CNT там); root/синк диска гейтятся тут,
+// а не в выводе на консоль.
 static uint64_t sys_reboot(uint64_t unused1, uint64_t unused2, uint64_t unused3,
                            uint64_t unused4, uint64_t unused5) {
     (void)unused1; (void)unused2; (void)unused3; (void)unused4; (void)unused5;
@@ -1108,8 +1109,13 @@ static uint64_t sys_reboot(uint64_t unused1, uint64_t unused2, uint64_t unused3,
     if (current_process->uid != 0) return (uint64_t)-EPERM;
 
     lufirafs_flush(&lufirafs);
-    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64));
-    __asm__ volatile ("outw %0, %1" : : "a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
+    acpi_reset(); // спецификационный сброс через FADT RESET_REG, если платформа его поддерживает
+    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64)); // 8042-контроллер
+    // PCI RST_CNT (0xCF9) — см. подробный комментарий в command_reboot()
+    // (system.c): раньше тут по ошибке стоял ACPI-ВЫКЛЮЧАЮЩИЙ outw(0x604,
+    // 0x2000), перенесённый из shutdown-пути.
+    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0x06), "Nd"((uint16_t)0xCF9));
+    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0x0E), "Nd"((uint16_t)0xCF9));
     return (uint64_t)-1; // не должны сюда дойти, если сброс сработал
 }
 

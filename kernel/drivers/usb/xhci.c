@@ -122,6 +122,7 @@ static void *map_mmio(uint64_t phys, uint64_t size) {
 #define TRB_TYPE_STATUS_STAGE              4
 #define TRB_TYPE_LINK                      6
 #define TRB_TYPE_ENABLE_SLOT_CMD           9
+#define TRB_TYPE_DISABLE_SLOT_CMD          10
 #define TRB_TYPE_ADDRESS_DEVICE_CMD        11
 #define TRB_TYPE_CONFIGURE_ENDPOINT_CMD    12
 #define TRB_TYPE_EVALUATE_CONTEXT_CMD      13
@@ -344,10 +345,12 @@ typedef struct {
     xhci_ring_t hid_ep_ring;
     uint64_t    hid_report_buf_phys; void *hid_report_buf_virt;
     uint8_t     hid_report_expected_len, hid_protocol;
+    int         hid_device_idx; // индекс в xhci_hid_devices[], -1 пока не зарегистрирован
 
     // Mass Storage: пара bulk-endpoint'ов (IN + OUT) для Bulk-Only Transport.
     int         msd_bulk_in_dci, msd_bulk_out_dci;
     xhci_ring_t msd_bulk_in_ring, msd_bulk_out_ring;
+    int         msd_device_idx; // индекс в xhci_msd_devices[], -1 пока не зарегистрирован
 } xhci_slot_t;
 
 static void *xhci_cap_base = NULL;
@@ -397,8 +400,16 @@ static int xhci_msd_device_count_var = 0;
 static uint32_t xhci_msd_next_tag = 1;
 
 // true, когда хотя бы одно HID-устройство вооружено и usb_poll() должно
-// реально что-то опрашивать.
+// реально что-то опрашивать на предмет TRANSFER_EVENT (interrupt IN отчёты).
 static int xhci_ready = 0;
+
+// true с момента, когда xhci_init() довёл контроллер до рабочего состояния
+// (ring'и подняты, xhci_op_base валиден) — НЕЗАВИСИМО от того, нашлось ли
+// хоть одно устройство при загрузке. В отличие от xhci_ready выше, этот
+// флаг никогда не гасится обратно (кроме провала самой инициализации) —
+// опрос PORTSC на предмет hotplug (xhci_poll_hotplug(), см. ниже) должен
+// идти всегда, даже если на старте в порты вообще ничего не было воткнуто.
+static int xhci_controller_present = 0;
 
 static xhci_slot_t *xhci_slot_for_id(uint8_t slot_id) {
     if (slot_id == 0 || slot_id > XHCI_MAX_SLOTS_SUPPORTED) return NULL;
@@ -609,6 +620,23 @@ static void xhci_service_hid_event(uint8_t slot_id, uint32_t status) {
 // Event Ring: иначе он мог бы перехватить событие, которого ждёт синхронный
 // вызов, и тот таймаутил бы напрасно.
 static volatile int xhci_sync_wait_depth = 0;
+
+// НАЙДЕНО ЖИВЫМ ТЕСТОМ (hotplug, v0.9 фаза 1): xhci_sync_wait_depth выше
+// защищает только путь ЧЕРЕЗ xhci_wait_for_event() — но xhci_port_reset()
+// (вызываемый и из boot-time скана в xhci_init(), и из xhci_poll_hotplug()
+// при подключении) ждёт PRC через ГОЛЫЙ pit_wait_ms(), а не через
+// xhci_wait_for_event(), так что sync_wait_depth его не прикрывает. Этот
+// pit_wait_ms() реентерабельно пускает следующий тик PIT — то есть снова
+// usb_poll() — ПРЯМО ПОСРЕДИ сброса порта; без отдельной защиты
+// xhci_poll_hotplug() увидел бы CSC того же самого порта (он действительно
+// взводится во время сброса) и запустил бы ВТОРОЕ, вложенное
+// Enable Slot/Address Device на тот же физический порт поверх ещё не
+// завершённого первого — ломая общий Command/Event Ring настолько, что всё
+// зависало (стенд: экран намертво вставал на "Port N: no device" после
+// добавления hotplug, без этого флага). xhci_enum_busy закрывает ровно эту
+// дыру: 1 на всё время ЛЮБОГО port_reset+enumerate (boot-time скан ИЛИ
+// hotplug-attach), xhci_poll_hotplug() просто выходит сразу, если уже 1.
+static volatile int xhci_enum_busy = 0;
 
 static int xhci_wait_for_event_impl(uint32_t want_type, uint64_t want_ptr,
                                      uint32_t *out_status, uint8_t *out_slot_id,
@@ -1067,11 +1095,13 @@ static int xhci_msd_init(xhci_slot_t *slot) {
         return -1;
     }
 
-    xhci_msd_device_t *d = &xhci_msd_devices[xhci_msd_device_count_var++];
+    int idx = xhci_msd_device_count_var++;
+    xhci_msd_device_t *d = &xhci_msd_devices[idx];
     d->in_use = 1;
     d->slot_id = slot->slot_id;
     d->max_lba = max_lba;
     d->block_size = block_size;
+    slot->msd_device_idx = idx;
 
     DLOG("[XHCI] Port %u: Mass Storage ready (slot=%u blocks=%u block_size=%u)\n",
          slot->port_id, slot->slot_id, max_lba + 1, block_size);
@@ -1109,6 +1139,8 @@ static void xhci_enumerate_device(uint8_t port, uint8_t speed) {
     slot->slot_id = slot_id;
     slot->port_id = port;
     slot->speed = speed;
+    slot->hid_device_idx = -1;
+    slot->msd_device_idx = -1;
 
     // 2. Device Context — контроллер требует, чтобы драйвер выделил её САМ
     // и прописал в DCBAA[slot_id] ДО Address Device Command.
@@ -1307,7 +1339,8 @@ static void xhci_enumerate_device(uint8_t port, uint8_t speed) {
         xhci_ring_doorbell(slot_id, (uint8_t)slot->hid_ep_dci);
 
         if (xhci_hid_device_count < XHCI_MAX_HID_DEVICES) {
-            xhci_hid_device_t *out = &xhci_hid_devices[xhci_hid_device_count++];
+            int idx = xhci_hid_device_count++;
+            xhci_hid_device_t *out = &xhci_hid_devices[idx];
             out->valid = 1;
             out->address = usb_addr;
             out->protocol = hid_protocol;
@@ -1315,6 +1348,7 @@ static void xhci_enumerate_device(uint8_t port, uint8_t speed) {
             out->max_packet = hid_max_packet;
             out->interval = hid_interval_raw;
             out->low_speed = (speed == XHCI_SPEED_LOW);
+            slot->hid_device_idx = idx;
         }
 
         xhci_ready = 1;
@@ -1340,6 +1374,143 @@ static void xhci_enumerate_device(uint8_t port, uint8_t speed) {
         }
     } else {
         DLOG("[XHCI] Port %u: no supported interface (HID/MSD) found\n", port);
+    }
+}
+
+/* ======================================================================== */
+/* Hotplug: подключение/отключение после загрузки                          */
+/* ======================================================================== */
+// v0.9, фаза 1, пункт 6. До этой версии xHCI-драйвер энумерировал порты
+// РОВНО ОДИН РАЗ, во время xhci_init() — PORTSC.CSC (Connect Status Change)
+// определён, но никогда не читался; физическое отключение устройства не
+// освобождало вообще ничего (ни слот, ни кольца, ни DMA-страницы), и
+// use-site'ы Mass Storage (xhci_msd_slot_for_index() -> xhci_slot_for_id())
+// просто продолжали считать устройство живым до первого реального таймаута
+// на bulk-передаче (см. разбор в коммит-сообщении/истории — 1000мс на
+// операцию, вечно повторяющихся). Эта секция добавляет: опрос CSC раз в тик
+// PIT (xhci_poll_hotplug(), вызывается из usb_poll()), подключение через
+// переиспользование уже существующего xhci_enumerate_device(), и настоящее
+// освобождение ресурсов слота при отключении (xhci_teardown_slot()) —
+// после которого xhci_msd_slot_for_index()/xhci_slot_for_id() сами начинают
+// возвращать NULL, то есть I/O на отключённую флешку отваливается сразу, а
+// не зависает на таймауте.
+
+// true, если порт port уже отслеживается живым слотом — защита от повторной
+// Enable Slot Command на дребезг CSC без реального физического отключения
+// (контроллеры иногда так делают при колебаниях питания порта).
+static int xhci_port_has_live_slot(uint8_t port) {
+    for (int i = 0; i < XHCI_MAX_SLOTS_SUPPORTED; i++)
+        if (xhci_slots[i].in_use && xhci_slots[i].port_id == port) return 1;
+    return 0;
+}
+
+// Пересчитывает xhci_ready с нуля по текущему состоянию слотов — нужно
+// после отключения: если это был последний HID-слот, usb_poll() должен
+// снова перестать опрашивать Event Ring на TRANSFER_EVENT (xhci_ready=0),
+// как было до первого когда-либо найденного устройства.
+static void xhci_recompute_ready(void) {
+    for (int i = 0; i < XHCI_MAX_SLOTS_SUPPORTED; i++) {
+        if (xhci_slots[i].in_use && xhci_slots[i].device_class == XHCI_DEV_CLASS_HID) {
+            xhci_ready = 1;
+            return;
+        }
+    }
+    xhci_ready = 0;
+}
+
+// Полностью освобождает ресурсы слота физически отключённого устройства:
+// шлёт Disable Slot Command (чисто хост-сторонняя операция — контроллер
+// отрабатывает её и для уже пропавшего устройства, поэтому её результат не
+// блокирует освобождение памяти ниже, best-effort), снимает запись из
+// DCBAA, возвращает PMM все выделенные страницы (device/input context,
+// EP0-кольцо, HID interrupt-кольцо + буфер отчёта ИЛИ оба MSD bulk-кольца —
+// смотря по device_class) и гасит in_use, делая слот снова свободным под
+// будущий Enable Slot Command. Соответствующая запись в xhci_hid_devices[]/
+// xhci_msd_devices[] гасится (valid=0 / in_use=0) ПО ИНДЕКСУ, сохранённому
+// в слоте при регистрации — массив не ужимается и позиции не сдвигаются,
+// потому что usb_index оттуда уходит наружу как стабильный индекс
+// монтирования (fat_mount.c/ext2_mount.c/exfat_mount.c), который обязан
+// переживать жизнь конкретного slot_id.
+static void xhci_teardown_slot(xhci_slot_t *slot) {
+    uint8_t slot_id = slot->slot_id;
+
+    xhci_trb_t *cmd = xhci_ring_enqueue(&xhci_cmd_ring, 0, 0,
+        TRB_CONTROL_TYPE_SET(TRB_TYPE_DISABLE_SLOT_CMD)
+        | ((uint32_t)slot_id << TRB_CONTROL_SLOT_SHIFT));
+    xhci_ring_doorbell(0, 0);
+    uint8_t got_slot;
+    xhci_wait_command_completion(cmd, &got_slot, 500); // best-effort, см. комментарий выше
+
+    if (xhci_dcbaa_virt) xhci_dcbaa_virt[slot_id] = 0;
+
+    if (slot->device_ctx_phys) pmm_free_page(slot->device_ctx_phys);
+    if (slot->input_ctx_phys)  pmm_free_page(slot->input_ctx_phys);
+    if (slot->ep0_ring.phys)   pmm_free_page(slot->ep0_ring.phys);
+
+    if (slot->device_class == XHCI_DEV_CLASS_HID) {
+        if (slot->hid_ep_ring.phys) pmm_free_page(slot->hid_ep_ring.phys);
+        if (slot->hid_report_buf_phys) pmm_free_page(slot->hid_report_buf_phys);
+        if (slot->hid_device_idx >= 0 && slot->hid_device_idx < xhci_hid_device_count)
+            xhci_hid_devices[slot->hid_device_idx].valid = 0;
+        if (slot->hid_protocol == USB_HID_PROTOCOL_KEYBOARD)
+            usb_hid_keyboard_detached(); // снимает залипший Ctrl/autorepeat-слоты
+    } else if (slot->device_class == XHCI_DEV_CLASS_MSD) {
+        if (slot->msd_bulk_in_ring.phys)  pmm_free_page(slot->msd_bulk_in_ring.phys);
+        if (slot->msd_bulk_out_ring.phys) pmm_free_page(slot->msd_bulk_out_ring.phys);
+        if (slot->msd_device_idx >= 0 && slot->msd_device_idx < xhci_msd_device_count_var)
+            xhci_msd_devices[slot->msd_device_idx].in_use = 0;
+    }
+
+    memset(slot, 0, sizeof(*slot)); // in_use=0 среди прочего — слот свободен для реиспользования
+    xhci_recompute_ready();
+}
+
+// Опрос PORTSC.CSC на всех портах root hub'а — единственный способ узнать о
+// hotplug в этой архитектуре (ни контроллер, ни это ядро не используют
+// прерывания вообще — см. общий разбор вверху файла). Вызывается из
+// usb_poll() раз в тик PIT (100 Гц) — то же разрешение, что и у опроса
+// Event Ring; человеку, физически втыкающему/выдёргивающему устройство, это
+// неотличимо от мгновенной реакции.
+static void xhci_poll_hotplug(void) {
+    // Уже идёт port_reset+enumerate (boot-time скан ИЛИ другой hotplug,
+    // включая тот, что сейчас выполняется ВЫШЕ нас по стеку реентерабельно
+    // через pit_wait_ms() внутри xhci_port_reset()) — см. разбор у
+    // xhci_enum_busy. Ничего не трогаем до его завершения.
+    if (xhci_enum_busy) return;
+
+    for (uint8_t port = 1; port <= xhci_max_ports; port++) {
+        uint32_t v = xhci_portsc_read(port);
+        if (!(v & XHCI_PORTSC_CSC)) continue;
+
+        // Гасим ТОЛЬКО CSC (запись 1 сбрасывает) — остальные RW1C-биты не
+        // трогаем, тот же приём, что и в xhci_port_reset().
+        uint32_t clear = v;
+        clear &= ~XHCI_PORTSC_RW1C_MASK;
+        clear |= XHCI_PORTSC_CSC;
+        reg_write32(xhci_op_base, XHCI_OP_PORTSC(port), clear);
+
+        v = xhci_portsc_read(port); // перечитываем CCS уже после подтверждения CSC
+
+        if (v & XHCI_PORTSC_CCS) {
+            if (xhci_port_has_live_slot(port)) continue; // дребезг CSC — см. комментарий выше
+
+            uint8_t speed = 0;
+            xhci_enum_busy = 1;
+            if (xhci_check_port(port, &speed)) {
+                DLOG("[XHCI] Port %u: hotplug attach\n", port);
+                xhci_enumerate_device(port, speed);
+            }
+            xhci_enum_busy = 0;
+        } else {
+            for (int i = 0; i < XHCI_MAX_SLOTS_SUPPORTED; i++) {
+                if (xhci_slots[i].in_use && xhci_slots[i].port_id == port) {
+                    DLOG("[XHCI] Port %u: hotplug detach (slot=%u)\n", port, xhci_slots[i].slot_id);
+                    klog("[XHCI] Port %u: device removed (slot=%u)", port, xhci_slots[i].slot_id);
+                    xhci_teardown_slot(&xhci_slots[i]);
+                    break; // максимум один слот на порт в этой модели (одно устройство/интерфейс)
+                }
+            }
+        }
     }
 }
 
@@ -1419,15 +1590,26 @@ void xhci_init(void) {
         return;
     }
 
+    // Контроллер полностью поднят — с этого момента usb_poll() может
+    // безопасно опрашивать PORTSC на hotplug (xhci_poll_hotplug()), даже
+    // если ниже на старте ни в одном порту ничего не окажется.
+    xhci_controller_present = 1;
+
     // Каждый порт энумерируется полностью, прежде чем переходить к
     // следующему (как в UHCI) — Address Device Command выполняется для
-    // одного слота за раз, пока энумерация синхронна.
+    // одного слота за раз, пока энумерация синхронна. xhci_enum_busy=1 на
+    // весь скан — иначе реентерабельный usb_poll() (через pit_wait_ms()
+    // внутри xhci_port_reset(), см. разбор у xhci_enum_busy) запустил бы
+    // xhci_poll_hotplug() поверх ещё не завершённого boot-time сканирования
+    // того же порта.
+    xhci_enum_busy = 1;
     for (uint8_t port = 1; port <= xhci_max_ports; port++) {
         uint8_t speed = 0;
         if (xhci_check_port(port, &speed)) {
             xhci_enumerate_device(port, speed);
         }
     }
+    xhci_enum_busy = 0;
 
     DLOG("[XHCI] Controller ready\n");
     klog("[XHCI] controller ready");
@@ -1509,11 +1691,20 @@ int xhci_msd_write_block(int index, uint32_t lba, const void *buf, uint32_t bloc
 #define XHCI_POLL_MAX_EVENTS_PER_TICK 8
 
 void usb_poll(void) {
-    if (!xhci_ready) return;
+    if (!xhci_controller_present) return;
     // Синхронное ожидание (control/bulk-передача) уже само дренирует Event
     // Ring и обслуживает попутные HID-события — не лезем сюда, чтобы не
     // перехватить событие, которого ждут они (см. xhci_sync_wait_depth).
+    // Опрос PORTSC на hotplug тоже откладываем до следующего тика: он сам
+    // может затеять полную синхронную энумерацию (xhci_enumerate_device()),
+    // а начинать её, пока снаружи уже идёт другое синхронное ожидание,
+    // означало бы вложенный xhci_wait_for_event() поверх ещё не
+    // завершившегося — лишняя сложность ради выигрыша в 10мс никому не нужна.
     if (xhci_sync_wait_depth > 0) return;
+
+    xhci_poll_hotplug();
+
+    if (!xhci_ready) return;
 
     // want_ptr=0 — xhci_wait_for_event() возвращает управление на каждом
     // событии без своей ветки "обслужить чужое и продолжать" (та нужна
