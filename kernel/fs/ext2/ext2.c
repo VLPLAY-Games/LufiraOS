@@ -15,10 +15,21 @@ static void mark_dirty(ext2_fs_t *fs, uint32_t byte_off, uint32_t len) {
         fs->dirty_map[lba >> 3] |= (1 << (lba & 7));
 }
 
+// Group descriptor по индексу группы — ШАГ не sizeof(ext2_group_desc_t)
+// (32 байта), а fs->desc_size: с фичей 64BIT дескрипторы настоящие
+// 64-байтные (старшие 32 байта — bg_*_hi поля и чексуммы, которые нам не
+// нужны, у наших образов размер заведомо укладывается в 32-битные счётчики
+// блоков/инодов). Первые 32 байта у 64- и 32-байтного дескриптора совпадают
+// побайтово — ext2_group_desc_t как раз их описывает, так что приведение
+// типов ниже корректно независимо от desc_size.
+static inline ext2_group_desc_t *group_ptr(ext2_fs_t *fs, uint32_t g) {
+    return (ext2_group_desc_t *)((uint8_t *)fs->groups + (uint64_t)g * fs->desc_size);
+}
+
 static inline ext2_inode_t *inode_ptr(ext2_fs_t *fs, uint32_t ino) {
     uint32_t group = (ino - 1) / fs->sb->s_inodes_per_group;
     uint32_t idx = (ino - 1) % fs->sb->s_inodes_per_group;
-    uint32_t table_block = fs->groups[group].bg_inode_table;
+    uint32_t table_block = group_ptr(fs, group)->bg_inode_table;
     uint64_t off = (uint64_t)table_block * fs->block_size + (uint64_t)idx * fs->inode_size;
     return (ext2_inode_t *)(fs->image + off);
 }
@@ -32,9 +43,20 @@ int ext2_init(ext2_fs_t *fs, uint8_t *image, uint32_t image_size) {
     fs->sb = (ext2_superblock_t *)(image + 1024);
 
     if (fs->sb->s_magic != EXT2_MAGIC) return -1;
-    if (fs->sb->s_rev_level >= 1 &&
-        (fs->sb->s_feature_incompat & (EXT2_FEATURE_INCOMPAT_EXTENTS | EXT2_FEATURE_INCOMPAT_64BIT)))
-        return -1; // настоящий ext4 (extents/64bit) — не наш формат, см. ext2.h
+    if (fs->sb->s_rev_level >= 1) {
+        // Любой incompat-бит ВНЕ этого набора (journal_dev, meta_bg,
+        // recover-после-грязного-выключения, inline_data, encrypt, ...) —
+        // отказываемся монтировать, а не читаем по неподходящему формату
+        // (см. разбор поддержанного подмножества в ext2.h).
+        if (fs->sb->s_feature_incompat & ~(uint32_t)EXT2_SUPPORTED_INCOMPAT) return -1;
+        // RO_COMPAT-чексуммы (uninit_bg/gdt_csum, metadata_csum) требуют
+        // пересчёта crc16/crc32c на КАЖДУЮ запись бит­мапов/инодов/extent'ов —
+        // не реализовано; отказ монтировать безопаснее устаревших чек-сумм
+        // (e2fsck сразу бы на это пожаловался). Это же исключает группы с
+        // EXT4_BG_*_UNINIT (эти флаги только и существуют под этими RO_COMPAT
+        // фичами) — бит­мап такой группы на диске не нужно доверять буквально.
+        if (fs->sb->s_feature_ro_compat & EXT2_UNSUPPORTED_RO_COMPAT) return -1;
+    }
 
     fs->block_size = 1024u << fs->sb->s_log_block_size;
     if (fs->block_size == 0 || (uint64_t)fs->block_size * 2 > image_size) return -1;
@@ -48,6 +70,14 @@ int ext2_init(ext2_fs_t *fs, uint8_t *image, uint32_t image_size) {
     fs->inode_size = (fs->sb->s_rev_level >= 1 && fs->sb->s_inode_size) ? fs->sb->s_inode_size : 128;
     fs->has_filetype = (fs->sb->s_rev_level >= 1) &&
                         (fs->sb->s_feature_incompat & EXT2_FEATURE_INCOMPAT_FILETYPE);
+
+    fs->desc_size = 32;
+    if (fs->sb->s_rev_level >= 1 && (fs->sb->s_feature_incompat & EXT2_FEATURE_INCOMPAT_64BIT)) {
+        // s_desc_size — __le16 по смещению 0xFE суперблока (попадает в наш
+        // s_unused[820], отдельного поля в ext2_superblock_t для него нет).
+        uint16_t ds = *(const uint16_t *)((const uint8_t *)fs->sb + 0xFE);
+        if (ds >= 32) fs->desc_size = ds;
+    }
 
     fs->groups_count = (fs->sb->s_blocks_count + fs->sb->s_blocks_per_group - 1) / fs->sb->s_blocks_per_group;
 
@@ -95,17 +125,17 @@ static void bitmap_free(ext2_fs_t *fs, uint32_t bitmap_block, uint32_t index_in_
 // Возвращает номер блока или 0 (0 никогда не валидный номер блока данных).
 static uint32_t alloc_block(ext2_fs_t *fs) {
     for (uint32_t g = 0; g < fs->groups_count; g++) {
-        if (fs->groups[g].bg_free_blocks_count == 0) continue;
-        int idx = bitmap_alloc(fs, fs->groups[g].bg_block_bitmap, fs->sb->s_blocks_per_group);
+        if (group_ptr(fs, g)->bg_free_blocks_count == 0) continue;
+        int idx = bitmap_alloc(fs, group_ptr(fs, g)->bg_block_bitmap, fs->sb->s_blocks_per_group);
         if (idx < 0) continue;
 
         uint32_t block = fs->sb->s_first_data_block + g * fs->sb->s_blocks_per_group + (uint32_t)idx;
         memset(blk_ptr(fs, block), 0, fs->block_size);
         mark_dirty(fs, block * fs->block_size, fs->block_size);
 
-        fs->groups[g].bg_free_blocks_count--;
+        group_ptr(fs, g)->bg_free_blocks_count--;
         fs->sb->s_free_blocks_count--;
-        mark_dirty(fs, (uint32_t)((uint8_t *)&fs->groups[g] - fs->image), sizeof(ext2_group_desc_t));
+        mark_dirty(fs, (uint32_t)((uint8_t *)group_ptr(fs, g) - fs->image), sizeof(ext2_group_desc_t));
         mark_dirty(fs, 1024, sizeof(ext2_superblock_t));
         return block;
     }
@@ -116,27 +146,27 @@ static void free_block(ext2_fs_t *fs, uint32_t block) {
     if (!block) return;
     uint32_t g = (block - fs->sb->s_first_data_block) / fs->sb->s_blocks_per_group;
     uint32_t idx = (block - fs->sb->s_first_data_block) % fs->sb->s_blocks_per_group;
-    bitmap_free(fs, fs->groups[g].bg_block_bitmap, idx);
-    fs->groups[g].bg_free_blocks_count++;
+    bitmap_free(fs, group_ptr(fs, g)->bg_block_bitmap, idx);
+    group_ptr(fs, g)->bg_free_blocks_count++;
     fs->sb->s_free_blocks_count++;
-    mark_dirty(fs, (uint32_t)((uint8_t *)&fs->groups[g] - fs->image), sizeof(ext2_group_desc_t));
+    mark_dirty(fs, (uint32_t)((uint8_t *)group_ptr(fs, g) - fs->image), sizeof(ext2_group_desc_t));
     mark_dirty(fs, 1024, sizeof(ext2_superblock_t));
 }
 
 static uint32_t alloc_inode(ext2_fs_t *fs, int is_dir) {
     for (uint32_t g = 0; g < fs->groups_count; g++) {
-        if (fs->groups[g].bg_free_inodes_count == 0) continue;
-        int idx = bitmap_alloc(fs, fs->groups[g].bg_inode_bitmap, fs->sb->s_inodes_per_group);
+        if (group_ptr(fs, g)->bg_free_inodes_count == 0) continue;
+        int idx = bitmap_alloc(fs, group_ptr(fs, g)->bg_inode_bitmap, fs->sb->s_inodes_per_group);
         if (idx < 0) continue;
 
         uint32_t ino = g * fs->sb->s_inodes_per_group + (uint32_t)idx + 1;
         memset(inode_ptr(fs, ino), 0, fs->inode_size);
         mark_dirty(fs, (uint32_t)((uint8_t *)inode_ptr(fs, ino) - fs->image), fs->inode_size);
 
-        fs->groups[g].bg_free_inodes_count--;
+        group_ptr(fs, g)->bg_free_inodes_count--;
         fs->sb->s_free_inodes_count--;
-        if (is_dir) fs->groups[g].bg_used_dirs_count++;
-        mark_dirty(fs, (uint32_t)((uint8_t *)&fs->groups[g] - fs->image), sizeof(ext2_group_desc_t));
+        if (is_dir) group_ptr(fs, g)->bg_used_dirs_count++;
+        mark_dirty(fs, (uint32_t)((uint8_t *)group_ptr(fs, g) - fs->image), sizeof(ext2_group_desc_t));
         mark_dirty(fs, 1024, sizeof(ext2_superblock_t));
         return ino;
     }
@@ -146,11 +176,11 @@ static uint32_t alloc_inode(ext2_fs_t *fs, int is_dir) {
 static void free_inode(ext2_fs_t *fs, uint32_t ino, int is_dir) {
     uint32_t g = (ino - 1) / fs->sb->s_inodes_per_group;
     uint32_t idx = (ino - 1) % fs->sb->s_inodes_per_group;
-    bitmap_free(fs, fs->groups[g].bg_inode_bitmap, idx);
-    fs->groups[g].bg_free_inodes_count++;
+    bitmap_free(fs, group_ptr(fs, g)->bg_inode_bitmap, idx);
+    group_ptr(fs, g)->bg_free_inodes_count++;
     fs->sb->s_free_inodes_count++;
-    if (is_dir && fs->groups[g].bg_used_dirs_count > 0) fs->groups[g].bg_used_dirs_count--;
-    mark_dirty(fs, (uint32_t)((uint8_t *)&fs->groups[g] - fs->image), sizeof(ext2_group_desc_t));
+    if (is_dir && group_ptr(fs, g)->bg_used_dirs_count > 0) group_ptr(fs, g)->bg_used_dirs_count--;
+    mark_dirty(fs, (uint32_t)((uint8_t *)group_ptr(fs, g) - fs->image), sizeof(ext2_group_desc_t));
     mark_dirty(fs, 1024, sizeof(ext2_superblock_t));
 }
 
@@ -165,11 +195,121 @@ static inline void account_block(ext2_fs_t *fs, ext2_inode_t *inode) {
     mark_dirty(fs, (uint32_t)((uint8_t *)&inode->i_blocks - fs->image), 4);
 }
 
+/* ===================== ext4 extent tree (чтение+lookup) ===================== */
+// Классический индекс по 60 байтам i_block[] — либо массив прямых/косвенных
+// номеров блоков (ветка ниже), либо (если инод помечен EXT4_EXTENTS_FL)
+// заголовок extent-дерева + до 4 записей прямо в иноде; при depth>0 записи —
+// индексы, указывающие на ОТДЕЛЬНЫЕ блоки на диске с ТЕМ ЖЕ заголовком +
+// до (block_size-12)/12 записей каждый. См. разбор поддержанного
+// подмножества в ext2.h — читаем дерево любой глубины, но НЕ растим его
+// (allocate для extent-инода — всегда отказ, не повреждение).
+
+#define EXT4_EXTENT_MAGIC 0xF30A
+#define EXT4_EXTENTS_FL   0x00080000u
+
+typedef struct __attribute__((packed)) {
+    uint16_t eh_magic;
+    uint16_t eh_entries;
+    uint16_t eh_max;
+    uint16_t eh_depth;
+    uint32_t eh_generation;
+} ext4_extent_header_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t ee_block;
+    uint16_t ee_len;      // > 32768 — "не инициализирован" (реальная длина = ee_len - 32768)
+    uint16_t ee_start_hi;
+    uint32_t ee_start_lo;
+} ext4_extent_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t ei_block;
+    uint32_t ei_leaf_lo;
+    uint16_t ei_leaf_hi;
+    uint16_t ei_unused;
+} ext4_extent_idx_t;
+
+// Ищет физический блок под логический индекс index, обходя дерево от узла
+// node (у корня — это inode->i_block, у внутренних узлов — целый блок на
+// диске с тем же форматом заголовка). 0 — не замаплено (дырка на чтении;
+// на записи вызывающий трактует это как "нужна новая аллокация", которую
+// extent-путь не делает — см. ext2.h).
+static uint32_t extent_lookup(ext2_fs_t *fs, const uint8_t *node, uint32_t index, int depth_guard) {
+    const ext4_extent_header_t *eh = (const ext4_extent_header_t *)node;
+    if (eh->eh_magic != EXT4_EXTENT_MAGIC || depth_guard > 8) return 0;
+    const uint8_t *ent = node + sizeof(ext4_extent_header_t);
+
+    if (eh->eh_depth == 0) {
+        for (uint16_t i = 0; i < eh->eh_entries; i++) {
+            const ext4_extent_t *e = (const ext4_extent_t *)(ent + (uint32_t)i * sizeof(ext4_extent_t));
+            int uninit = e->ee_len > 32768;
+            uint32_t len = uninit ? (uint32_t)e->ee_len - 32768u : e->ee_len;
+            if (len == 0 || index < e->ee_block || index >= e->ee_block + len) continue;
+            if (uninit) return 0; // преаллоцировано, но не записано — читается нулями
+            uint64_t start = ((uint64_t)e->ee_start_hi << 32) | e->ee_start_lo;
+            return (uint32_t)(start + (index - e->ee_block));
+        }
+        return 0;
+    }
+
+    for (uint16_t i = 0; i < eh->eh_entries; i++) {
+        const ext4_extent_idx_t *ei = (const ext4_extent_idx_t *)(ent + (uint32_t)i * sizeof(ext4_extent_idx_t));
+        uint32_t next_block = (i + 1 < eh->eh_entries) ?
+            ((const ext4_extent_idx_t *)(ent + (uint32_t)(i + 1) * sizeof(ext4_extent_idx_t)))->ei_block : 0xFFFFFFFFu;
+        if (index < ei->ei_block || (i + 1 < eh->eh_entries && index >= next_block)) continue;
+        uint64_t leaf = ((uint64_t)ei->ei_leaf_hi << 32) | ei->ei_leaf_lo;
+        if (!leaf) return 0;
+        return extent_lookup(fs, (const uint8_t *)blk_ptr(fs, (uint32_t)leaf), index, depth_guard + 1);
+    }
+    return 0;
+}
+
+// Освобождает все блоки данных extent-дерева (листовые extent'ы) и все
+// блоки-носители внутренних узлов (но НЕ node самого верхнего уровня, если
+// это i_block инода — тот принадлежит иноду, не является отдельным блоком
+// на диске; from_disk_block=1 для рекурсивных вызовов в блоки-носители).
+static void free_extent_tree(ext2_fs_t *fs, const uint8_t *node, int from_disk_block) {
+    const ext4_extent_header_t *eh = (const ext4_extent_header_t *)node;
+    if (eh->eh_magic != EXT4_EXTENT_MAGIC) return;
+    const uint8_t *ent = node + sizeof(ext4_extent_header_t);
+
+    if (eh->eh_depth == 0) {
+        for (uint16_t i = 0; i < eh->eh_entries; i++) {
+            const ext4_extent_t *e = (const ext4_extent_t *)(ent + (uint32_t)i * sizeof(ext4_extent_t));
+            if (e->ee_len == 0) continue;
+            int uninit = e->ee_len > 32768;
+            uint32_t len = uninit ? (uint32_t)e->ee_len - 32768u : e->ee_len;
+            uint64_t start = ((uint64_t)e->ee_start_hi << 32) | e->ee_start_lo;
+            for (uint32_t b = 0; b < len; b++) free_block(fs, (uint32_t)(start + b));
+        }
+    } else {
+        for (uint16_t i = 0; i < eh->eh_entries; i++) {
+            const ext4_extent_idx_t *ei = (const ext4_extent_idx_t *)(ent + (uint32_t)i * sizeof(ext4_extent_idx_t));
+            uint64_t leaf = ((uint64_t)ei->ei_leaf_hi << 32) | ei->ei_leaf_lo;
+            if (leaf) free_extent_tree(fs, (const uint8_t *)blk_ptr(fs, (uint32_t)leaf), 1);
+        }
+    }
+    if (from_disk_block) {
+        uint64_t byte_off = (uint64_t)((const uint8_t *)node - fs->image);
+        free_block(fs, (uint32_t)(byte_off / fs->block_size));
+    }
+}
+
 // Номер блока файла по индексу (0-based), с опциональным выделением по
 // требованию (write-путь) недостающих прямых/косвенных блоков. Тройная
 // косвенность не поддержана (см. ext2.h) — такой индекс возвращает 0 без
 // выделения, вызывающий (ext2_read_file()/ext2_write_file()) это как ошибку.
 static uint32_t block_for_index(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t index, int allocate) {
+    if (inode->i_flags & EXT4_EXTENTS_FL) {
+        // allocate здесь игнорируется осознанно: extent_lookup() никогда не
+        // расширяет дерево, только читает существующий маппинг (включая
+        // "перезапись на месте" уже выделенного блока) — рост extent-файла
+        // новым блоком возвращает 0 и трактуется как ошибка выше по стеку,
+        // а не портит дерево. См. разбор в ext2.h.
+        (void)allocate;
+        return extent_lookup(fs, (const uint8_t *)inode->i_block, index, 0);
+    }
+
     uint32_t ptrs_per_block = fs->block_size / 4;
 
     if (index < 12) {
@@ -552,6 +692,15 @@ static int dir_is_empty(ext2_fs_t *fs, ext2_inode_t *dir) {
 }
 
 static void free_all_blocks(ext2_fs_t *fs, ext2_inode_t *inode) {
+    if (inode->i_flags & EXT4_EXTENTS_FL) {
+        // i_block здесь — extent-дерево, не массив номеров блоков; попытка
+        // трактовать его как classic-разметку ниже раздала бы free_block()
+        // мусорные "номера блоков" из байт заголовка/extent'ов и испортила
+        // бы битовую карту. Отдельный, настоящий обход дерева.
+        free_extent_tree(fs, (const uint8_t *)inode->i_block, 0);
+        return;
+    }
+
     uint32_t ptrs_per_block = fs->block_size / 4;
     for (int i = 0; i < 12; i++) if (inode->i_block[i]) free_block(fs, inode->i_block[i]);
 
@@ -576,6 +725,15 @@ void ext2_truncate(ext2_fs_t *fs, uint32_t ino) {
     ext2_inode_t *inode = inode_ptr(fs, ino);
     free_all_blocks(fs, inode);
     memset(inode->i_block, 0, sizeof(inode->i_block));
+    if (inode->i_flags & EXT4_EXTENTS_FL) {
+        // Файл теперь пуст — безопасно конвертировать в classic-разметку
+        // (extent-дерево уже полностью свободно, терять нечего), чтобы
+        // последующие ext2_write_file() на этот же инод шли через полностью
+        // поддержанный allocate-путь block_for_index() — extents умеют
+        // только читать/перезаписывать существующий маппинг, не растить
+        // дерево (см. ext2.h).
+        inode->i_flags &= ~EXT4_EXTENTS_FL;
+    }
     inode->i_size = 0;
     inode->i_blocks = 0;
     mark_dirty(fs, (uint32_t)((uint8_t *)inode - fs->image), fs->inode_size);

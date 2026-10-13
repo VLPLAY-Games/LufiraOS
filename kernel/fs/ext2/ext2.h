@@ -2,17 +2,35 @@
 
 #include "lib/types.h"
 
-// ext2 — v0.9, фаза 1, пункт 4. Формат-логика (этот файл) не знает ни про
-// USB, ни про VFS — та же архитектура, что fat.h/fat.c (образ целиком в
-// RAM, прямая работа по указателям) + ext2_mount.c сверху (VFS/USB-клей,
-// как fat_mount.c). Поддержан классический ext2: прямые+одинарно+двойно
-// косвенные блоки (без тройной косвенности — для обычных файлов с запасом
-// хватает), линейные directory entries, битовые карты блоков/инодов.
-// НЕ поддержано (осознанно, не баг): extents (EXT4_FEATURE_INCOMPAT_EXTENTS)
-// и 64BIT — ext2_init() отказывается монтировать такую ФС, а не читает её
-// неправильно; журнал ext3/ext4 не воспроизводится (как незакоммиченные
-// транзакции, так и HAS_JOURNAL сам по себе — не ошибка, просто не трогаем
-// журнал, читаем/пишем данные напрямую, тем же способом, что настоящий ext2).
+// ext2/ext3/ext4 — v0.9, фаза 1, пункты 4+5 (ext4 добавлен тем же модулем,
+// а не отдельным драйвером: на диске это один формат с флагами фич, и
+// настоящий Linux-драйвер точно так же монтирует ext2/ext3/ext4 одним
+// кодом). Формат-логика (этот файл) не знает ни про USB, ни про VFS — та
+// же архитектура, что fat.h/fat.c (образ целиком в RAM, прямая работа по
+// указателям) + ext2_mount.c сверху (VFS/USB-клей, как fat_mount.c).
+//
+// Поддержано: классический блочный маппинг (прямые+одинарно+двойно
+// косвенные блоки, без тройной косвенности — для обычных файлов с запасом
+// хватает), extent-дерево ext4 (EXT4_FEATURE_INCOMPAT_EXTENTS) ЛЮБОЙ
+// глубины — но только НА ЧТЕНИЕ/перезапись уже существующего маппинга;
+// расширение extent-файла НОВЫМ блоком не реализовано (block_for_index()
+// возвращает 0, вызывающий это трактует как ошибку — как и тройную
+// косвенность у classic-инодов, НЕ как порчу дерева). Новые файлы/каталоги,
+// создаваемые этим драйвером (ext2_create/ext2_mkdir), всегда
+// classic-маппинг — растут без ограничений. ext2_truncate() на
+// extent-файле конвертирует его в classic (дерево уже пусто после
+// truncate, терять нечего) — после truncate можно писать как в обычный
+// файл. 64BIT (64-байтные дескрипторы групп) — поддержан на чтение/запись
+// (десятичная арифметика по desc_size, не sizeof(ext2_group_desc_t));
+// контрольные суммы (RO_COMPAT uninit_bg/gdt_csum, metadata_csum) —
+// НЕ поддержаны (требуют пересчёта crc16/crc32c на каждую запись
+// бит­мапов/инодов/extent'ов) — такой образ ext2_init() отказывается
+// монтировать, не оставляя чек-суммы стали; журнал ext3/ext4 не
+// воспроизводится (ни незакоммиченные транзакции, ни HAS_JOURNAL сам по
+// себе — не ошибка, просто не трогаем журнал, читаем/пишем данные
+// напрямую, тем же способом, что настоящий ext2); meta_bg/journal_dev/
+// inline_data/encrypt и любой неизвестный incompat-бит — тоже отказ
+// монтировать, см. EXT2_SUPPORTED_INCOMPAT.
 
 #define EXT2_MAGIC          0xEF53
 #define EXT2_ROOT_INO       2
@@ -23,8 +41,27 @@
 #define EXT2_S_IFDIR  0x4000
 
 #define EXT2_FEATURE_INCOMPAT_FILETYPE 0x0002
+#define EXT2_FEATURE_INCOMPAT_RECOVER  0x0004
+#define EXT2_FEATURE_INCOMPAT_JOURNAL_DEV 0x0008
+#define EXT2_FEATURE_INCOMPAT_META_BG  0x0010
 #define EXT2_FEATURE_INCOMPAT_EXTENTS  0x0040
 #define EXT2_FEATURE_INCOMPAT_64BIT    0x0080
+#define EXT2_FEATURE_INCOMPAT_MMP      0x0100
+#define EXT2_FEATURE_INCOMPAT_FLEX_BG  0x0200
+
+// incompat-биты, которые этот драйвер понимает правильно — всё, что ВНЕ
+// этого набора (recover/journal_dev/meta_bg/inline_data/encrypt/...),
+// ext2_init() отказывается монтировать.
+#define EXT2_SUPPORTED_INCOMPAT (EXT2_FEATURE_INCOMPAT_FILETYPE | \
+                                 EXT2_FEATURE_INCOMPAT_EXTENTS  | \
+                                 EXT2_FEATURE_INCOMPAT_64BIT    | \
+                                 EXT2_FEATURE_INCOMPAT_MMP      | \
+                                 EXT2_FEATURE_INCOMPAT_FLEX_BG)
+
+#define EXT2_FEATURE_RO_COMPAT_GDT_CSUM      0x0010
+#define EXT2_FEATURE_RO_COMPAT_METADATA_CSUM 0x0400
+#define EXT2_UNSUPPORTED_RO_COMPAT (EXT2_FEATURE_RO_COMPAT_GDT_CSUM | \
+                                    EXT2_FEATURE_RO_COMPAT_METADATA_CSUM)
 
 typedef struct __attribute__((packed)) {
     uint32_t s_inodes_count;
@@ -113,12 +150,14 @@ typedef struct {
     uint32_t  block_size;
     uint32_t  groups_count;
     uint32_t  inode_size;      // s_inode_size, если DYNAMIC_REV, иначе 128
+    uint32_t  desc_size;       // шаг таблицы group descriptor'ов: 32, либо s_desc_size при фиче 64BIT
     int       has_filetype;
     uint8_t  *dirty_map;       // 1 бит/512-байтный сектор образа — см. fat.h
     uint32_t  dirty_map_size;
 } ext2_fs_t;
 
-// 0 при успехе (валидный magic, без EXTENTS/64BIT), иначе -1.
+// 0 при успехе (валидный magic, фичи — в пределах EXT2_SUPPORTED_INCOMPAT/
+// без EXT2_UNSUPPORTED_RO_COMPAT), иначе -1.
 int ext2_init(ext2_fs_t *fs, uint8_t *image, uint32_t image_size);
 
 // Резолвит абсолютный путь (без ведущего префикса монтирования — это уже

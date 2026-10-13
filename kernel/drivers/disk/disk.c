@@ -1,5 +1,6 @@
 #include "disk.h"
 #include "ahci.h"
+#include "nvme.h"
 #include "lib/types.h"
 #include "drivers/console/console.h"
 #include "system/devmode/devmode.h"
@@ -65,14 +66,18 @@ static void ata_select_drive_lba(uint32_t lba) {
 void disk_init(void) {
     if (ahci_init() == 0) {
         DLOG("[DISK] Using AHCI\n");
+    } else if (nvme_init() == 0) {
+        DLOG("[DISK] Using NVMe\n");
     } else {
-        DLOG("[DISK] No AHCI controller/port — falling back to legacy ATA PIO\n");
+        DLOG("[DISK] No AHCI/NVMe controller found — falling back to legacy ATA PIO\n");
     }
 }
 
 int disk_read_sectors(uint32_t lba, uint8_t sector_count, void *buffer) {
     if (ahci_available())
         return ahci_read_sectors(lba, sector_count, buffer);
+    if (nvme_available())
+        return nvme_read_sectors(lba, sector_count, buffer);
 
     uint16_t *buf = (uint16_t*)buffer;
     for (uint8_t s = 0; s < sector_count; s++) {
@@ -89,6 +94,8 @@ int disk_read_sectors(uint32_t lba, uint8_t sector_count, void *buffer) {
 int disk_write_sectors(uint32_t lba, uint8_t sector_count, const void *buffer) {
     if (ahci_available())
         return ahci_write_sectors(lba, sector_count, buffer);
+    if (nvme_available())
+        return nvme_write_sectors(lba, sector_count, buffer);
 
     const uint16_t *buf = (const uint16_t*)buffer;
     for (uint8_t s = 0; s < sector_count; s++) {
