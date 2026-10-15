@@ -3,6 +3,7 @@
 #include "system/process/process.h"
 #include "system/elf/elf.h"
 #include "system/timer/pit.h"
+#include "system/timer/rtc.h"
 #include "system/cpu/gdt.h"
 #include "system/mm/heap.h"
 #include "system/mm/pmm.h"
@@ -960,6 +961,32 @@ static uint64_t sys_cpuload(uint64_t buf_ptr, uint64_t unused1, uint64_t unused2
     return 0;
 }
 
+// SYS_RTC_GETTIME (67): buf_ptr -> lufira_rtc_time_t. Тонкая обёртка над
+// rtc_get_time() (kernel/system/timer/rtc.c) — тот же стиль, что
+// SYS_MEMINFO/SYS_CPULOAD выше: вся реальная работа уже сделана драйвером,
+// здесь только проверка user-указателя и копирование.
+static uint64_t sys_rtc_gettime(uint64_t buf_ptr, uint64_t unused1, uint64_t unused2,
+                                 uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+
+    if (!current_process ||
+        !is_user_range_valid(current_process->page_table, buf_ptr, sizeof(lufira_rtc_time_t), 1))
+        return (uint64_t)-EFAULT;
+
+    rtc_time_t t;
+    if (rtc_get_time(&t) != 0) return (uint64_t)-EIO;
+
+    lufira_rtc_time_t out;
+    out.year = t.year;
+    out.month = t.month;
+    out.day = t.day;
+    out.hour = t.hour;
+    out.minute = t.minute;
+    out.second = t.second;
+    memcpy((void *)buf_ptr, &out, sizeof(out));
+    return 0;
+}
+
 // SYS_PSLIST (30): buf_ptr -> lufira_ps_entry_t[max_count], max_count —
 // снимок ВСЕХ живых процессов одним вызовом (process_pslist(), process.c) —
 // v0.7 план, этап 5, под-этап 4 ("ps"), единственная новая точка входа во
@@ -1811,6 +1838,7 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_FB_FONT] = sys_fb_font,
     [SYS_DUP2] = sys_dup2,
     [SYS_NET_FETCH] = sys_net_fetch,
+    [SYS_RTC_GETTIME] = sys_rtc_gettime,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========

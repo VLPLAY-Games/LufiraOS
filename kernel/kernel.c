@@ -10,6 +10,7 @@
 #include "drivers/keyboard/keyboard.h"
 #include "drivers/mouse/mouse.h"
 #include "drivers/console/console.h"
+#include "drivers/serial/serial.h"
 #include "drivers/sound/sound.h"
 #include "drivers/disk/disk.h"
 #include "drivers/usb/xhci.h"
@@ -22,6 +23,8 @@
 #include "system/acpi/acpi.h"
 #include "system/process/process.h"
 #include "system/timer/pit.h"
+#include "system/timer/hpet.h"
+#include "system/timer/rtc.h"
 #include "system/syscall/syscall.h"
 #include "fs/vfs/vfs.h"
 #include "fs/ramfs/ramfs.h"
@@ -192,6 +195,12 @@ __attribute__((section(".text.prologue")))
 void _start(BootInfo* bi) {
     asm volatile ("cli");
 
+    // Чистый опрос портов, никаких зависимостей — нарочно раньше вообще
+    // всего остального, чтобы зеркало в serial.c (см. put_char() в
+    // console.c) ловило буквально весь консольный вывод, включая самые
+    // первые LOG_PENDING/LOG_DONE_OK ниже.
+    serial_init();
+
     initialize_console(bi);
 
     // Читаем флаг режима разработчика по сырому образу диска ДО lufirafs_init()
@@ -284,6 +293,31 @@ void _start(BootInfo* bi) {
     LOG_PENDING("Initializing PIT...");
     pit_init();
     LOG_DONE_OK("PIT initialized at %d Hz", PIT_FREQUENCY);
+
+    // HPET — нужен уже распарсенный ACPI (своя таблица "HPET", см.
+    // acpi_find_table_by_signature() выше) — опциональный, более точный
+    // источник времени поверх PIT, а не замена: scheduler-тики (IRQ0)
+    // по-прежнему только PIT.
+    LOG_PENDING("Initializing HPET...");
+    hpet_init();
+    if (hpet_available()) {
+        LOG_DONE_OK("HPET initialized (%lu Hz)", hpet_ticks_per_second());
+    } else {
+        LOG_DONE_WARN("HPET not available on this platform");
+    }
+
+    LOG_PENDING("Reading RTC...");
+    rtc_time_t boot_time;
+    if (rtc_get_time(&boot_time) == 0) {
+        // Этот printf (console.c) не умеет ширину/нулевое дополнение
+        // (%02u) — та же причина, по которой date.c (lufira-packages)
+        // дополняет сам: без ведущих нулей, но корректно.
+        LOG_DONE_OK("RTC: %u-%u-%u %u:%u:%u UTC",
+                     boot_time.year, boot_time.month, boot_time.day,
+                     boot_time.hour, boot_time.minute, boot_time.second);
+    } else {
+        LOG_DONE_WARN("RTC read failed");
+    }
 
     LOG_PENDING("Initializing syscalls...");
     syscall_init();

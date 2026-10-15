@@ -265,6 +265,13 @@
 // сертификатов и их парсинга) — см. комментарий в начале tls.c.
 #define SYS_NET_FETCH 66
 
+// SYS_RTC_GETTIME (67): buf_ptr -> lufira_rtc_time_t. Обёртка над
+// rtc_get_time() (kernel/system/timer/rtc.c, CMOS RTC) — нужен userspace
+// пакету date.c (lufira-packages), у которого нет доступа к портам 0x70/
+// 0x71 напрямую. Возврат: 0 успех, -EIO — два последовательных чтения
+// регистров RTC так и не совпали (см. rtc.c про UPDATE_IN_PROGRESS).
+#define SYS_RTC_GETTIME 67
+
 // Флаги для sys_open
 #define O_RDONLY    0
 #define O_WRONLY    1
@@ -298,6 +305,7 @@
 // простой -1.
 #define EPERM    1
 #define ENOENT   2
+#define EIO      5
 #define EAGAIN   11 // v0.8 (GUI+WM), этап 3: SYS_IPC_SEND — почтовый ящик адресата полон
 #define EACCES   13
 #define EFAULT   14
@@ -331,6 +339,19 @@ typedef struct {
                                 // пользовательская программа, как и сегодня
                                 // делает kernel-native command_cpuload().
 } lufira_cpuload_t;
+
+// Для SYS_RTC_GETTIME — байт-в-байт то же самое, что rtc_time_t (rtc.h),
+// просто отдельный тип ради того же принципа "структуры syscall-ABI не
+// шарят заголовок с внутренним типом драйвера" (как statfs/meminfo/
+// cpuload выше).
+typedef struct {
+    uint16_t year;
+    uint8_t  month;
+    uint8_t  day;
+    uint8_t  hour;
+    uint8_t  minute;
+    uint8_t  second;
+} lufira_rtc_time_t;
 
 // Одна запись снимка SYS_PSLIST (30) — то же, что process_ps() печатает
 // построчно, плюс ppid/uid/cpu_ticks (для per-process разбивки в

@@ -29,6 +29,13 @@ static inline void outw(uint16_t port, uint16_t val) {
 static ACPI_FADT *fadt = NULL;
 static int acpi_ready = 0;
 
+// Запоминаем RSDT/XSDT из acpi_init() — нужно acpi_find_table_by_signature()
+// ниже, чтобы другие драйверы (сейчас — только hpet.c) могли искать СВОИ
+// таблицы тем же путём, не повторяя разбор RSDP/RSDT/XSDT у себя.
+static void *g_sdt = NULL;
+static uint32_t g_sdt_entries = 0;
+static int g_sdt_use_64bit = 0;
+
 // Реальные SLP_TYPa/SLP_TYPb для S5 (soft off), уже сдвинутые в биты 10-12
 // PM1_CNT (т.е. готовые к | с ACPI_SLP_EN) — находим их в DSDT при
 // acpi_init(), см. acpi_find_s5_sleep_type(). 0 — спец-значение "не нашли",
@@ -204,7 +211,11 @@ int acpi_init(uint64_t rsdp_address) {
     }
 
     DLOG("[ACPI] %u SDT entries found\n", sdt_entries);
-    
+
+    g_sdt = sdt;
+    g_sdt_entries = sdt_entries;
+    g_sdt_use_64bit = use_64bit;
+
     // Ищем FADT
     fadt = (ACPI_FADT*)acpi_find_table(sdt, sdt_entries, use_64bit, "FACP");
     if (!fadt) {
@@ -344,4 +355,17 @@ int acpi_reset(void) {
     // затем сообщаем вызывающему, что нужно пробовать другой метод.
     for (volatile int i = 0; i < 1000000; i++);
     return -1;
+}
+
+uint8_t acpi_get_rtc_century_register(void) {
+    if (!acpi_ready || !fadt) return 0;
+    // CENTURY физически входит в "хвост" FADT ДО ResetReg (см. layout в
+    // acpi.h) — присутствует уже в ACPI 1.0-таблицах, отдельной проверки
+    // header.Length (как у ResetReg) не требуется.
+    return fadt->CENTURY;
+}
+
+void *acpi_find_table_by_signature(const char *signature) {
+    if (!acpi_ready || !g_sdt) return NULL;
+    return acpi_find_table(g_sdt, g_sdt_entries, g_sdt_use_64bit, signature);
 }

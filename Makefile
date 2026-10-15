@@ -42,6 +42,7 @@ $(shell mkdir -p $(BUILD_DIR) \
     $(BUILD_DIR)/kernel/lib \
 	$(BUILD_DIR)/kernel/drivers/pci \
     $(BUILD_DIR)/kernel/drivers/console \
+    $(BUILD_DIR)/kernel/drivers/serial \
     $(BUILD_DIR)/kernel/drivers/keyboard \
 	$(BUILD_DIR)/kernel/drivers/sound \
     $(BUILD_DIR)/kernel/drivers/mouse \
@@ -97,6 +98,7 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/drivers/pci/pci.c \
     $(KERNEL_DIR)/drivers/console/console.c \
     $(KERNEL_DIR)/drivers/console/graphics2d.c \
+    $(KERNEL_DIR)/drivers/serial/serial.c \
     $(KERNEL_DIR)/drivers/keyboard/keyboard.c \
     $(KERNEL_DIR)/drivers/mouse/mouse.c \
     $(KERNEL_DIR)/drivers/disk/disk.c \
@@ -144,6 +146,8 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/system/mm/shm.c \
     $(KERNEL_DIR)/system/acpi/acpi.c \
 	$(KERNEL_DIR)/system/timer/pit.c \
+	$(KERNEL_DIR)/system/timer/hpet.c \
+	$(KERNEL_DIR)/system/timer/rtc.c \
     $(KERNEL_DIR)/system/process/process.c \
 	$(KERNEL_DIR)/system/syscall/syscall.c \
 	$(KERNEL_DIR)/system/elf/elf.c \

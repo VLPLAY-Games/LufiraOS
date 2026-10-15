@@ -5,6 +5,7 @@
 #include "lib/colors.h"
 #include "lib/string.h"
 #include "system/mm/heap.h"
+#include "drivers/serial/serial.h"
 
 static void clear_console_line(uint32_t y);
 
@@ -609,6 +610,11 @@ void console_get_font_data(void *out, uint32_t max_bytes) {
 }
 
 void put_char(char c) {
+    // Зеркало на COM1 — see serial.c: каждый символ, попадающий на
+    // графический экран, уходит туда же на отладочный UART (no-op, если
+    // порта нет — serial_available() проверяется уже внутри).
+    serial_putc(c);
+
     // Если пользователь смотрит старый вывод,
     // любой обычный вывод возвращает нас вниз.
     if (console_is_scrolled()) {

@@ -82,6 +82,7 @@
 // 63/64 — удалены, этап 4 (см. kernel-side syscall.h)
 #define SYS_DUP2 65
 #define SYS_NET_FETCH 66
+#define SYS_RTC_GETTIME 67
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -258,6 +259,17 @@ struct lufira_cpuload {
     uint64_t idle_ticks;
 };
 
+// Мирроит lufira_rtc_time_t (syscall.h) байт-в-байт — для SYS_RTC_GETTIME
+// (date.c).
+struct lufira_rtc_time {
+    uint16_t year;
+    uint8_t  month;
+    uint8_t  day;
+    uint8_t  hour;
+    uint8_t  minute;
+    uint8_t  second;
+};
+
 static inline long sys_statfs(struct lufira_statfs *out) {
     return __syscall5(SYS_STATFS, (long)out, 0, 0, 0, 0);
 }
@@ -266,6 +278,9 @@ static inline long sys_meminfo(struct lufira_meminfo *out) {
 }
 static inline long sys_cpuload(struct lufira_cpuload *out) {
     return __syscall5(SYS_CPULOAD, (long)out, 0, 0, 0, 0);
+}
+static inline long sys_rtc_gettime(struct lufira_rtc_time *out) {
+    return __syscall5(SYS_RTC_GETTIME, (long)out, 0, 0, 0, 0);
 }
 
 // Мирроит lufira_ps_entry_t (kernel/system/syscall/syscall.h) байт-в-байт —
