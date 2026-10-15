@@ -89,6 +89,10 @@ void draw_text_scaled(const char *text, uint32_t px, uint32_t py, uint32_t scale
 void draw_text_tilted(const char *text, uint32_t px, uint32_t py, uint32_t scale, uint32_t fg_color);
 uint32_t text_scaled_width(const char *text, uint32_t scale);
 void put_char(char c);
+
+// Открывает "висящую" (ещё не завершённую \n) статус-строку — см. LOG_PENDING
+// в log.h и разбор бага у put_char() в console.c. Вызывать ТОЛЬКО оттуда.
+void console_mark_pending_open(void);
 void print_string(const char* str);
 void printf(const char* format, ...);
 void clear_screen(void);

@@ -52,6 +52,7 @@
     printf("[  ..  ] "); \
     set_foreground_color(LOG_COLOR_INFO); \
     printf(fmt, ##__VA_ARGS__); \
+    console_mark_pending_open(); \
     } \
 } while(0)
 

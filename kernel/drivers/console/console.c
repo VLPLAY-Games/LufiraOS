@@ -12,6 +12,13 @@ static void clear_console_line(uint32_t y);
 // Глобальные переменные состояния консоли
 uint32_t current_x = 0;
 uint32_t current_y = 0;
+
+// См. console_mark_pending_open() и разбор у put_char() ниже.
+static volatile int pending_line_open = 0;
+
+void console_mark_pending_open(void) {
+    pending_line_open = 1;
+}
 uint32_t screen_width_chars = 0;
 uint32_t screen_height_chars = 0;
 // framebuffer — то, во что пишут put_pixel() и весь остальной код. До
@@ -610,11 +617,6 @@ void console_get_font_data(void *out, uint32_t max_bytes) {
 }
 
 void put_char(char c) {
-    // Зеркало на COM1 — see serial.c: каждый символ, попадающий на
-    // графический экран, уходит туда же на отладочный UART (no-op, если
-    // порта нет — serial_available() проверяется уже внутри).
-    serial_putc(c);
-
     // Если пользователь смотрит старый вывод,
     // любой обычный вывод возвращает нас вниз.
     if (console_is_scrolled()) {
@@ -624,6 +626,32 @@ void put_char(char c) {
     if (cursor_enabled && cursor_visible) {
         erase_cursor();
     }
+
+    // НАЙДЕННЫЙ БАГ (живое железо, devmode: "[ .. ] Initializing syscalls...
+    // [SYSCALL] 65 system calls registered" на ОДНОЙ строке) — LOG_PENDING
+    // (log.h) печатает "[ .. ] X..." БЕЗ \n и ждёт LOG_DONE_OK/_FAIL/_WARN,
+    // которые вернутся через '\r' и перетрут ту же строку на "[ OK ] ...".
+    // Но если сама инициализируемая подсистема между ними что-то печатает
+    // (DLOG/printf) — её текст раньше просто приклеивался к ещё открытой
+    // "[ .. ] X..." строке, потому что курсор так и оставался на ней же.
+    // '\r' не трогаем — это легитимный сигнал от LOG_DONE_*, не чужой вывод.
+    // ВАЖНО: это должно случиться ДО serial_putc(c) ниже — иначе сам
+    // символ c, которым мы обнаружили разрыв, успевал бы уйти на COM1 ещё
+    // на старой строке, а синтетический '\n' — только после него.
+    if (pending_line_open && c != '\r') {
+        pending_line_open = 0;
+        if (c != '\n') {
+            serial_putc('\n');
+            current_x = 0;
+            current_y++;
+            history_new_line();
+        }
+    }
+
+    // Зеркало на COM1 — see serial.c: каждый символ, попадающий на
+    // графический экран, уходит туда же на отладочный UART (no-op, если
+    // порта нет — serial_available() проверяется уже внутри).
+    serial_putc(c);
 
     if (c == '\n') {
 
@@ -636,6 +664,7 @@ void put_char(char c) {
 
         current_x = 0;
         history_current_column = 0;
+        pending_line_open = 0;
 
     } else if (c == '\b') {
 
