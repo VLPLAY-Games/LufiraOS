@@ -3,12 +3,14 @@
 // filesystem_t, всё жёстко завязано на LufiraFS), поэтому это не настоящий
 // VFS-mount, а отдельная подсистема поверх N параллельных fat_fs_t
 // контекстов (см. MAX_MOUNTS ниже), работающая напрямую с xhci_msd_*/fat_*,
-// в стороне от VFS — как usbinfo/usbread/usbwrite (usb.c). fat_init()
-// ожидает образ ФС целиком в RAM, так что mount читает устройство целиком в
-// kmalloc'нутый буфер, а unmount синхронизирует "грязные" секторы обратно.
-// fat_flush()/fat_sync() из fat.c не используются — они жёстко пишут на
-// ATA-диск (саму LufiraFS), запись назад реализована здесь отдельно через
-// xhci_msd_write_block().
+// в стороне от VFS — как usbinfo/usbread/usbwrite (usb.c).
+//
+// v0.9: fat_init() больше не требует образ ФС целиком в RAM (см. разбор в
+// fat.h/fat.c) — сам читает метаданные через fat_blockdev_t (fat_dev_read/
+// write ниже), так что отдельного image-буфера/ручного полного чтения
+// устройства тут больше нет. Синхронизация назад на флешку — fat_sync()
+// из fat.c (она сама работает через fs->dev, не напрямую через
+// disk_write_sectors() — см. историю БАГА в комментарии fat_init()).
 //
 // Именованные монтирования (mount <usb> [name]), а не настоящие пути VFS:
 // LufiraFS-инод не может указывать на FAT-запись (это две независимые
@@ -25,10 +27,10 @@
 #include "system/mm/heap.h"
 #include "lib/string.h"
 
-// Каждый маунт — свой fat_fs_t + свой image-буфер в куче. 2, а не больше:
-// каждый образ до MOUNT_MAX_IMAGE_BYTES целиком живёт в 16MB куче ядра
-// (см. heap.h) вместе со всем остальным, что там когда-либо kmalloc'ается —
-// больше двух многомегабайтных образов одновременно рискует её исчерпать.
+// Каждый маунт — свой fat_fs_t (см. v0.9-комментарий выше про то, что
+// больше не несёт на себе образ ФС целиком). 2, а не больше — тот же
+// запас, что и раньше, на случай будущего расширения этого (мёртвого)
+// кода, без какой-то конкретной текущей причины.
 #define MAX_MOUNTS 2
 #define MOUNT_NAME_MAX 16
 
@@ -37,7 +39,6 @@ typedef struct {
     char name[MOUNT_NAME_MAX];
     int usb_index;
     fat_fs_t fs;
-    uint8_t *image_buf;
 } fat_mount_t;
 
 static fat_mount_t g_mounts[MAX_MOUNTS];
@@ -51,26 +52,45 @@ static void copy_bounded_name(char *out, const char *src, int max_len) {
     out[i] = '\0';
 }
 
-// Верхняя граница образа ФС, который можно целиком держать в RAM.
-#define MOUNT_MAX_IMAGE_BYTES (8u * 1024u * 1024u)
-
 // Изредка под нагрузкой (сотни вызовов подряд) xhci_msd_read/write_block
 // может не уложиться в таймаут или вернуть ошибку контроллера — небольшой
 // retry остаётся дешёвой защитой на случай единичного сбоя.
 #define MOUNT_IO_RETRIES 3
 
-static int read_blocks_retry(int usb_index, uint32_t lba, uint32_t count, void *buf, uint32_t block_size) {
-    for (int attempt = 0; attempt < MOUNT_IO_RETRIES; attempt++) {
-        if (xhci_msd_read_blocks(usb_index, lba, count, buf, block_size) == 0) return 0;
+// fat_blockdev_t для fat_init()/fat.c — ctx хранит usb_index (малое целое,
+// не указатель), как и в fat_mount.c (тот же приём, не экспортируется
+// оттуда — см. файловый комментарий про то, что эти две подсистемы
+// намеренно не делят код).
+static int fat_dev_read(void *ctx, uint32_t lba, uint32_t count, void *buf) {
+    int usb_index = (int)(uint64_t)ctx;
+    uint8_t *p = (uint8_t *)buf;
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t batch = (count - done) > XHCI_MSD_MAX_BATCH_BLOCKS ? XHCI_MSD_MAX_BATCH_BLOCKS : (count - done);
+        int ok = -1;
+        for (int attempt = 0; attempt < MOUNT_IO_RETRIES; attempt++) {
+            if (xhci_msd_read_blocks(usb_index, lba + done, batch, p + (uint64_t)done * 512, 512) == 0) { ok = 0; break; }
+        }
+        if (ok != 0) return -1;
+        done += batch;
     }
-    return -1;
+    return 0;
 }
 
-static int write_blocks_retry(int usb_index, uint32_t lba, uint32_t count, const void *buf, uint32_t block_size) {
-    for (int attempt = 0; attempt < MOUNT_IO_RETRIES; attempt++) {
-        if (xhci_msd_write_blocks(usb_index, lba, count, buf, block_size) == 0) return 0;
+static int fat_dev_write(void *ctx, uint32_t lba, uint32_t count, const void *buf) {
+    int usb_index = (int)(uint64_t)ctx;
+    const uint8_t *p = (const uint8_t *)buf;
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t batch = (count - done) > XHCI_MSD_MAX_BATCH_BLOCKS ? XHCI_MSD_MAX_BATCH_BLOCKS : (count - done);
+        int ok = -1;
+        for (int attempt = 0; attempt < MOUNT_IO_RETRIES; attempt++) {
+            if (xhci_msd_write_blocks(usb_index, lba + done, batch, p + (uint64_t)done * 512, 512) == 0) { ok = 0; break; }
+        }
+        if (ok != 0) return -1;
+        done += batch;
     }
-    return -1;
+    return 0;
 }
 
 static fat_mount_t *find_mount_by_name(const char *name) {
@@ -111,89 +131,42 @@ static int mount_fat_from_usb(int usb_index, const char *name) {
         return -1;
     }
 
-    uint64_t total_bytes = ((uint64_t)max_lba + 1) * block_size;
-    if (total_bytes > MOUNT_MAX_IMAGE_BYTES) {
-        printf("\nmount: device too large (%lu KB, max %u KB) - FAT driver keeps the whole image in RAM\n",
-               (unsigned long)(total_bytes / 1024), MOUNT_MAX_IMAGE_BYTES / 1024);
-        return -1;
-    }
-
-    uint8_t *buf = (uint8_t *)kmalloc((size_t)total_bytes);
-    if (!buf) {
-        printf("\nmount: not enough memory (%lu KB)\n", (unsigned long)(total_bytes / 1024));
-        return -1;
-    }
-
-    uint32_t total_blocks = max_lba + 1;
-    printf("\nReading usb%d (%u blocks)...\n", usb_index, total_blocks);
-    for (uint32_t lba = 0; lba < total_blocks; ) {
-        uint32_t remaining = total_blocks - lba;
-        uint32_t batch = remaining > XHCI_MSD_MAX_BATCH_BLOCKS ? XHCI_MSD_MAX_BATCH_BLOCKS : remaining;
-        if (read_blocks_retry(usb_index, lba, batch, buf + (uint64_t)lba * block_size, block_size) != 0) {
-            printf("mount: read failed at LBA %u (after %d retries)\n", lba, MOUNT_IO_RETRIES);
-            kfree(buf);
-            return -1;
-        }
-        lba += batch;
-    }
+    // v0.9: fat_init() больше не грузит устройство целиком в RAM (см.
+    // разбор в fat.h) — читает метаданные сам через этот blockdev.
+    fat_blockdev_t dev = {
+        .ctx = (void *)(uint64_t)usb_index,
+        .read_blocks = fat_dev_read,
+        .write_blocks = fat_dev_write,
+    };
 
     fat_mount_t *m = &g_mounts[slot];
-    int res = fat_init(&m->fs, buf, (uint32_t)total_bytes);
+    int res = fat_init(&m->fs, &dev, max_lba + 1);
     if (res != 0) {
-        printf("mount: not a FAT filesystem (fat_init error %d)\n", res);
-        kfree(buf);
+        printf("\nmount: not a FAT filesystem, or its metadata is too large for RAM (fat_init error %d)\n", res);
         return -1;
     }
 
-    m->image_buf = buf;
     m->usb_index = usb_index;
     copy_bounded_name(m->name, name, sizeof(m->name));
     m->in_use = 1;
     return slot;
 }
 
-// Записывает "грязные" секторы обратно на флешку. Не переиспользует
-// fat_flush()/fat_sync() (fat.c) — те жёстко пишут через
-// disk_write_sectors() (ATA-диск с самой LufiraFS), что при вызове отсюда
-// молча испортило бы disk.img вместо флешки.
+// v0.9: раньше здесь был свой цикл по dirty_map, пишущий напрямую через
+// xhci_msd_write_blocks() — отдельно от fat_flush()/fat_sync() (fat.c),
+// потому что те раньше жёстко писали через disk_write_sectors() (ATA-диск
+// с самой LufiraFS), что при вызове отсюда молча испортило бы disk.img
+// вместо флешки. Теперь fat_sync() сама работает через fs->dev (это
+// монтирование передаёт fat_dev_read/write выше, а не disk.c) — так что
+// можно звать её напрямую.
 static void mount_fat_sync_to_usb(fat_mount_t *m) {
-    uint32_t written = 0, failed = 0;
-    uint32_t total = m->fs.total_sectors;
-    uint32_t lba = 0;
-    // Батчит СОСЕДНИЕ "грязные" секторы в один write_blocks_retry() вместо
-    // одного вызова на бит — dirty_map почти всегда содержит длинные
-    // прогоны подряд идущих секторов (директории/FAT-таблица растут
-    // последовательно), так что почти всё синкается по 64KB за раз.
-    while (lba < total) {
-        if (!(m->fs.dirty_map[lba >> 3] & (1 << (lba & 7)))) { lba++; continue; }
-
-        uint32_t run_start = lba;
-        uint32_t run_len = 0;
-        while (lba < total && run_len < XHCI_MSD_MAX_BATCH_BLOCKS &&
-               (m->fs.dirty_map[lba >> 3] & (1 << (lba & 7)))) {
-            run_len++;
-            lba++;
-        }
-
-        if (write_blocks_retry(m->usb_index, run_start, run_len,
-                                m->fs.image + (uint64_t)run_start * 512, 512) == 0) {
-            written += run_len;
-        } else {
-            failed += run_len;
-        }
-    }
-    memset(m->fs.dirty_map, 0, m->fs.dirty_map_size);
-
-    printf("\n[MOUNT] Synced %u sector(s) to usb%d ('%s')", written, m->usb_index, m->name);
-    if (failed > 0) printf(" (%u FAILED - flash card may be inconsistent, re-mount to check)", failed);
-    printf("\n");
+    fat_sync(&m->fs);
+    printf("\n[MOUNT] Synced usb%d ('%s')\n", m->usb_index, m->name);
 }
 
 static void unmount_fat(fat_mount_t *m) {
     mount_fat_sync_to_usb(m);
-    kfree(m->fs.dirty_map);
-    kfree(m->image_buf);
-    m->image_buf = NULL;
+    fat_deinit(&m->fs);
     m->in_use = 0;
 }
 

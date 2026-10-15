@@ -1,5 +1,4 @@
 #include "fat.h"
-#include "drivers/disk/disk.h"
 #include "system/mm/heap.h"
 #include "drivers/console/console.h"
 #include "lib/stddef.h"
@@ -25,23 +24,56 @@ static void write_le32(uint8_t *p, uint32_t val) {
     p[3] = (val >> 24) & 0xFF;
 }
 
-static const uint8_t* cluster_to_sector(fat_fs_t *fs, uint32_t cluster) {
-    if (cluster < 2 || cluster >= fs->max_cluster) return 0;
+/* ======== Доступ к кластерам ДАННЫХ (содержимое файлов, не-корневые
+ * каталоги) — НАПРЯМУЮ на устройство, без постоянного кеширования. Это и
+ * есть "не грузить флешку целиком в ОЗУ" (v0.9): единственные персистентные
+ * в ОЗУ области — метаданные (fs->image) и кэш корневого каталога
+ * (fs->root_image, только FAT32), см. их разбор в fat.h. ======== */
+static int read_cluster_raw(fat_fs_t *fs, uint32_t cluster, void *buf) {
+    if (cluster < 2 || cluster >= fs->max_cluster) return -1;
     uint32_t lba = fs->data_start + (cluster - 2) * fs->cluster_size;
-    return fs->image + lba * 512;
+    return fs->dev.read_blocks(fs->dev.ctx, lba, fs->cluster_size, buf);
 }
 
-/* ======== Dirty bitmap helpers ======== */
+static int write_cluster_raw(fat_fs_t *fs, uint32_t cluster, const void *buf) {
+    if (cluster < 2 || cluster >= fs->max_cluster) return -1;
+    uint32_t lba = fs->data_start + (cluster - 2) * fs->cluster_size;
+    return fs->dev.write_blocks(fs->dev.ctx, lba, fs->cluster_size, buf);
+}
+
+/* ======== Доступ к КОРНЕВОМУ каталогу FAT32 — через резидентный кэш
+ * (fs->root_image), по номеру кластера ищем его позицию в уже загруженной
+ * цепочке. Согласно границе из fat_mount.h, этот драйвер обходит ТОЛЬКО
+ * корень — ни один вызов ниже не должен получать cluster, не входящий в
+ * fs->root_chain[]; если это всё же произойдёт (повреждённая ФС), честно
+ * возвращаем NULL, как и раньше возвращал cluster_to_sector() на выходе за
+ * пределы устройства. ======== */
+static uint8_t* root_chain_ptr(fat_fs_t *fs, uint32_t cluster) {
+    for (uint32_t i = 0; i < fs->root_chain_len; i++)
+        if (fs->root_chain[i] == cluster)
+            return fs->root_image + (uint64_t)i * fs->cluster_size * 512;
+    return NULL;
+}
+
+// Пишет ВСЮ кэш-копию корневого каталога обратно на устройство. Корень
+// почти всегда 1-несколько кластеров, так что "пишем всё целиком" дешевле
+// и надёжнее, чем вычислять, какой именно кластер поменялся — вызывается
+// из fat_sync() (а не из каждого мутатора по отдельности), см. его
+// комментарий и REAL-TIME-запись в fat_mount.h.
+static void root_chain_flush(fat_fs_t *fs) {
+    uint32_t bytes_per_cluster = fs->cluster_size * 512;
+    for (uint32_t i = 0; i < fs->root_chain_len; i++) {
+        uint32_t lba = fs->data_start + (fs->root_chain[i] - 2) * fs->cluster_size;
+        fs->dev.write_blocks(fs->dev.ctx, lba, fs->cluster_size,
+                              fs->root_image + (uint64_t)i * bytes_per_cluster);
+    }
+}
+
+/* ======== Dirty bitmap helpers — покрывают ТОЛЬКО fs->image
+ * (image_sectors, т.е. метаданные), не весь диск. ======== */
 void fat_mark_sector_dirty(fat_fs_t *fs, uint32_t lba) {
-    if (lba >= fs->total_sectors) return;
+    if (lba >= fs->image_sectors) return;
     fs->dirty_map[lba >> 3] |= (1 << (lba & 7));
-}
-
-static void mark_cluster_dirty(fat_fs_t *fs, uint32_t cluster) {
-    if (cluster < 2) return;
-    uint32_t lba = fs->data_start + (cluster - 2) * fs->cluster_size;
-    for (uint32_t i = 0; i < fs->cluster_size; i++)
-        fat_mark_sector_dirty(fs, lba + i);
 }
 
 static void mark_fat_sector_dirty(fat_fs_t *fs, uint32_t cluster) {
@@ -58,102 +90,9 @@ static void mark_fat_sector_dirty(fat_fs_t *fs, uint32_t cluster) {
         fat_mark_sector_dirty(fs, lba + 1);
 }
 
-/* ======== Инициализация FAT с выделением dirty‑map ======== */
-
-// НАЙДЕННЫЙ БАГ: fat_mkdir()/fat_rm()/fat_create_file()/fat_write_file()/
-// fat_truncate_file() раньше сами звали fat_sync(fs) в конце. fat_sync()
-// пишет через disk_write_sectors() — ATA-диск самой LufiraFS, а fat_init()
-// во всём дереве вызывается только из mount.c для USB-флешек. Значит эти
-// внутренние fat_sync() писали FAT-метаданные USB по LBA, пересчитанным от
-// начала флешки, НА РЕАЛЬНЫЙ СИСТЕМНЫЙ ДИСК — тихо портили LufiraFS при
-// первой же записи на смонтированную флешку (старый комментарий mount.c
-// про "fat_sync не используется" был верен только для прямых вызовов).
-// Исправление: синхронизация — ответственность вызывающего (см.
-// fat_mount.c, который синхронизирует явно и правильно, на USB).
-int fat_init(fat_fs_t *fs, void *image, uint32_t image_size) {
-    if (!image || image_size < 512) return -1;
-    const uint8_t *raw = (const uint8_t*)image;
-
-    // Сигнатура загрузочного сектора — ДО любого разбора полей. v0.9, фаза
-    // 1: без этой проверки fat_init() и auto-detect'ное sys_mount() (пробует
-    // FAT первым на ЛЮБОМ образе, в т.ч. ext2/exFAT) доходили до деления на
-    // bpb.sectors_per_cluster ниже ещё ДО того, как могли понять, что это
-    // вообще не FAT — у ext2-образа начало тома обычно нулевое (загрузочная
-    // область не используется), sectors_per_cluster=0 → #DE (живой краш,
-    // найден именно так: "mount" на ext2-флешке ронял систему).
-    if (read_le16(raw+510) != 0xAA55) return -1;
-
-    fs->image = (uint8_t*)image;
-    fs->bpb.bytes_per_sector = read_le16(raw+11);
-    fs->bpb.sectors_per_cluster = raw[13];
-    fs->bpb.reserved_sectors = read_le16(raw+14);
-    fs->bpb.num_fats = raw[16];
-    fs->bpb.root_entries = read_le16(raw+17);
-    fs->bpb.total_sectors_16 = read_le16(raw+19);
-    fs->bpb.total_sectors_32 = read_le32(raw+32);
-    fs->bpb.sectors_per_fat_16 = read_le16(raw+22);
-    fs->bpb.media = raw[21];
-
-    uint16_t bytes_per_sec = fs->bpb.bytes_per_sector;
-    uint8_t sec_per_cl = fs->bpb.sectors_per_cluster;
-    uint16_t reserved = fs->bpb.reserved_sectors;
-    uint8_t fats = fs->bpb.num_fats;
-    uint32_t total_sec = fs->bpb.total_sectors_16 ?
-                         fs->bpb.total_sectors_16 : fs->bpb.total_sectors_32;
-
-    // Те же поля ниже используются как делители (bytes_per_sec — в
-    // округлении root_entries, sec_per_cl — в count_of_clusters) — ноль у
-    // любого из них (валидная сигнатура 0xAA55 не исключает дальше мусорных
-    // полей сама по себе) привёл бы к той же #DE.
-    if (bytes_per_sec == 0 || sec_per_cl == 0 || fats == 0 || total_sec == 0) return -1;
-
-    if (total_sec * bytes_per_sec > image_size) return -2;
-
-    uint32_t sectors_per_fat = fs->bpb.sectors_per_fat_16;
-    if (sectors_per_fat == 0) {
-        sectors_per_fat = read_le32(raw+36); // FAT32
-    }
-
-    uint32_t fat_start = reserved;
-    uint32_t root_dir_start = fat_start + fats * sectors_per_fat;
-    uint32_t data_start = root_dir_start +
-        (fs->bpb.root_entries * 32 + bytes_per_sec - 1) / bytes_per_sec;
-
-    uint32_t data_sec = total_sec - data_start;
-    uint32_t count_of_clusters = data_sec / sec_per_cl;
-
-    uint8_t fat_type = 16;
-    if (count_of_clusters < 4085) fat_type = 12;
-    else if (count_of_clusters < 65525) fat_type = 16;
-    else fat_type = 32;
-
-    fs->fat_start = fat_start;
-    fs->root_dir_start = root_dir_start;
-    fs->data_start = data_start;
-    fs->root_entries = fs->bpb.root_entries;
-    fs->cluster_size = sec_per_cl;
-    fs->total_sectors = total_sec;
-    fs->fat_type = fat_type;
-    fs->sectors_per_fat = sectors_per_fat;      /* сохраняем реальное значение */
-    fs->max_cluster = count_of_clusters + 2;    /* кластеры от 2 до count_of_clusters+1 */
-
-    if (fat_type == 32) {
-        fs->root_cluster = read_le32(raw+44);
-    } else {
-        fs->root_cluster = 0;
-    }
-
-    /* Инициализация dirty‑карты */
-    uint32_t map_size = (total_sec + 7) / 8;
-    fs->dirty_map = (uint8_t*)kmalloc(map_size);
-    if (!fs->dirty_map) return -3;
-    fs->dirty_map_size = map_size;
-    memset(fs->dirty_map, 0, map_size);
-
-    return 0;
-}
-
-/* ======== Работа с таблицей FAT ======== */
+/* ======== Работа с таблицей FAT — без изменений: таблица всегда лежит в
+ * резидентных метаданных (fs->image), независимо от того, как читаются
+ * данные/корень. ======== */
 uint32_t get_fat_entry(fat_fs_t *fs, uint32_t cluster) {
     if (cluster < 2) return 0xFFF7;
     uint8_t *fat = fs->image + fs->fat_start * 512;
@@ -249,6 +188,184 @@ void to_short_name(const char *filename, char out[11]) {
     }
 }
 
+/* ======== Инициализация ======== */
+
+static int load_fat32_root_chain(fat_fs_t *fs) {
+    uint32_t bytes_per_cluster = fs->cluster_size * 512;
+
+    // Проход 1: просто считаем длину цепочки — обращения только к уже
+    // резидентной таблице FAT (fs->image), никакого I/O на устройство.
+    uint32_t count = 0;
+    uint32_t cluster = fs->root_cluster;
+    while (cluster >= 2 && count < FAT_ROOT_CHAIN_MAX) {
+        count++;
+        uint32_t next = get_fat_entry(fs, cluster);
+        if (is_eoc(fs, next) || next < 2) break;
+        cluster = next;
+    }
+    if (count == 0) return -1; // некорректный root_cluster
+
+    fs->root_image = (uint8_t*)kmalloc((size_t)count * bytes_per_cluster);
+    if (!fs->root_image) return -1;
+
+    // Проход 2: читаем каждый кластер цепочки по месту.
+    cluster = fs->root_cluster;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t lba = fs->data_start + (cluster - 2) * fs->cluster_size;
+        if (fs->dev.read_blocks(fs->dev.ctx, lba, fs->cluster_size,
+                                 fs->root_image + (uint64_t)i * bytes_per_cluster) != 0) {
+            kfree(fs->root_image);
+            fs->root_image = NULL;
+            return -1;
+        }
+        fs->root_chain[i] = cluster;
+        if (i + 1 < count) cluster = get_fat_entry(fs, cluster);
+    }
+    fs->root_chain_len = count;
+    return 0;
+}
+
+void fat_deinit(fat_fs_t *fs) {
+    if (!fs) return;
+    if (fs->image) { kfree(fs->image); fs->image = NULL; }
+    if (fs->dirty_map) { kfree(fs->dirty_map); fs->dirty_map = NULL; }
+    if (fs->root_image) { kfree(fs->root_image); fs->root_image = NULL; }
+    if (fs->scratch_cluster) { kfree(fs->scratch_cluster); fs->scratch_cluster = NULL; }
+}
+
+// НАЙДЕННЫЙ БАГ (история, v0.9): fat_mkdir()/fat_rm()/fat_create_file()/
+// fat_write_file()/fat_append_file() раньше сами звали fat_flush()/
+// fat_sync(fs) в конце, а те писали через disk_write_sectors() — ATA-диск
+// самой LufiraFS, хотя fat_init() во всём дереве вызывается только для
+// USB-флешек. Значит внутренние fat_sync() писали FAT-метаданные USB по
+// LBA, пересчитанным от начала флешки, НА РЕАЛЬНЫЙ СИСТЕМНЫЙ ДИСК — тихо
+// портили LufiraFS при первой же записи на смонтированную флешку.
+// Исправление, в силе и сейчас: синхронизация — ответственность
+// вызывающего (fat_mount.c вызывает fat_sync(), которая работает через
+// fs->dev — настоящее устройство, а не disk.c).
+//
+// v0.9, фаза 2 — РЕДИЗАЙН: раньше fat_init() требовал образ ФС целиком в
+// ОЗУ одним kmalloc()'ом (image, image_size) — отсюда и жёсткий потолок
+// "флешка не больше 8MB" у вызывающих (половина кучи ядра). Теперь
+// fat_init() сам читает устройство через fs->dev блоками: в ОЗУ остаются
+// только метаданные (reserved + таблицы FAT + фикс.корень 12/16,
+// FAT_META_MAX_SECTORS) и, для FAT32, маленький кэш корневого каталога
+// (FAT_ROOT_CHAIN_MAX кластеров) — см. их разбор в fat.h. Содержимое
+// файлов НИКОГДА не копируется в ОЗУ целиком — читается/пишется по месту.
+int fat_init(fat_fs_t *fs, const fat_blockdev_t *dev, uint32_t total_sectors) {
+    if (!fs || !dev || !dev->read_blocks || !dev->write_blocks) return -1;
+    if (total_sectors == 0) return -1;
+
+    memset(fs, 0, sizeof(*fs));
+    fs->dev = *dev;
+
+    uint8_t boot_sector[512];
+    if (fs->dev.read_blocks(fs->dev.ctx, 0, 1, boot_sector) != 0) return -1;
+
+    // Сигнатура загрузочного сектора — ДО любого разбора полей (см.
+    // историю бага с ext2-образом и делением на 0 ниже в старом
+    // комментарии этой функции — ha, сейчас сверяем так же рано).
+    if (read_le16(boot_sector+510) != 0xAA55) return -1;
+
+    fs->bpb.bytes_per_sector = read_le16(boot_sector+11);
+    fs->bpb.sectors_per_cluster = boot_sector[13];
+    fs->bpb.reserved_sectors = read_le16(boot_sector+14);
+    fs->bpb.num_fats = boot_sector[16];
+    fs->bpb.root_entries = read_le16(boot_sector+17);
+    fs->bpb.total_sectors_16 = read_le16(boot_sector+19);
+    fs->bpb.total_sectors_32 = read_le32(boot_sector+32);
+    fs->bpb.sectors_per_fat_16 = read_le16(boot_sector+22);
+    fs->bpb.media = boot_sector[21];
+
+    uint16_t bytes_per_sec = fs->bpb.bytes_per_sector;
+    uint8_t sec_per_cl = fs->bpb.sectors_per_cluster;
+    uint16_t reserved = fs->bpb.reserved_sectors;
+    uint8_t fats = fs->bpb.num_fats;
+    uint32_t total_sec = fs->bpb.total_sectors_16 ?
+                         fs->bpb.total_sectors_16 : fs->bpb.total_sectors_32;
+
+    // Те же поля ниже используются как делители — ноль у любого из них
+    // (валидная сигнатура 0xAA55 не исключает дальше мусорных полей сама
+    // по себе) привёл бы к делению на 0.
+    if (bytes_per_sec == 0 || sec_per_cl == 0 || fats == 0 || total_sec == 0) return -1;
+    if (bytes_per_sec != 512) return -1; // этот драйвер поддерживает только 512-байт секторы
+
+    if (total_sec > total_sectors) return -2; // BPB заявляет больше, чем реально на устройстве
+
+    // Кластер должен укладываться в один батч fs->dev-операции (см.
+    // XHCI_MSD_MAX_BATCH_BLOCKS у вызывающего) и в scratch_cluster ниже —
+    // 128 секторов (64KB) — щедрый верхний предел, спецификация FAT
+    // реалистично не требует больше.
+    if (sec_per_cl > 128) return -2;
+
+    uint32_t sectors_per_fat = fs->bpb.sectors_per_fat_16;
+    if (sectors_per_fat == 0) {
+        sectors_per_fat = read_le32(boot_sector+36); // FAT32
+    }
+    if (sectors_per_fat == 0) return -1;
+
+    uint32_t fat_start = reserved;
+    uint32_t root_dir_start = fat_start + fats * sectors_per_fat;
+    uint32_t data_start = root_dir_start +
+        (fs->bpb.root_entries * 32 + bytes_per_sec - 1) / bytes_per_sec;
+
+    if (data_start == 0 || data_start >= total_sec) return -2; // метаданные "съели" весь диск
+
+    uint32_t data_sec = total_sec - data_start;
+    uint32_t count_of_clusters = data_sec / sec_per_cl;
+
+    uint8_t fat_type = 16;
+    if (count_of_clusters < 4085) fat_type = 12;
+    else if (count_of_clusters < 65525) fat_type = 16;
+    else fat_type = 32;
+
+    // Метаданные — ЕДИНСТВЕННОЕ, что держим в ОЗУ целиком (см. fat.h).
+    if (data_start > FAT_META_MAX_SECTORS) return -3;
+
+    fs->fat_start = fat_start;
+    fs->root_dir_start = root_dir_start;
+    fs->data_start = data_start;
+    fs->root_entries = fs->bpb.root_entries;
+    fs->cluster_size = sec_per_cl;
+    fs->total_sectors = total_sec;
+    fs->fat_type = fat_type;
+    fs->sectors_per_fat = sectors_per_fat;
+    fs->max_cluster = count_of_clusters + 2;
+    fs->image_sectors = data_start;
+
+    fs->image = (uint8_t*)kmalloc((size_t)data_start * 512);
+    if (!fs->image) return -4;
+
+    if (fs->dev.read_blocks(fs->dev.ctx, 0, data_start, fs->image) != 0) {
+        fat_deinit(fs);
+        return -5;
+    }
+
+    if (fat_type == 32) {
+        fs->root_cluster = read_le32(boot_sector+44);
+    } else {
+        fs->root_cluster = 0;
+    }
+
+    uint32_t map_size = (data_start + 7) / 8;
+    fs->dirty_map = (uint8_t*)kmalloc(map_size);
+    if (!fs->dirty_map) { fat_deinit(fs); return -4; } // нехватка памяти, не "слишком большие метаданные"
+    fs->dirty_map_size = map_size;
+    memset(fs->dirty_map, 0, map_size);
+
+    fs->scratch_cluster = (uint8_t*)kmalloc((size_t)sec_per_cl * 512);
+    if (!fs->scratch_cluster) { fat_deinit(fs); return -4; }
+
+    if (fat_type == 32) {
+        // FAT32: корень — кластерная цепочка в data-регионе (см. разбор у
+        // fat_fs_t.root_image) — кэшируем её отдельно и целиком.
+        if (load_fat32_root_chain(fs) != 0) { fat_deinit(fs); return -5; } // OOM или ошибка чтения
+    }
+
+    return 0;
+}
+
+/* ---------- Поиск записей в каталоге ---------- */
 static fat_dir_entry_t* find_entry_in_dir(fat_fs_t *fs, uint32_t dir_cluster,
                                          const char name8_3[11],
                                          int is_root_fixed)
@@ -265,9 +382,11 @@ static fat_dir_entry_t* find_entry_in_dir(fat_fs_t *fs, uint32_t dir_cluster,
             if (match) return e;
         }
     } else {
+        // Только FAT32-корень — см. ГРАНИЦУ в fat_mount.h (подкаталоги
+        // этим путём никогда не обходятся).
         uint32_t cluster = dir_cluster;
         while (cluster >= 2) {
-            uint8_t *data = (uint8_t*)cluster_to_sector(fs, cluster);
+            uint8_t *data = root_chain_ptr(fs, cluster);
             if (!data) break;
             uint32_t entries_per_cluster = (fs->cluster_size * 512) / 32;
             for (uint32_t i = 0; i < entries_per_cluster; i++) {
@@ -333,10 +452,17 @@ int fat_read_file(fat_fs_t *fs, const char *filename, void *buffer, uint32_t siz
     uint8_t *dest = (uint8_t*)buffer;
     uint32_t remaining = size;
     uint32_t bytes_per_cluster = fs->cluster_size * 512;
+    // Содержимое файла читается НАПРЯМУЮ с устройства, кластер за
+    // кластером, прямо в буфер вызывающего — ни разу не копируется целиком
+    // в ОЗУ (см. разбор v0.9 в fat_init()/fat.h).
     while (remaining > 0 && cluster >= 2) {
-        const uint8_t *sector = cluster_to_sector(fs, cluster);
         uint32_t to_copy = (remaining < bytes_per_cluster) ? remaining : bytes_per_cluster;
-        memcpy(dest, sector, to_copy);
+        if (to_copy == bytes_per_cluster) {
+            if (read_cluster_raw(fs, cluster, dest) != 0) break;
+        } else {
+            if (read_cluster_raw(fs, cluster, fs->scratch_cluster) != 0) break;
+            memcpy(dest, fs->scratch_cluster, to_copy);
+        }
         dest += to_copy;
         remaining -= to_copy;
         if (remaining == 0) break;
@@ -408,6 +534,7 @@ int fat_readdir(fat_dir_t *dir, fat_dir_entry_t *entry) {
             memcpy(entry, e, sizeof(fat_dir_entry_t));
             return 1;
         } else {
+            // Только FAT32-корень — см. ГРАНИЦУ в fat_mount.h.
             if (dir->entries_left_in_dir == 0) {
                 uint32_t next = get_fat_entry(dir->fs, dir->current_cluster);
                 if (is_eoc(dir->fs, next)) return 0;
@@ -415,7 +542,7 @@ int fat_readdir(fat_dir_t *dir, fat_dir_entry_t *entry) {
                 dir->entry_index_in_cluster = 0;
                 dir->entries_left_in_dir = dir->entries_per_cluster;
             }
-            const uint8_t *data = cluster_to_sector(dir->fs, dir->current_cluster);
+            const uint8_t *data = root_chain_ptr(dir->fs, dir->current_cluster);
             if (!data) return 0;
             uint32_t offset = dir->entry_index_in_cluster * 32;
             fat_dir_entry_t *e = (fat_dir_entry_t*)(data + offset);
@@ -471,10 +598,11 @@ static fat_dir_entry_t* find_free_dir_entry(fat_fs_t *fs, uint32_t parent_cluste
         }
         return NULL;
     } else {
+        // Только FAT32-корень — см. ГРАНИЦУ в fat_mount.h.
         uint32_t cluster = parent_cluster;
         uint32_t epc = (fs->cluster_size * 512) / 32;
         while (cluster >= 2) {
-            uint8_t *data = (uint8_t*)cluster_to_sector(fs, cluster);
+            uint8_t *data = root_chain_ptr(fs, cluster);
             if (!data) break;
             for (uint32_t i = 0; i < epc; i++) {
                 fat_dir_entry_t *e = (fat_dir_entry_t*)(data + i*32);
@@ -484,7 +612,7 @@ static fat_dir_entry_t* find_free_dir_entry(fat_fs_t *fs, uint32_t parent_cluste
                     else {
                         uint32_t next = get_fat_entry(fs, cluster);
                         if (next >= 2 && !is_eoc(fs, next))
-                            *next_entry_ptr = (fat_dir_entry_t*)cluster_to_sector(fs, next);
+                            *next_entry_ptr = (fat_dir_entry_t*)root_chain_ptr(fs, next);
                         else if (e->name[0] == 0x00)
                             continue;
                     }
@@ -500,6 +628,14 @@ static fat_dir_entry_t* find_free_dir_entry(fat_fs_t *fs, uint32_t parent_cluste
 }
 
 /* ---------- Создание/удаление объектов ---------- */
+
+// Мутаторы ниже (fat_mkdir/fat_rm/fat_create_file/fat_write_file/
+// fat_append_file) для FAT12/16 фикс.корня отмечают изменённые секторы
+// метаданных через fat_mark_sector_dirty() — flush, как и раньше,
+// ответственность вызывающего (fat_sync(), см. его комментарий). Для
+// FAT32 (кэш root_image) никакой отдельной пометки не нужно: fat_sync()
+// сбрасывает ВЕСЬ кэш корня безусловно при каждом вызове — см.
+// root_chain_flush().
 int fat_mkdir(fat_fs_t *fs,
               uint32_t parent_cluster,
               const char *name)
@@ -552,130 +688,54 @@ int fat_mkdir(fat_fs_t *fs,
     else
         set_fat_entry(fs, new_cluster, 0x0FFFFFFF);
 
-    uint8_t *data =
-        (uint8_t*)cluster_to_sector(
-            fs,
-            new_cluster
-        );
+    // Новый кластер новой под-папки — НЕ часть кэшируемого корня, строим
+    // его "." / ".." в разовом scratch_cluster и пишем прямо на устройство
+    // (см. разбор в fat.h: только корень резидентен, под-папки — нет; а
+    // согласно ГРАНИЦЕ из fat_mount.h, внутрь этой под-папки после этого
+    // всё равно никто не сможет попасть через VFS).
+    uint8_t *data = fs->scratch_cluster;
+    memset(data, 0, fs->cluster_size * 512);
 
-    if (!data) {
+    fat_dir_entry_t *dot = (fat_dir_entry_t*)data;
+    memset(dot->name, ' ', 11);
+    dot->name[0] = '.';
+    dot->attr = 0x10;
+    write_le16((uint8_t*)&dot->first_cluster_low, new_cluster & 0xFFFF);
+    if (fs->fat_type == 32)
+        write_le16((uint8_t*)&dot->first_cluster_high, (new_cluster >> 16) & 0xFFFF);
+
+    fat_dir_entry_t *dotdot = (fat_dir_entry_t*)(data + 32);
+    memset(dotdot->name, ' ', 11);
+    dotdot->name[0] = '.';
+    dotdot->name[1] = '.';
+    dotdot->attr = 0x10;
+    write_le16((uint8_t*)&dotdot->first_cluster_low, parent_cluster & 0xFFFF);
+    if (fs->fat_type == 32)
+        write_le16((uint8_t*)&dotdot->first_cluster_high, (parent_cluster >> 16) & 0xFFFF);
+
+    if (write_cluster_raw(fs, new_cluster, data) != 0) {
         set_fat_entry(fs, new_cluster, 0);
         return -5;
     }
 
-    memset(data,
-           0,
-           fs->cluster_size * 512);
-
-    fat_dir_entry_t *dot =
-        (fat_dir_entry_t*)data;
-
-    memset(dot->name, ' ', 11);
-
-    dot->name[0] = '.';
-    dot->attr = 0x10;
-
-    write_le16(
-        (uint8_t*)&dot->first_cluster_low,
-        new_cluster & 0xFFFF
-    );
-
-    if (fs->fat_type == 32) {
-        write_le16(
-            (uint8_t*)&dot->first_cluster_high,
-            (new_cluster >> 16) & 0xFFFF
-        );
-    }
-
-    fat_dir_entry_t *dotdot =
-        (fat_dir_entry_t*)(data + 32);
-
-    memset(dotdot->name, ' ', 11);
-
-    dotdot->name[0] = '.';
-    dotdot->name[1] = '.';
-    dotdot->attr = 0x10;
-
-    write_le16(
-        (uint8_t*)&dotdot->first_cluster_low,
-        parent_cluster & 0xFFFF
-    );
-
-    if (fs->fat_type == 32) {
-        write_le16(
-            (uint8_t*)&dotdot->first_cluster_high,
-            (parent_cluster >> 16) & 0xFFFF
-        );
-    }
-
-    memset(free_entry,
-           0,
-           sizeof(fat_dir_entry_t));
-
-    memcpy(free_entry->name,
-           sname,
-           11);
-
+    memset(free_entry, 0, sizeof(fat_dir_entry_t));
+    memcpy(free_entry->name, sname, 11);
     free_entry->attr = 0x10;
+    write_le16((uint8_t*)&free_entry->first_cluster_low, new_cluster & 0xFFFF);
+    if (fs->fat_type == 32)
+        write_le16((uint8_t*)&free_entry->first_cluster_high, (new_cluster >> 16) & 0xFFFF);
+    write_le32((uint8_t*)&free_entry->file_size, 0);
 
-    write_le16(
-        (uint8_t*)&free_entry->first_cluster_low,
-        new_cluster & 0xFFFF
-    );
-
-    if (fs->fat_type == 32) {
-        write_le16(
-            (uint8_t*)&free_entry->first_cluster_high,
-            (new_cluster >> 16) & 0xFFFF
-        );
+    if (parent_cluster == 0 && fs->fat_type != 32) {
+        uint32_t parent_lba = fs->root_dir_start +
+            (((uint8_t*)free_entry - (fs->image + fs->root_dir_start * 512)) / 512);
+        fat_mark_sector_dirty(fs, parent_lba);
     }
-
-    write_le32(
-        (uint8_t*)&free_entry->file_size,
-        0
-    );
-
-    uint32_t parent_lba;
-
-    if (parent_cluster == 0 &&
-        fs->fat_type != 32)
-    {
-        parent_lba =
-            fs->root_dir_start +
-            (
-                (
-                    (uint8_t*)free_entry -
-                    (
-                        fs->image +
-                        fs->root_dir_start * 512
-                    )
-                ) / 512
-            );
-    }
-    else
-    {
-        parent_lba =
-            fs->data_start +
-            (parent_cluster - 2) *
-                fs->cluster_size +
-            (
-                (
-                    (uint8_t*)free_entry -
-                    cluster_to_sector(
-                        fs,
-                        parent_cluster
-                    )
-                ) / 512
-            );
-    }
-
-    fat_mark_sector_dirty(fs, parent_lba);
+    // иначе (FAT32-корень): fat_sync() сбросит весь root_image целиком.
 
     // free_entry был концом каталога (0x00) и теперь занят — next_entry
     // становится новым концом, если он ещё не отмечен таковым.
-    if (next_entry &&
-        next_entry->name[0] != 0x00)
-    {
+    if (next_entry && next_entry->name[0] != 0x00) {
         next_entry->name[0] = 0x00;
     }
 
@@ -730,20 +790,17 @@ int fat_rm(fat_fs_t *fs,
         ((uint32_t)high << 16) | low;
 
     // Каталог — проверяем всю цепочку кластеров: удаление непустого
-    // каталога запрещено.
+    // каталога запрещено. Это НЕ корень (удаляемый объект — под-папка
+    // внутри корня), так что читаем через разовый scratch, не кэш.
     if (entry->attr & 0x10) {
         uint32_t dir_cluster = cluster;
 
         while (dir_cluster >= 2) {
 
-            uint8_t *data =
-                (uint8_t*)cluster_to_sector(
-                    fs,
-                    dir_cluster
-                );
-
-            if (!data)
+            if (read_cluster_raw(fs, dir_cluster, fs->scratch_cluster) != 0)
                 return -4;
+
+            uint8_t *data = fs->scratch_cluster;
 
             uint32_t epc =
                 (fs->cluster_size * 512) / 32;
@@ -795,41 +852,12 @@ int fat_rm(fat_fs_t *fs,
 
     entry->name[0] = 0xE5; // lazy-delete marker
 
-    uint32_t parent_lba;
-
-    if (parent_cluster == 0 &&
-        fs->fat_type != 32)
-    {
-        parent_lba =
-            fs->root_dir_start +
-            (
-                (
-                    (uint8_t*)entry -
-                    (
-                        fs->image +
-                        fs->root_dir_start * 512
-                    )
-                ) / 512
-            );
+    if (parent_cluster == 0 && fs->fat_type != 32) {
+        uint32_t parent_lba = fs->root_dir_start +
+            (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
+        fat_mark_sector_dirty(fs, parent_lba);
     }
-    else
-    {
-        parent_lba =
-            fs->data_start +
-            (parent_cluster - 2) *
-                fs->cluster_size +
-            (
-                (
-                    (uint8_t*)entry -
-                    cluster_to_sector(
-                        fs,
-                        parent_cluster
-                    )
-                ) / 512
-            );
-    }
-
-    fat_mark_sector_dirty(fs, parent_lba);
+    // иначе (FAT32-корень): fat_sync() сбросит весь root_image целиком.
 
     return 0;
 }
@@ -853,13 +881,12 @@ int fat_create_file(fat_fs_t *fs, uint32_t parent_cluster, const char *name) {
     write_le16((uint8_t*)&free_entry->first_cluster_low, 0);
     write_le32((uint8_t*)&free_entry->file_size, 0);
 
-    uint32_t parent_lba;
-    if (parent_cluster == 0 && fs->fat_type != 32)
-        parent_lba = fs->root_dir_start + ((uint8_t*)free_entry - (fs->image + fs->root_dir_start*512))/512;
-    else
-        parent_lba = fs->data_start + (parent_cluster - 2) * fs->cluster_size
-                     + ((uint8_t*)free_entry - cluster_to_sector(fs, parent_cluster))/512;
-    fat_mark_sector_dirty(fs, parent_lba);
+    if (parent_cluster == 0 && fs->fat_type != 32) {
+        uint32_t parent_lba = fs->root_dir_start +
+            (((uint8_t*)free_entry - (fs->image + fs->root_dir_start*512))/512);
+        fat_mark_sector_dirty(fs, parent_lba);
+    }
+    // иначе (FAT32-корень): fat_sync() сбросит весь root_image целиком.
 
     if (next_entry && next_entry->name[0] != 0x00)
         next_entry->name[0] = 0x00;
@@ -867,36 +894,46 @@ int fat_create_file(fat_fs_t *fs, uint32_t parent_cluster, const char *name) {
     return 0;
 }
 
-/* ======== Финальная синхронизация ======== */
-void fat_flush(fat_fs_t *fs) {
-    uint8_t disk_sector[512];
-    uint32_t total = fs->total_sectors;
-    uint32_t written = 0;
-    printf("\nFlushing FAT to disk... ");
-    for (uint32_t lba = 0; lba < total; lba++) {
-        if (!(fs->dirty_map[lba >> 3] & (1 << (lba & 7))))
-            continue;
-        uint8_t *mem_sector = fs->image + lba * 512;
-        if (disk_read_sectors(lba, 1, disk_sector) == 0) {
-            int changed = 0;
-            for (int i = 0; i < 512; i++) {
-                if (mem_sector[i] != disk_sector[i]) {
-                    changed = 1;
-                    break;
-                }
+/* ======== Синхронизация с устройством ========
+ * Метаданные (fs->image) — отложенная dirty-bitmap синхронизация, как и
+ * раньше, но теперь только по image_sectors (сама область метаданных), не
+ * по всему диску — содержимое файлов сюда больше не попадает (пишется
+ * напрямую и немедленно, см. fat_write_file()/fat_append_file()). Кэш
+ * корня (FAT32) синкается безусловно целиком при каждом вызове — см.
+ * root_chain_flush(). Вызывающий (fat_mount.c) делает это сразу после
+ * каждой мутации — REAL-TIME-запись, см. fat_mount.h. */
+void fat_sync(fat_fs_t *fs) {
+    if (!fs) return;
+
+    if (fs->dirty_map) {
+        uint32_t total = fs->image_sectors;
+        uint32_t lba = 0;
+        while (lba < total) {
+            if (!(fs->dirty_map[lba >> 3] & (1 << (lba & 7)))) { lba++; continue; }
+
+            uint32_t run_start = lba;
+            uint32_t run_len = 0;
+            while (lba < total && (fs->dirty_map[lba >> 3] & (1 << (lba & 7)))) {
+                run_len++;
+                lba++;
             }
-            if (changed && disk_write_sectors(lba, 1, mem_sector) == 0)
-                written++;
-        } else {
-            if (disk_write_sectors(lba, 1, mem_sector) == 0)
-                written++;
+
+            fs->dev.write_blocks(fs->dev.ctx, run_start, run_len,
+                                  fs->image + (uint64_t)run_start * 512);
         }
+        memset(fs->dirty_map, 0, fs->dirty_map_size);
     }
-    memset(fs->dirty_map, 0, fs->dirty_map_size);
-    printf("done (%u sectors written).\n", written);
+
+    if (fs->fat_type == 32 && fs->root_image) {
+        root_chain_flush(fs);
+    }
 }
 
-/* ======== ЗАПИСЬ В ФАЙЛ ======== */
+/* ======== ЗАПИСЬ В ФАЙЛ ========
+ * Содержимое файла — в отличие от метаданных и корня — НИКОГДА не
+ * копируется в ОЗУ целиком: каждый кластер читается/пишется напрямую на
+ * устройство по месту, см. read_cluster_raw()/write_cluster_raw() выше и
+ * разбор в fat.h. */
 
 static uint32_t fat_alloc_cluster(fat_fs_t *fs, uint32_t prev_cluster) {
     uint32_t new_cluster = find_free_cluster(fs);
@@ -910,11 +947,12 @@ static uint32_t fat_alloc_cluster(fat_fs_t *fs, uint32_t prev_cluster) {
         set_fat_entry(fs, prev_cluster, new_cluster);
     }
 
-    uint8_t *cluster_data = (uint8_t*)cluster_to_sector(fs, new_cluster);
-    for (uint32_t i = 0; i < fs->cluster_size * 512; i++) {
-        cluster_data[i] = 0;
+    memset(fs->scratch_cluster, 0, fs->cluster_size * 512);
+    if (write_cluster_raw(fs, new_cluster, fs->scratch_cluster) != 0) {
+        set_fat_entry(fs, new_cluster, 0);
+        if (prev_cluster >= 2) set_fat_entry(fs, prev_cluster, 0);
+        return 0;
     }
-    mark_cluster_dirty(fs, new_cluster);
 
     return new_cluster;
 }
@@ -945,9 +983,11 @@ int fat_write_file(fat_fs_t *fs, const char *filename, const void *buffer, uint3
             write_le16((uint8_t*)&entry->first_cluster_high, 0);
         }
         write_le32((uint8_t*)&entry->file_size, 0);
-        uint32_t dir_lba = fs->root_dir_start +
-            (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
-        fat_mark_sector_dirty(fs, dir_lba);
+        if (fs->fat_type != 32) {
+            uint32_t dir_lba = fs->root_dir_start +
+                (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
+            fat_mark_sector_dirty(fs, dir_lba);
+        }
         return 0;
     }
 
@@ -973,12 +1013,16 @@ int fat_write_file(fat_fs_t *fs, const char *filename, const void *buffer, uint3
     cluster = first_cluster;
 
     while (remaining > 0 && cluster >= 2) {
-        uint8_t *dst = (uint8_t*)cluster_to_sector(fs, cluster);
         uint32_t to_copy = remaining > bytes_per_cluster ? bytes_per_cluster : remaining;
-        for (uint32_t i = 0; i < to_copy; i++) {
-            dst[i] = src[size - remaining + i];
+        if (to_copy == bytes_per_cluster) {
+            write_cluster_raw(fs, cluster, src + (size - remaining));
+        } else {
+            // Последний частичный кластер — alloc уже обнулил его целиком,
+            // дописываем только реальные байты через scratch.
+            memset(fs->scratch_cluster, 0, bytes_per_cluster);
+            memcpy(fs->scratch_cluster, src + (size - remaining), to_copy);
+            write_cluster_raw(fs, cluster, fs->scratch_cluster);
         }
-        mark_cluster_dirty(fs, cluster);
         remaining -= to_copy;
         cluster = get_fat_entry(fs, cluster);
     }
@@ -989,9 +1033,12 @@ int fat_write_file(fat_fs_t *fs, const char *filename, const void *buffer, uint3
     }
     write_le32((uint8_t*)&entry->file_size, size);
 
-    uint32_t dir_lba = fs->root_dir_start +
-        (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
-    fat_mark_sector_dirty(fs, dir_lba);
+    if (fs->fat_type != 32) {
+        uint32_t dir_lba = fs->root_dir_start +
+            (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
+        fat_mark_sector_dirty(fs, dir_lba);
+    }
+    // иначе (FAT32-корень): fat_sync() сбросит весь root_image целиком.
 
     return 0;
 }
@@ -1031,12 +1078,14 @@ int fat_append_file(fat_fs_t *fs, const char *filename, const void *buffer, uint
     uint32_t src_offset = 0;
 
     if (free_in_last > 0 && last_cluster >= 2) {
-        uint8_t *dst = (uint8_t*)cluster_to_sector(fs, last_cluster);
+        // Дозапись в хвост УЖЕ существующего кластера — там есть старые
+        // валидные байты перед offset_in_last, их нужно сохранить: читаем
+        // кластер целиком, накладываем новые байты, пишем обратно.
         uint32_t to_copy = size > free_in_last ? free_in_last : size;
-        for (uint32_t i = 0; i < to_copy; i++) {
-            dst[offset_in_last + i] = src[i];
+        if (read_cluster_raw(fs, last_cluster, fs->scratch_cluster) == 0) {
+            memcpy(fs->scratch_cluster + offset_in_last, src, to_copy);
+            write_cluster_raw(fs, last_cluster, fs->scratch_cluster);
         }
-        mark_cluster_dirty(fs, last_cluster);
         src_offset = to_copy;
     }
 
@@ -1044,9 +1093,11 @@ int fat_append_file(fat_fs_t *fs, const char *filename, const void *buffer, uint
         uint32_t new_cluster = fat_alloc_cluster(fs, last_cluster >= 2 ? last_cluster : 0);
         if (new_cluster == 0) {
             write_le32((uint8_t*)&entry->file_size, old_size + src_offset);
-            uint32_t dir_lba = fs->root_dir_start +
-                (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
-            fat_mark_sector_dirty(fs, dir_lba);
+            if (fs->fat_type != 32) {
+                uint32_t dir_lba = fs->root_dir_start +
+                    (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
+                fat_mark_sector_dirty(fs, dir_lba);
+            }
             return -1;
         }
 
@@ -1058,55 +1109,26 @@ int fat_append_file(fat_fs_t *fs, const char *filename, const void *buffer, uint
         }
         last_cluster = new_cluster;
 
-        uint8_t *dst = (uint8_t*)cluster_to_sector(fs, new_cluster);
         uint32_t to_copy = (size - src_offset) > bytes_per_cluster ? bytes_per_cluster : (size - src_offset);
-        for (uint32_t i = 0; i < to_copy; i++) {
-            dst[i] = src[src_offset + i];
+        if (to_copy == bytes_per_cluster) {
+            write_cluster_raw(fs, new_cluster, src + src_offset);
+        } else {
+            // Новый кластер уже обнулён fat_alloc_cluster() — дописываем
+            // только реальные байты через scratch.
+            memset(fs->scratch_cluster, 0, bytes_per_cluster);
+            memcpy(fs->scratch_cluster, src + src_offset, to_copy);
+            write_cluster_raw(fs, new_cluster, fs->scratch_cluster);
         }
-        mark_cluster_dirty(fs, new_cluster);
         src_offset += to_copy;
     }
 
     write_le32((uint8_t*)&entry->file_size, new_size);
-    uint32_t dir_lba = fs->root_dir_start +
-        (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
-    fat_mark_sector_dirty(fs, dir_lba);
+    if (fs->fat_type != 32) {
+        uint32_t dir_lba = fs->root_dir_start +
+            (((uint8_t*)entry - (fs->image + fs->root_dir_start * 512)) / 512);
+        fat_mark_sector_dirty(fs, dir_lba);
+    }
+    // иначе (FAT32-корень): fat_sync() сбросит весь root_image целиком.
 
     return 0;
-}
-
-/* ======== СИНХРОНИЗАЦИЯ ОДНОГО ГРЯЗНОГО СЕКТОРА ======== */
-void fat_sync(fat_fs_t *fs) {
-    if (!fs || !fs->dirty_map) return;
-    
-    uint8_t disk_sector[512];
-    uint32_t total = fs->total_sectors;
-    uint32_t written = 0;
-    
-    for (uint32_t lba = 0; lba < total; lba++) {
-        if (!(fs->dirty_map[lba >> 3] & (1 << (lba & 7))))
-            continue;
-            
-        uint8_t *mem_sector = fs->image + lba * 512;
-        if (disk_read_sectors(lba, 1, disk_sector) == 0) {
-            int changed = 0;
-            for (int i = 0; i < 512; i++) {
-                if (mem_sector[i] != disk_sector[i]) {
-                    changed = 1;
-                    break;
-                }
-            }
-            if (changed && disk_write_sectors(lba, 1, mem_sector) == 0)
-                written++;
-        } else {
-            if (disk_write_sectors(lba, 1, mem_sector) == 0)
-                written++;
-        }
-    }
-    
-    memset(fs->dirty_map, 0, fs->dirty_map_size);
-    
-    if (written > 0) {
-        printf("[FAT] Synced %u sectors\n", written);
-    }
 }

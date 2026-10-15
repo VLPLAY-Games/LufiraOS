@@ -338,14 +338,6 @@ void _start(BootInfo* bi) {
         LOG_DONE_WARN("/tmp (ramfs) mount failed");
     }
 
-    LOG_PENDING("Initializing keyboard...");
-    keyboard_init();
-    LOG_DONE_OK("Keyboard %s", keyboard_is_initialized() ? "ready" : "not found");
-    
-    LOG_PENDING("Initializing mouse...");
-    mouse_init();
-    LOG_DONE_OK("Mouse %s", mouse_is_initialized() ? "ready" : "not found");
-
     // pcspeaker_init();
 
     pci_init();
@@ -360,9 +352,7 @@ void _start(BootInfo* bi) {
 
     asm volatile("sti");
     irq_enable(0);  // таймер
-    irq_enable(1);  // клавиатура
-    irq_enable(2);
-    irq_enable(12); // мышь
+    irq_enable(2);  // cascade (нужен для IRQ8-15, в т.ч. мыши — IRQ12)
     cpu_mark_interrupts_active();
 
     // v0.8-мост, пункт 2 (console.c): включаем двойную буферизацию здесь,
@@ -373,7 +363,31 @@ void _start(BootInfo* bi) {
     console_enable_double_buffering();
 
     // Требует уже тикающего таймера (pit_wait_ms() внутри сброса контроллера).
+    //
+    // ВАЖНО: xHCI (USB-клавиатура/мышь через usb_hid.c) теперь инициализируется
+    // ПЕРЕД легаси PS/2 (keyboard_init()/mouse_init() ниже), а не после —
+    // раньше было наоборот, и это было не просто "не по порядку": PS/2-мышь
+    // инициализировалась САМОЙ ПЕРВОЙ в kernel_main(), до sti и до xhci_init(),
+    // и при отсутствии физической PS/2-мыши (обычный случай для usb-только
+    // железа) её безлимитные busy-wait'ы на ответ контроллера вешали ядро
+    // НАСМЕРТЬ — система не доходила даже до xhci_init(), который и поднял
+    // бы настоящую (USB) мышь. Этот зависон исправлен отдельно, таймаутами
+    // в mouse.c (см. PS2_TIMEOUT_ITERS там) — сам по себе отсутствующий
+    // PS/2-девайс больше никогда не вешает загрузку, независимо от порядка.
+    // Но порядок всё равно логичнее поменять: xHCI (современный, более
+    // вероятный источник реальной клавиатуры/мыши) — первым, легаси PS/2 —
+    // вторым, как единственный фоллбэк, а не как блокирующий гейт перед USB.
     xhci_init();
+
+    LOG_PENDING("Initializing keyboard...");
+    keyboard_init();
+    irq_enable(1);  // клавиатура (PS/2) — включаем маску именно тут, не раньше
+    LOG_DONE_OK("Keyboard %s", keyboard_is_initialized() ? "ready" : "not found");
+
+    LOG_PENDING("Initializing mouse...");
+    mouse_init();
+    irq_enable(12); // мышь (PS/2)
+    LOG_DONE_OK("Mouse %s", mouse_is_initialized() ? "ready" : "not found");
 
     // net_init() (RTL8139/E1000/E1000E + статическая настройка IP как
     // фоллбэк) — по той же причине, что и xhci_init(), требует уже
