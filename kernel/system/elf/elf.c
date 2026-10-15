@@ -14,6 +14,24 @@
 #define PAGE_PS     0x80    // Page size (2MB / 1GB)
 #endif
 
+// Как invlpg() в paging.c (static там, не экспортирован) — та же функция,
+// своя копия здесь по той же причине, по которой map_page_in_space() ниже
+// вообще держит отдельную от paging.c копию huge-page-split логики (см. её
+// комментарий). НАЙДЕННЫЙ БАГ: эта копия, в отличие от map_page()/
+// map_page_in_pml4() (paging.c), нигде не звала invlpg() после расщепления
+// huge-страницы — расщепление меняет PDE с 2MB-страницы на указатель на PT,
+// но TLB мог успеть закэшировать старую (huge) трансляцию на этот же
+// виртуальный адрес ДО расщепления (например, если pml4_phys уже активен в
+// CR3 вызывающего — сама map_page_in_space() документирует это как
+// обязанность вызывающего, но не защищается сама). Без явного invlpg CPU
+// мог продолжать использовать старую запись вместо новой PT — в точности
+// симптом "RSVD=1 page fault по адресу, чья PTE при проверке после краша
+// оказывается валидной" (воспроизведено живьём на legacy BIOS boot, см.
+// разбор в истории изменений).
+static inline void elf_invlpg(uint64_t addr) {
+    asm volatile ("invlpg (%0)" : : "r" (addr) : "memory");
+}
+
 int elf_validate(const elf64_header_t *header) {
     if (header->magic != ELF_MAGIC) {
         printf("[ELF] Invalid magic: 0x%x\n", header->magic);
@@ -170,6 +188,11 @@ static int map_page_in_space(uint64_t pml4_phys,
             PAGE_PRESENT |
             PAGE_WRITE |
             PAGE_USER;
+
+        // Сбрасываем закэшированную huge-трансляцию для ВСЕГО 2MB-диапазона
+        // (virt выровненный вниз до 2MB) — см. комментарий у elf_invlpg()
+        // выше и тот же приём в map_page_in_pml4() (paging.c).
+        elf_invlpg(virt & ~0x1FFFFFULL);
     }
 
     /*
@@ -211,6 +234,10 @@ static int map_page_in_space(uint64_t pml4_phys,
         (phys & 0x000FFFFFFFFFF000ULL) |
         pte_flags |
         PAGE_PRESENT;
+
+    // См. комментарий у elf_invlpg() выше — тот же риск стэйл-TLB, теперь
+    // на уровне конкретной страницы (не только 2MB-huge-расщепления).
+    elf_invlpg(virt);
 
     return 0;
 }
@@ -263,6 +290,10 @@ static int set_page_flags_in_space(uint64_t pml4_phys,
         (flags & 0xFFFULL) |
         (flags & PAGE_NX) |
         PAGE_PRESENT;
+
+    // См. комментарий у elf_invlpg() выше — меняем флаги уже существующей
+    // трансляции, TLB мог закэшировать старые.
+    elf_invlpg(virt);
 
     return 0;
 }
