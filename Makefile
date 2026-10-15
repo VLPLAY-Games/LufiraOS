@@ -111,7 +111,10 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/drivers/usb/usb_hid.c \
 	$(KERNEL_DIR)/drivers/input/input.c \
 	$(KERNEL_DIR)/drivers/net/rtl8139.c \
+	$(KERNEL_DIR)/drivers/net/e1000.c \
+	$(KERNEL_DIR)/drivers/net/e1000e.c \
 	$(KERNEL_DIR)/net/net.c \
+	$(KERNEL_DIR)/net/dhcp.c \
 	$(KERNEL_DIR)/net/eth.c \
 	$(KERNEL_DIR)/net/arp.c \
 	$(KERNEL_DIR)/net/ip.c \

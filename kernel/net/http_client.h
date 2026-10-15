@@ -35,6 +35,7 @@
 #define HTTP_FETCH_EHTTP    (-5) // ответ сервера не разобрался как HTTP
 #define HTTP_FETCH_ENOSPC   (-6) // тело ответа больше out_cap
 #define HTTP_FETCH_ENODEV   (-7) // сетевая карта не найдена
+#define HTTP_FETCH_EBUSY    (-8) // сеть занята другим fetch'ом дольше бюджета ожидания (net_lock_acquire(), net.h)
 
 // Скачивает url (http:// или https://) целиком в out_buf (до out_cap
 // байт). Возвращает длину тела (>=0, <= out_cap) при успехе; status_out

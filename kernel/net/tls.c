@@ -1,13 +1,14 @@
 #include "tls.h"
 #include "tcp.h"
+#include "net.h"
 #include "crypto/sha256.h"
 #include "crypto/hmac.h"
 #include "crypto/aes_gcm.h"
 #include "crypto/x25519.h"
 #include "crypto/bignum.h"
 #include "crypto/rsa_verify.h"
-#include "drivers/net/rtl8139.h"
 #include "system/timer/pit.h"
+#include "system/process/process.h"
 #include "system/devmode/devmode.h"
 #include "lib/string.h"
 
@@ -44,7 +45,8 @@
  *
  * Как и tcp_connect()/dns_resolve(): блокирующая функция с циклом "пока
  * не вышел бюджет тиков PIT — опросить карту, проверить состояние,
- * pit_wait_ms(1)". Никакой новой модели конкурентности.
+ * process_sleep(1)" (см. net_lock_acquire() в net.h про то, почему не
+ * pit_wait_ms(1)). Никакой новой модели конкурентности.
  *
  * tcp_recv_poll() отдаёт один кусок (до ~1460 байт) без склейки, а
  * TLS-запись может быть до ~16КБ и приходит несколькими кусками, границы
@@ -384,7 +386,7 @@ static int tls_read_record(uint32_t budget_ticks, uint8_t *out_type,
                 return 0;
             }
             if (pit_get_ticks() >= deadline) return 0;
-            pit_wait_ms(1);
+            process_sleep(1); // НАЙДЕННЫЙ БАГ — см. net_lock_acquire() в net.h
         }
     }
 }
@@ -741,7 +743,7 @@ static void tls_reset_state(void) {
 }
 
 int tls_connect(uint32_t ip, uint16_t port, const char *sni_hostname) {
-    if (!rtl8139_found() || !sni_hostname) return -1;
+    if (!net_found() || !sni_hostname) return -1;
 
     tls_reset_state();
 

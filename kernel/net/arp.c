@@ -1,8 +1,8 @@
 #include "arp.h"
 #include "net.h"
 #include "eth.h"
-#include "drivers/net/rtl8139.h"
 #include "system/timer/pit.h"
+#include "system/process/process.h"
 #include "lib/string.h"
 
 #define ARP_CACHE_SIZE      16
@@ -72,7 +72,7 @@ static void arp_send_request(uint32_t target_ip) {
     pkt.hlen = 6;
     pkt.plen = 4;
     pkt.oper = htons(ARP_OP_REQUEST);
-    memcpy(pkt.sha, rtl8139_get_mac(), 6);
+    memcpy(pkt.sha, net_get_mac(), 6);
     ip_to_bytes(net_get_config()->our_ip, pkt.spa);
     memset(pkt.tha, 0, 6);
     ip_to_bytes(target_ip, pkt.tpa);
@@ -81,19 +81,23 @@ static void arp_send_request(uint32_t target_ip) {
 }
 
 int arp_resolve(uint32_t ip, uint8_t out_mac[6]) {
-    if (!rtl8139_found()) return -1;
+    if (!net_found()) return -1;
     if (arp_cache_lookup(ip, out_mac) == 0) return 0;
 
     arp_send_request(ip);
 
     // Таймаут считаем в тиках PIT (pit_get_ticks()), не итерациями цикла:
-    // pit_wait_ms(1) округляет вверх до 10мс, так что счёт итерациями
+    // process_sleep(1) округляет вверх до 10мс, так что счёт итерациями
     // растянул бы таймаут в 10x (тот же units-баг уже был в USB MSD).
     uint64_t deadline = pit_get_ticks() + 200; // ~2000мс
     while (pit_get_ticks() < deadline) {
-        rtl8139_poll();
+        net_poll();
         if (arp_cache_lookup(ip, out_mac) == 0) return 0;
-        pit_wait_ms(1);
+        // process_sleep(1), а не pit_wait_ms(1) — НАЙДЕННЫЙ БАГ, см.
+        // подробный комментарий у net_lock_acquire() в net.h: без этого
+        // ARP-резолв (как и весь остальной сетевой стек) держал процессор
+        // ВСЕЙ системы на себе, ни один другой процесс не мог выполниться.
+        process_sleep(1);
     }
     return -1;
 }
@@ -120,7 +124,7 @@ void arp_receive(const uint8_t *payload, uint16_t len) {
     reply.hlen = 6;
     reply.plen = 4;
     reply.oper = htons(ARP_OP_REPLY);
-    memcpy(reply.sha, rtl8139_get_mac(), 6);
+    memcpy(reply.sha, net_get_mac(), 6);
     memcpy(reply.spa, pkt->tpa, 4);
     memcpy(reply.tha, pkt->sha, 6);
     memcpy(reply.tpa, pkt->spa, 4);

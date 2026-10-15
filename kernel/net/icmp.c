@@ -1,8 +1,8 @@
 #include "icmp.h"
 #include "net.h"
 #include "ip.h"
-#include "drivers/net/rtl8139.h"
 #include "system/timer/pit.h"
+#include "system/process/process.h"
 #include "lib/string.h"
 
 #define ICMP_PING_PAYLOAD_LEN 32
@@ -56,14 +56,14 @@ int icmp_ping_wait(uint32_t timeout_ms, uint32_t *out_rtt_ms) {
     uint64_t deadline = pit_get_ticks() + (timeout_ms + 9) / 10;
 
     while (pit_get_ticks() < deadline) {
-        rtl8139_poll();
+        net_poll();
         if (g_ping.received) {
             uint64_t ticks = g_ping.recv_tick - g_ping.send_tick;
             if (out_rtt_ms) *out_rtt_ms = (uint32_t)(ticks * 10);
             g_ping.waiting = 0;
             return 0;
         }
-        pit_wait_ms(1);
+        process_sleep(1); // НАЙДЕННЫЙ БАГ — см. net_lock_acquire() в net.h
     }
 
     g_ping.waiting = 0;

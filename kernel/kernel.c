@@ -15,6 +15,7 @@
 #include "drivers/disk/disk.h"
 #include "drivers/usb/xhci.h"
 #include "net/net.h"
+#include "net/dhcp.h"
 #include "system/cpu/gdt.h"
 #include "system/cpu/idt.h"
 #include "system/cpu/tss.h"
@@ -374,9 +375,26 @@ void _start(BootInfo* bi) {
     // Требует уже тикающего таймера (pit_wait_ms() внутри сброса контроллера).
     xhci_init();
 
-    // net_init() (RTL8139 + статическая настройка IP) — по той же причине,
-    // что и xhci_init(), требует уже тикающих таймерных прерываний.
+    // net_init() (RTL8139/E1000/E1000E + статическая настройка IP как
+    // фоллбэк) — по той же причине, что и xhci_init(), требует уже
+    // тикающих таймерных прерываний.
     net_init();
+
+    // DHCP поверх статического дефолта — v0.9: пробуем получить настоящую
+    // аренду (IP/маску/шлюз/DNS), если в сети есть DHCP-сервер (включая
+    // встроенный в QEMU SLIRP); при неудаче (нет сервера, таймаут, NAK)
+    // net_get_config() просто остаётся на статическом дефолте из net.c —
+    // тот же принцип "не упасть, деградировать на запасной вариант", что и
+    // у остального сетевого стека. ~4с бюджет — заметно короче, чем
+    // HTTP_TOTAL_BUDGET_TICKS у настоящего fetch (http_client.c), чтобы не
+    // раздувать время загрузки, когда DHCP-сервера просто нет.
+    if (net_found()) {
+        if (dhcp_start(4000) == 0) {
+            DLOG("[DHCP] lease applied\n");
+        } else {
+            DLOG("[DHCP] no lease, staying on static default\n");
+        }
+    }
 
     // v0.9, фаза 1 — пробует HDA (hda.c) первым, затем AC'97 (ac97.c) —
     // тот же disk.c-образный диспетчер, что и у AHCI/NVMe выше, см. sound.c.

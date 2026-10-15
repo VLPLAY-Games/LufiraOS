@@ -60,7 +60,7 @@ void command_ifconfig(const char *args) {
         return;
     }
 
-    net_set_config(ip, mask, gw);
+    net_set_config(ip, mask, gw, cfg->dns_server);
     printf("\nifconfig: updated\n");
 }
 

@@ -1,8 +1,8 @@
 #include "dns.h"
 #include "udp.h"
 #include "net.h"
-#include "drivers/net/rtl8139.h"
 #include "system/timer/pit.h"
+#include "system/process/process.h"
 #include "lib/string.h"
 
 #define DNS_PORT                53
@@ -51,7 +51,7 @@ static int dns_skip_name(const uint8_t *buf, int pos, int buf_len) {
 }
 
 int dns_resolve(const char *hostname, uint32_t *out_ip) {
-    if (!rtl8139_found()) return -1;
+    if (!net_found()) return -1;
     if (!hostname || !hostname[0] || !out_ip) return -1;
 
     uint16_t txn_id = g_next_dns_txn_id++;
@@ -127,7 +127,7 @@ int dns_resolve(const char *hostname, uint32_t *out_ip) {
             // ID не совпал/не ответ - не наш пакет (вперемешку мог прийти
             // поздний ответ на предыдущий резолв) - продолжаем ждать.
         }
-        pit_wait_ms(1);
+        process_sleep(1); // НАЙДЕННЫЙ БАГ — см. net_lock_acquire() в net.h
     }
 
     udp_stop_listen();

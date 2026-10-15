@@ -2,7 +2,6 @@
 #include "net.h"
 #include "ip.h"
 #include "eth.h"
-#include "drivers/net/rtl8139.h"
 #include "lib/string.h"
 
 // DNS-запросы/ответы (единственный сегодняшний потребитель, см. dns.c) —
@@ -70,7 +69,7 @@ void udp_stop_listen(void) {
 }
 
 int udp_recv_poll(uint32_t *out_src_ip, uint16_t *out_src_port, uint8_t **out_ptr, uint16_t *out_len) {
-    rtl8139_poll();
+    net_poll();
     if (g_udp.has_data) {
         if (out_src_ip) *out_src_ip = g_udp.src_ip;
         if (out_src_port) *out_src_port = g_udp.src_port;

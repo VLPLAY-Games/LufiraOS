@@ -2,8 +2,8 @@
 #include "net.h"
 #include "ip.h"
 #include "eth.h"
-#include "drivers/net/rtl8139.h"
 #include "system/timer/pit.h"
+#include "system/process/process.h"
 #include "lib/string.h"
 #include "system/devmode/devmode.h"
 
@@ -174,7 +174,7 @@ static void tcp_retransmit_if_needed(void) {
 }
 
 int tcp_connect(uint32_t remote_ip, uint16_t remote_port) {
-    if (!rtl8139_found()) return -1;
+    if (!net_found()) return -1;
 
     g_conn.state = TCP_STATE_CLOSED;
     g_conn.remote_ip = remote_ip;
@@ -194,11 +194,11 @@ int tcp_connect(uint32_t remote_ip, uint16_t remote_port) {
 
     uint64_t deadline = pit_get_ticks() + 300; // ~3000мс общий бюджет, включая ретрансмиссии SYN
     while (pit_get_ticks() < deadline) {
-        rtl8139_poll();
+        net_poll();
         tcp_retransmit_if_needed();
         if (g_conn.state == TCP_STATE_ESTABLISHED) return 0;
         if (g_conn.state == TCP_STATE_CLOSED) return -1; // RST или исчерпаны ретраи
-        pit_wait_ms(1);
+        process_sleep(1); // НАЙДЕННЫЙ БАГ — см. net_lock_acquire() в net.h
     }
 
     g_conn.state = TCP_STATE_CLOSED;
@@ -220,10 +220,10 @@ int tcp_send(const void *data, uint16_t len) {
         // подтверждён (или окончательно не сдались) — см. tcp_retransmit_if_needed().
         uint64_t deadline = pit_get_ticks() + 300; // ~3000мс бюджет на ЭТОТ сегмент
         while ((int32_t)(g_conn.peer_acked_seq - end_seq) < 0 && pit_get_ticks() < deadline) {
-            rtl8139_poll();
+            net_poll();
             tcp_retransmit_if_needed();
             if (g_conn.state == TCP_STATE_CLOSED) return -1;
-            pit_wait_ms(1);
+            process_sleep(1); // НАЙДЕННЫЙ БАГ — см. net_lock_acquire() в net.h
         }
         if ((int32_t)(g_conn.peer_acked_seq - end_seq) < 0) {
             g_conn.state = TCP_STATE_CLOSED;
@@ -237,7 +237,7 @@ int tcp_send(const void *data, uint16_t len) {
 }
 
 int tcp_recv_poll(uint8_t **out_ptr, uint16_t *out_len) {
-    rtl8139_poll();
+    net_poll();
 
     // Повторный вызов до tcp_ack_consumed() обязан отдать тот же кусок:
     // вызывающий мог уже скопировать прошлую длину, "выросшая" дала бы
@@ -288,9 +288,9 @@ void tcp_close(void) {
 
     uint64_t deadline = pit_get_ticks() + 100; // best-effort ~1000мс, включая ретрансмиссии FIN
     while (pit_get_ticks() < deadline && g_conn.state != TCP_STATE_CLOSED) {
-        rtl8139_poll();
+        net_poll();
         tcp_retransmit_if_needed();
-        pit_wait_ms(1);
+        process_sleep(1); // НАЙДЕННЫЙ БАГ — см. net_lock_acquire() в net.h
     }
 
     g_conn.state = TCP_STATE_CLOSED;

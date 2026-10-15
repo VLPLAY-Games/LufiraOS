@@ -3,8 +3,8 @@
 #include "tcp.h"
 #include "tls.h"
 #include "dns.h"
-#include "drivers/net/rtl8139.h"
 #include "system/timer/pit.h"
+#include "system/process/process.h"
 #include "system/devmode/devmode.h"
 #include "lib/string.h"
 
@@ -13,9 +13,10 @@
  * keep-alive, сжатие, userinfo/IPv6 в URL).
  *
  * Чтение — тот же приём, что везде в стеке (tcp.c/dns.c/tls.c):
- * блокирующий цикл "опросить -> проверить -> pit_wait_ms(1)" с бюджетом
- * в тиках PIT. Два бюджета: на одну порцию (ловит "сервер замолчал") и
- * на весь ответ (не даёт бесконечно тянуть ответ, капающий по байту).
+ * блокирующий цикл "опросить -> проверить -> process_sleep(1)" (см.
+ * net_lock_acquire() в net.h) с бюджетом в тиках PIT. Два бюджета: на одну
+ * порцию (ловит "сервер замолчал") и на весь ответ (не даёт бесконечно
+ * тянуть ответ, капающий по байту).
  */
 
 #define HTTP_PORT_DEFAULT       80
@@ -85,7 +86,7 @@ static int conn_read(uint8_t *buf, uint16_t cap) {
         }
         if (tcp_is_remote_closed()) return 0;
         if (pit_get_ticks() >= deadline) return -1;
-        pit_wait_ms(1);
+        process_sleep(1); // НАЙДЕННЫЙ БАГ — см. net_lock_acquire() в net.h
     }
 }
 
@@ -365,7 +366,7 @@ static uint8_t g_read_buf[HTTP_READ_CHUNK];
 static char    g_request_buf[HTTP_REQUEST_MAX];
 
 int http_fetch(const char *url, void *out_buf, unsigned long out_cap, int *status_out) {
-    if (!rtl8139_found()) return HTTP_FETCH_ENODEV;
+    if (!net_found()) return HTTP_FETCH_ENODEV;
 
     http_url_t u;
     if (http_parse_url(url, &u) != 0) return HTTP_FETCH_EBADURL;

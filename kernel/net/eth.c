@@ -2,21 +2,20 @@
 #include "net.h"
 #include "arp.h"
 #include "ip.h"
-#include "drivers/net/rtl8139.h"
 #include "lib/string.h"
 
 int eth_send(const uint8_t dst_mac[6], uint16_t ethertype, const void *payload, uint16_t len) {
-    if (!rtl8139_found()) return -1;
+    if (!net_found()) return -1;
     if (len > ETH_MTU_PAYLOAD) return -1;
 
     uint8_t frame[ETH_HEADER_LEN + ETH_MTU_PAYLOAD];
     eth_header_t *hdr = (eth_header_t *)frame;
     memcpy(hdr->dst, dst_mac, 6);
-    memcpy(hdr->src, rtl8139_get_mac(), 6);
+    memcpy(hdr->src, net_get_mac(), 6);
     hdr->ethertype = htons(ethertype);
     memcpy(frame + ETH_HEADER_LEN, payload, len);
 
-    return rtl8139_send(frame, (uint16_t)(ETH_HEADER_LEN + len));
+    return net_send_frame(frame, (uint16_t)(ETH_HEADER_LEN + len));
 }
 
 void eth_receive(const uint8_t *frame, uint16_t len) {
