@@ -651,7 +651,19 @@ enter_protected_mode:
     mov eax, cr0
     or al, 1
     mov cr0, eax
-    jmp dword CODE32_SEL:protected_mode_entry
+    ; НАЙДЕННЫЙ БАГ (причина краша "Starting kernel..." -> мгновенный
+    ; reset): весь файл собирается с ORG 0 (метки относительны начала
+    ; сегмента, см. комментарий вверху файла) — корректно для 16-битного
+    ; real-mode кода, где CPU сам добавляет CS*16. Но CODE32_SEL/CODE64_SEL
+    ; в GDT (см. ниже) описывают FLAT-сегменты с base=0 — в protected/long
+    ; mode EIP интерпретируется как физический адрес НАПРЯМУЮ, без неявного
+    ; сложения с CS. Голый "protected_mode_entry" тут давал ORG-0-адрес
+    ; метки (например 0x6B5) вместо настоящего физического 0x106B5 (stage2
+    ; реально загружен по STAGE2_PHYS_BASE=0x10000) — far jump улетал в
+    ; низкую память, где лежали случайные байты, не код, с немедленным
+    ; #GP -> тройным фолтом (живая проверка в QEMU: EIP после краша
+    ; действительно оказывался в районе ORG-0-адреса метки, не физического).
+    jmp dword CODE32_SEL:(protected_mode_entry + STAGE2_PHYS_BASE)
 
 BITS 32
 protected_mode_entry:
@@ -715,7 +727,10 @@ protected_mode_entry:
     or eax, (1 << 31)                 ; PG
     mov cr0, eax
 
-    jmp CODE64_SEL:long_mode_entry
+    ; Тот же ORG-0-баг, что у far jump в enter_protected_mode выше (см.
+    ; комментарий там) — long_mode_entry тоже нужно сдвинуть на физический
+    ; адрес загрузки stage2.
+    jmp CODE64_SEL:(long_mode_entry + STAGE2_PHYS_BASE)
 
 BITS 64
 long_mode_entry:

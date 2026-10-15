@@ -36,6 +36,7 @@
 ; испорчен при следующей сборке/установке пакетов.
 
 STAGE2_LOAD_SEGMENT equ 0x1000      ; физический адрес 0x10000
+STAGE2_PHYS_BASE    equ (STAGE2_LOAD_SEGMENT << 4) ; = 0x10000, см. использование в stage2.asm
 STAGE2_LBA_START    equ 1
 STAGE2_MAX_SECTORS  equ 64          ; 32 KiB — бюджет под stage2.bin
 
