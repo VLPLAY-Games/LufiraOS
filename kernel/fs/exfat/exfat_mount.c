@@ -7,7 +7,6 @@
 #include "lib/stddef.h"
 #include "lib/string.h"
 
-#define MOUNT_MAX_IMAGE_BYTES (8u * 1024u * 1024u)
 #define MOUNT_IO_RETRIES 3
 
 typedef struct {
@@ -15,7 +14,6 @@ typedef struct {
     char prefix[EXFAT_MOUNT_PREFIX_MAX];
     int usb_index;
     exfat_fs_t fs;
-    uint8_t *image_buf;
 } vfs_exfat_mount_t;
 
 static vfs_exfat_mount_t g_mounts[EXFAT_MOUNT_MAX];
@@ -25,33 +23,62 @@ typedef struct {
     exfat_handle_t h;
 } exfat_file_private_t;
 
-static void sync_mount_to_usb(vfs_exfat_mount_t *m) {
-    uint32_t total = m->fs.image_size / 512;
-    uint32_t lba = 0, written = 0, failed = 0;
-
-    while (lba < total) {
-        if (!(m->fs.dirty_map[lba >> 3] & (1 << (lba & 7)))) { lba++; continue; }
-
-        uint32_t run_start = lba, run_len = 0;
-        while (lba < total && run_len < XHCI_MSD_MAX_BATCH_BLOCKS &&
-               (m->fs.dirty_map[lba >> 3] & (1 << (lba & 7)))) {
-            run_len++; lba++;
-        }
-
+// exfat_blockdev_t — связывает общий (протокольный, не знающий про USB)
+// exfat.c с конкретным транспортом (xHCI/MSD) этого монтирования, тот же
+// приём, что fat_dev_read/write в fs/fat/fat_mount.c. ctx — usb_index,
+// упакованный в void* (устройства — малые целые, не указатели). Батчинг по
+// XHCI_MSD_MAX_BATCH_BLOCKS и ретраи — здесь, в ОДНОМ месте, вместо того
+// чтобы дублироваться в каждом месте, что раньше гоняло xhci_msd_*_blocks()
+// напрямую.
+static int exfat_dev_read(void *ctx, uint32_t lba, uint32_t count, void *buf) {
+    int usb_index = (int)(uint64_t)ctx;
+    uint8_t *p = (uint8_t *)buf;
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t batch = (count - done) > XHCI_MSD_MAX_BATCH_BLOCKS ? XHCI_MSD_MAX_BATCH_BLOCKS : (count - done);
         int ok = -1;
         for (int attempt = 0; attempt < MOUNT_IO_RETRIES; attempt++) {
-            if (xhci_msd_write_blocks(m->usb_index, run_start, run_len,
-                                       m->fs.image + (uint64_t)run_start * 512, 512) == 0) {
-                ok = 0; break;
-            }
+            if (xhci_msd_read_blocks(usb_index, lba + done, batch, p + (uint64_t)done * 512, 512) == 0) { ok = 0; break; }
         }
-        if (ok == 0) written += run_len; else failed += run_len;
+        if (ok != 0) return -1;
+        done += batch;
     }
+    return 0;
+}
 
-    memset(m->fs.dirty_map, 0, m->fs.dirty_map_size);
-    if (failed > 0)
-        printf("[EXFAT-VFS] WARNING: %u sector(s) failed to sync to usb%d ('%s')\n", failed, m->usb_index, m->prefix);
-    (void)written;
+static int exfat_dev_write(void *ctx, uint32_t lba, uint32_t count, const void *buf) {
+    int usb_index = (int)(uint64_t)ctx;
+    const uint8_t *p = (const uint8_t *)buf;
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t batch = (count - done) > XHCI_MSD_MAX_BATCH_BLOCKS ? XHCI_MSD_MAX_BATCH_BLOCKS : (count - done);
+        int ok = -1;
+        for (int attempt = 0; attempt < MOUNT_IO_RETRIES; attempt++) {
+            if (xhci_msd_write_blocks(usb_index, lba + done, batch, p + (uint64_t)done * 512, 512) == 0) { ok = 0; break; }
+        }
+        if (ok != 0) return -1;
+        done += batch;
+    }
+    return 0;
+}
+
+// Транслирует код ошибки exfat_init() (см. его контракт в exfat.h) в код
+// vfs_exfat_mount() — тот же sys_mount()/mount.elf (lufira-packages), что и
+// у FAT (map_fat_init_error(), fs/fat/fat_mount.c).
+static int map_exfat_init_error(int err) {
+    switch (err) {
+        case -3: return -6; // метаданные/bitmap не влезают в RAM-потолок
+        case -4: return -7; // не хватило памяти
+        case -5: return -8; // ошибка чтения с устройства
+        default:  return -9; // -1/-2 — не похоже на exFAT вообще
+    }
+}
+
+// v0.9: раньше здесь был свой цикл по dirty_map, пишущий напрямую через
+// xhci_msd_write_blocks() — теперь это просто exfat_sync() в exfat.c,
+// которая работает через m->fs.dev (exfat_dev_read/write выше).
+static void sync_mount_to_usb(vfs_exfat_mount_t *m) {
+    exfat_sync(&m->fs);
 }
 
 static vfs_exfat_mount_t *find_mount_for_path(const char *path, char *rel_out, int rel_cap) {
@@ -93,30 +120,18 @@ int vfs_exfat_mount(int usb_index, const char *prefix) {
     if (xhci_msd_get_info(usb_index, &max_lba, &block_size) != 0) return -4;
     if (block_size != 512) return -5;
 
-    uint64_t total_bytes = ((uint64_t)max_lba + 1) * block_size;
-    if (total_bytes > MOUNT_MAX_IMAGE_BYTES) return -6;
-
-    uint8_t *buf = (uint8_t *)kmalloc((size_t)total_bytes);
-    if (!buf) return -7;
-
-    uint32_t total_blocks = max_lba + 1;
-    for (uint32_t lba = 0; lba < total_blocks; ) {
-        uint32_t remaining = total_blocks - lba;
-        uint32_t batch = remaining > XHCI_MSD_MAX_BATCH_BLOCKS ? XHCI_MSD_MAX_BATCH_BLOCKS : remaining;
-        int ok = -1;
-        for (int attempt = 0; attempt < MOUNT_IO_RETRIES; attempt++) {
-            if (xhci_msd_read_blocks(usb_index, lba, batch, buf + (uint64_t)lba * block_size, block_size) == 0) {
-                ok = 0; break;
-            }
-        }
-        if (ok != 0) { kfree(buf); return -8; }
-        lba += batch;
-    }
+    // v0.9: exfat_init() больше не грузит устройство целиком в RAM (см.
+    // разбор в exfat.h) — читает метаданные сам через этот blockdev.
+    exfat_blockdev_t dev = {
+        .ctx = (void *)(uint64_t)usb_index,
+        .read_blocks = exfat_dev_read,
+        .write_blocks = exfat_dev_write,
+    };
 
     vfs_exfat_mount_t *m = &g_mounts[slot];
-    if (exfat_init(&m->fs, buf, (uint32_t)total_bytes) != 0) { kfree(buf); return -9; }
+    int res = exfat_init(&m->fs, &dev, max_lba + 1);
+    if (res != 0) return map_exfat_init_error(res);
 
-    m->image_buf = buf;
     m->usb_index = usb_index;
     int n = 0;
     while (prefix[n] && n < EXFAT_MOUNT_PREFIX_MAX - 1) { m->prefix[n] = prefix[n]; n++; }
@@ -130,9 +145,7 @@ int vfs_exfat_unmount(const char *prefix) {
         if (g_mounts[i].in_use && strcmp(g_mounts[i].prefix, prefix) == 0) {
             vfs_exfat_mount_t *m = &g_mounts[i];
             sync_mount_to_usb(m);
-            kfree(m->fs.dirty_map);
-            kfree(m->image_buf);
-            m->image_buf = NULL;
+            exfat_deinit(&m->fs);
             m->in_use = 0;
             return 0;
         }
