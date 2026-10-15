@@ -108,7 +108,10 @@ static uint8_t g_afg_nid = 0;
 static uint8_t g_dac_nid = 0, g_pin_nid = 0;
 static int     g_pin_via_node = -1; // промежуточный Mixer/Selector между Pin и ЦАП, -1 если прямое соединение
 
-static uint32_t g_dac_amp_steps = 0, g_pin_amp_steps = 0; // NumSteps выходного усилителя (для громкости)
+// NumSteps+1 выходного усилителя (для громкости), 0 = у узла вообще НЕТ
+// реального Output Amp (см. разбор НАЙДЕННОГО БАГА у hda_apply_amp()) —
+// в этом случае дальше verb на этот узел не посылается вовсе.
+static uint32_t g_dac_amp_steps = 0, g_pin_amp_steps = 0;
 
 // pit_wait_ms() — требует уже тикающих таймерных прерываний (sti вызван).
 // НАЙДЕНО ЖИВЫМ ТЕСТОМ: изначально hda_init() вызывался из kernel.c в том
@@ -380,14 +383,14 @@ static int hda_discover_codec(void) {
 
         if (type == HDA_WIDGET_TYPE_AUDIO_OUTPUT && !dac) {
             dac = (uint8_t)nid;
-        } else if (type == HDA_WIDGET_TYPE_PIN_COMPLEX && !pin) {
+        } else if (type == HDA_WIDGET_TYPE_PIN_COMPLEX) {
             uint32_t cfgdef; hda_verb((uint8_t)nid, HDA_VERB_GET_CONFIG_DEF, 0, &cfgdef);
             uint8_t port_conn = (uint8_t)((cfgdef >> 30) & 0x3u);
             uint8_t default_dev = (uint8_t)((cfgdef >> 20) & 0xFu);
             uint32_t pincaps = hda_get_param((uint8_t)nid, HDA_PARAM_PIN_CAPS);
             int output_capable = (pincaps & (1u << 4)) != 0;
 
-            if (port_conn != 1 /* не "нет физического соединения" */ && output_capable &&
+            if (!pin && port_conn != 1 /* не "нет физического соединения" */ && output_capable &&
                 (default_dev == 0x0 /* Line Out */ || default_dev == 0x1 /* Speaker */ || default_dev == 0x2 /* HP Out */))
             {
                 pin = (uint8_t)nid;
@@ -484,15 +487,20 @@ void hda_set_sample_rate(uint32_t rate) {
 
 uint32_t hda_get_sample_rate(void) { return g_sample_rate; }
 
+// num_steps — 0 означает "у узла нет реального Output Amp вообще" (см.
+// разбор НАЙДЕННОГО БАГА ниже) — в этом случае НИКАКОЙ verb не посылается.
 static void hda_apply_amp(uint8_t nid, uint32_t num_steps, uint8_t volume) {
     if (num_steps == 0) return;
     uint32_t gain = ((uint32_t)volume * num_steps) / 100;
     if (gain > 0x7F) gain = 0x7F;
     uint8_t mute = (volume == 0) ? 1 : 0;
-    // Set Output Amp, оба канала (Left+Right), Index=0 (неважно для
-    // не-Selector/Sum узлов — см. спецификацию 7.3.3.7).
-    uint16_t payload = (uint16_t)((1u << 15) | (1u << 13) | (1u << 12) | ((uint32_t)mute << 7) | gain);
-    hda_verb_long(nid, HDA_LVERB_SET_AMP_GAIN_MUTE, payload, NULL);
+    // Два отдельных verb'а (Left, затем Right) вместо одного с обоими
+    // битами сразу — спецификация (7.3.3.7) формально разрешает оба
+    // варианта, но раздельные verb'ы надёжнее/совместимее (тот же приём,
+    // что использует Linux snd-hda-intel).
+    uint16_t base = (uint16_t)((1u << 15) | ((uint32_t)mute << 7) | gain);
+    hda_verb_long(nid, HDA_LVERB_SET_AMP_GAIN_MUTE, (uint16_t)(base | (1u << 13)), NULL); // Left
+    hda_verb_long(nid, HDA_LVERB_SET_AMP_GAIN_MUTE, (uint16_t)(base | (1u << 12)), NULL); // Right
 }
 
 void hda_set_volume(uint8_t volume) {
@@ -705,10 +713,26 @@ int hda_init(void) {
 
     if (!hda_discover_codec()) return -1;
 
+    // НАЙДЕННЫЙ БАГ (живым тестом: HDA инициализируется, буфер "успешно"
+    // отыгрывается — BCIS приходит вовремя, LPIB двигается, сэмплы в
+    // памяти ненулевые, verb'ы возвращают успех — а реального звука нет
+    // ВООБЩЕ; проверено независимым перехватом WAV из QEMU-кодека, с
+    // mixer=off на том же кодеке звук идёт сразу). Причина — Pin здесь
+    // часто вообще НЕ имеет своего Output Amp (OUT_AMP_CAPS==0, что и
+    // показал живой тест: pin_amp_caps=0x0), а старое "(...)+1" слепо
+    // превращало это в "1 шаг" вместо "усилителя нет" — hda_apply_amp()
+    // честно отправляла verb с gain=0 (целочисленное деление volume*1/100)
+    // на узел БЕЗ реального усилителя; кодек QEMU (mixer=on — т.е. как раз
+    // тот режим, что реально используется) учитывает gain КАЖДОГО узла в
+    // цепочке DAC->Pin, так что этот паразитный gain=0 на Pin глушил звук
+    // целиком, даже при полностью верном gain на ЦАП. Фикс — считать узел
+    // БЕЗ Output Amp (OUT_AMP_CAPS целиком 0 — ни Mute Capable, ни
+    // NumSteps/StepSize/Offset) отдельно от "1 шаг": 0 здесь означает
+    // "amp отсутствует, verb вообще не посылать" (см. hda_apply_amp()).
     uint32_t dac_amp_caps = hda_get_param(g_dac_nid, HDA_PARAM_OUT_AMP_CAPS);
-    g_dac_amp_steps = ((dac_amp_caps >> 8) & 0x7Fu) + 1;
+    g_dac_amp_steps = dac_amp_caps ? (((dac_amp_caps >> 8) & 0x7Fu) + 1) : 0;
     uint32_t pin_amp_caps = hda_get_param(g_pin_nid, HDA_PARAM_OUT_AMP_CAPS);
-    g_pin_amp_steps = ((pin_amp_caps >> 8) & 0x7Fu) + 1;
+    g_pin_amp_steps = pin_amp_caps ? (((pin_amp_caps >> 8) & 0x7Fu) + 1) : 0;
 
     hda_verb(g_afg_nid, HDA_VERB_SET_POWER_STATE, 0, NULL); // D0
     hda_verb(g_dac_nid, HDA_VERB_SET_POWER_STATE, 0, NULL); // D0
