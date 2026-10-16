@@ -78,11 +78,24 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
                 unsigned long uv = neg ? (unsigned long)(-v) : (unsigned long)v;
                 char tmp[32];
                 int n = format_uint(uv, 10, tmp);
-                int pad = width - (n + (neg ? 1 : 0));
-                if (pad > 0 && !zero_pad) sink_pad(&sk, pad, ' ');
+                // Precision на целочисленных спецификаторах — это "минимум
+                // цифр" (ведущие нули ВНУТРИ числа, между знаком и первой
+                // значащей цифрой), а не ширина поля — отдельная вещь от
+                // width/'0' (та заполняет пробелами/нулями ВОКРУГ числа).
+                // Нужно Doom'у: "STCFN%.3d" (hu_stuff.c) — без этого
+                // "STCFN33" вместо "STCFN033", лампа не находится вообще.
+                int digit_zeros = (has_precision && precision > n) ? precision - n : 0;
+                int print_digits = !(has_precision && precision == 0 && uv == 0);
+                int total = (print_digits ? n + digit_zeros : 0) + (neg ? 1 : 0);
+                int pad = width - total;
+                int use_zero_pad = zero_pad && !has_precision;
+                if (pad > 0 && !use_zero_pad) sink_pad(&sk, pad, ' ');
                 if (neg) sink_putc(&sk, '-');
-                if (pad > 0 && zero_pad) sink_pad(&sk, pad, '0');
-                while (n > 0) sink_putc(&sk, tmp[--n]);
+                if (pad > 0 && use_zero_pad) sink_pad(&sk, pad, '0');
+                if (print_digits) {
+                    sink_pad(&sk, digit_zeros, '0');
+                    while (n > 0) sink_putc(&sk, tmp[--n]);
+                }
                 break;
             }
             case 'u':
@@ -98,10 +111,17 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
                         if (tmp[i] >= 'A' && tmp[i] <= 'F') tmp[i] += ('a' - 'A');
                     }
                 }
-                int pad = width - n;
-                if (pad > 0 && !zero_pad) sink_pad(&sk, pad, ' ');
-                if (pad > 0 && zero_pad) sink_pad(&sk, pad, '0');
-                while (n > 0) sink_putc(&sk, tmp[--n]);
+                int digit_zeros = (has_precision && precision > n) ? precision - n : 0;
+                int print_digits = !(has_precision && precision == 0 && v == 0);
+                int total = print_digits ? n + digit_zeros : 0;
+                int pad = width - total;
+                int use_zero_pad = zero_pad && !has_precision;
+                if (pad > 0 && !use_zero_pad) sink_pad(&sk, pad, ' ');
+                if (pad > 0 && use_zero_pad) sink_pad(&sk, pad, '0');
+                if (print_digits) {
+                    sink_pad(&sk, digit_zeros, '0');
+                    while (n > 0) sink_putc(&sk, tmp[--n]);
+                }
                 break;
             }
             case 'p': {

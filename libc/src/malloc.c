@@ -139,6 +139,21 @@ void *malloc(size_t size) {
     return (void *)(b + 1);
 }
 
+// Сколько байт реально доступно по этому указателю для записи — т.е.
+// payload блока без собственного заголовка (а не "сколько запросили" —
+// после выравнивания/отсутствия дробления блока может быть больше).
+// Нужен сторонним realloc()-реализациям (например, в compat-слое порта
+// doomgeneric — у этой libc своего realloc() нет, см. комментарий в
+// stdlib.h), которым иначе неоткуда узнать старый размер блока при
+// переносе данных в новый. BLOCK_MAGIC_FREE/битый указатель — 0 (как и
+// free() на такой же вход тихо не делает ничего).
+size_t malloc_usable_size(void *ptr) {
+    if (!ptr) return 0;
+    block_header_t *b = (block_header_t *)ptr - 1;
+    if (b->magic != BLOCK_MAGIC_USED && b->magic != BLOCK_MAGIC_LARGE) return 0;
+    return b->size - sizeof(block_header_t);
+}
+
 void free(void *ptr) {
     if (!ptr) return;
 
