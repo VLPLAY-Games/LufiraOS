@@ -40,6 +40,7 @@
 typedef enum {
     LPG_CATEGORY_BASE = 0,
     LPG_CATEGORY_USER = 1,
+    LPG_CATEGORY_GAMES = 2,
 } lpg_category_t;
 
 // Простое (major,minor,patch) вместо строки — сравнение зависимостей

@@ -1005,6 +1005,7 @@ static uint64_t sys_sound_info(uint64_t buf_ptr, uint64_t unused1, uint64_t unus
     memset(&out, 0, sizeof(out));
     out.available = (uint8_t)sound_is_available();
     out.volume = out.available ? sound_get_volume() : 0;
+    out.sample_rate = out.available ? sound_get_sample_rate() : 0;
     const char *name = sound_driver_name();
     size_t i = 0;
     for (; name[i] && i < sizeof(out.driver) - 1; i++) out.driver[i] = name[i];
@@ -1023,6 +1024,26 @@ static uint64_t sys_sound_set_volume(uint64_t volume, uint64_t unused1, uint64_t
     if (!sound_is_available()) return (uint64_t)-1;
     sound_set_volume((uint8_t)volume);
     return 0;
+}
+
+// SYS_SOUND_PLAY_PCM (70): (buf_ptr, frames) — см. комментарий в syscall.h.
+// frames*4 байт (int16_t стерео, interleaved) — та же проверка диапазона,
+// что и везде на буферы фиксированного размера (is_user_range_valid()),
+// плюс явный предохранитель от integer-overflow в frames*4 на 32-битной
+// арифметике ниже (16МБ с лихвой перекрывает один ~28мс-слайс doom-порта).
+#define SOUND_PLAY_PCM_MAX_FRAMES (16u * 1024u * 1024u / 4u)
+
+static uint64_t sys_sound_play_pcm(uint64_t buf_ptr, uint64_t frames, uint64_t unused1,
+                                    uint64_t unused2, uint64_t unused3) {
+    (void)unused1; (void)unused2; (void)unused3;
+
+    if (!sound_is_available()) return (uint64_t)-1;
+    if (frames == 0 || frames > SOUND_PLAY_PCM_MAX_FRAMES) return (uint64_t)-EINVAL;
+    if (!current_process ||
+        !is_user_range_valid(current_process->page_table, buf_ptr, (size_t)frames * 4, 0))
+        return (uint64_t)-EFAULT;
+
+    return (uint64_t)sound_play_pcm_stereo((const int16_t *)buf_ptr, (uint32_t)frames);
 }
 
 // SYS_PSLIST (30): buf_ptr -> lufira_ps_entry_t[max_count], max_count —
@@ -1901,6 +1922,7 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_RTC_GETTIME] = sys_rtc_gettime,
     [SYS_SOUND_INFO] = sys_sound_info,
     [SYS_SOUND_SET_VOLUME] = sys_sound_set_volume,
+    [SYS_SOUND_PLAY_PCM] = sys_sound_play_pcm,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========

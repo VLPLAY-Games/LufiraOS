@@ -117,7 +117,9 @@ int main(int argc, char **argv) {
             } else if (strcmp(key, "version") == 0) {
                 version = parse_version(value);
             } else if (strcmp(key, "category") == 0) {
-                category = (strcmp(value, "base") == 0) ? LPG_CATEGORY_BASE : LPG_CATEGORY_USER;
+                category = (strcmp(value, "base") == 0) ? LPG_CATEGORY_BASE :
+                           (strcmp(value, "games") == 0) ? LPG_CATEGORY_GAMES :
+                           LPG_CATEGORY_USER;
             } else if (strcmp(key, "depends") == 0) {
                 dep_count = parse_depends(value, deps);
             }
@@ -186,8 +188,10 @@ int main(int argc, char **argv) {
     }
     fclose(out);
 
+    const char *category_name = category == LPG_CATEGORY_BASE ? "base" :
+                                 category == LPG_CATEGORY_GAMES ? "games" : "user";
     printf("lpg_pack: wrote %s (%s v%u.%u.%u, %s, %u dep(s), %u file(s))\n",
            argv[2], name, version.major, version.minor, version.patch,
-           category == LPG_CATEGORY_BASE ? "base" : "user", dep_count, file_count);
+           category_name, dep_count, file_count);
     return 0;
 }

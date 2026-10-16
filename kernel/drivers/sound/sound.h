@@ -32,4 +32,11 @@ uint32_t sound_get_sample_rate(void);
 // 0 — успех, -1 — ошибка или нет активного драйвера.
 int sound_play_tone(uint32_t frequency, uint32_t duration_ms);
 
+// Сырой PCM-стерео-буфер (int16_t, interleaved L/R, frames фреймов) —
+// для doomgeneric (SYS_SOUND_PLAY_PCM, syscall.h); оба бэкенда уже умеют
+// это (ac97_play_pcm_stereo()/hda_play_pcm_stereo()), sound_play_tone()
+// выше просто синтезирует такой же буфер внутри себя. 0 — успех, -1 —
+// ошибка или нет активного драйвера.
+int sound_play_pcm_stereo(const int16_t *samples, uint32_t frames);
+
 void sound_stop(void);

@@ -85,6 +85,7 @@
 #define SYS_RTC_GETTIME 67
 #define SYS_SOUND_INFO 68
 #define SYS_SOUND_SET_VOLUME 69
+#define SYS_SOUND_PLAY_PCM 70
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -291,6 +292,7 @@ struct lufira_sound_info {
     uint8_t available;
     uint8_t volume;
     char    driver[16];
+    uint32_t sample_rate; // Гц, значим только если available=1
 };
 
 static inline long sys_sound_info(struct lufira_sound_info *out) {
@@ -298,6 +300,15 @@ static inline long sys_sound_info(struct lufira_sound_info *out) {
 }
 static inline long sys_sound_set_volume(unsigned int volume) {
     return __syscall5(SYS_SOUND_SET_VOLUME, (long)volume, 0, 0, 0, 0);
+}
+
+// samples — frames стерео-фреймов int16_t (interleaved L/R). Блокирует до
+// конца проигрывания одного DMA-прохода (см. комментарий в kernel-side
+// syscall.h) — единственный вызывающий сейчас это doomgeneric-порт
+// (lufira-packages/games/doom/platform/), шлёт один ~28мс программно
+// смикшированный слайс за кадр.
+static inline long sys_sound_play_pcm(const short *samples, unsigned int frames) {
+    return __syscall5(SYS_SOUND_PLAY_PCM, (long)samples, (long)frames, 0, 0, 0);
 }
 
 // Мирроит lufira_ps_entry_t (kernel/system/syscall/syscall.h) байт-в-байт —

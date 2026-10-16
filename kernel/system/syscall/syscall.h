@@ -287,6 +287,19 @@
 // HDA/AC'97-драйвера, см. sound_is_available()).
 #define SYS_SOUND_SET_VOLUME 69
 
+// SYS_SOUND_PLAY_PCM (70): (buf_ptr, frames) -> sound_play_pcm_stereo()
+// (drivers/sound/sound.h) — buf_ptr указывает на frames стерео-фреймов
+// int16_t (interleaved L/R, т.е. frames*4 байт), один блокирующий DMA-проход,
+// как и sound_play_tone() (ac97_play_tone()/hda_play_tone() блокируют
+// точно так же — см. их комментарии "Blocking playback"). Единственный
+// потребитель — doomgeneric-порт (lufira-packages/games/doom/platform/) —
+// шлёт сюда уже смикшированный программно слайс длиной ~snd_maxslicetime_ms
+// (28мс) один раз за кадр; blocking здесь примерно равен времени,
+// отведённому между тиками игры, так что реального рассинхрона это не
+// вызывает (тот же компромисс, что и у SYS_NET_FETCH — ни прерываний, ни
+// потоков в этом ядре нет нигде). Возврат: 0 успех, -1 — звук недоступен.
+#define SYS_SOUND_PLAY_PCM 70
+
 // Флаги для sys_open
 #define O_RDONLY    0
 #define O_WRONLY    1
@@ -375,6 +388,12 @@ typedef struct {
     uint8_t available; // 1 — есть активный звуковой драйвер, 0 — нет
     uint8_t volume;    // 0-100, значим только если available=1
     char    driver[16];
+    // Добавлено для doomgeneric-порта (нужно знать частоту дискретизации
+    // активного драйвера, чтобы ресемплировать DS*-лампы WAD под неё, а не
+    // наоборот — лишнего SYS_SOUND_SET_SAMPLE_RATE не заводим, см. комментарий
+    // в games/doom/platform/). Поле добавлено В КОНЕЦ — старые читатели
+    // структуры (apps/settings.c), не знающие о нём, не ломаются.
+    uint32_t sample_rate; // Гц, значим только если available=1
 } lufira_sound_info_t;
 
 // Одна запись снимка SYS_PSLIST (30) — то же, что process_ps() печатает
