@@ -83,6 +83,8 @@
 #define SYS_DUP2 65
 #define SYS_NET_FETCH 66
 #define SYS_RTC_GETTIME 67
+#define SYS_SOUND_INFO 68
+#define SYS_SOUND_SET_VOLUME 69
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -281,6 +283,21 @@ static inline long sys_cpuload(struct lufira_cpuload *out) {
 }
 static inline long sys_rtc_gettime(struct lufira_rtc_time *out) {
     return __syscall5(SYS_RTC_GETTIME, (long)out, 0, 0, 0, 0);
+}
+
+// Мирроит lufira_sound_info_t (syscall.h) байт-в-байт — для SYS_SOUND_INFO
+// (apps/settings.c).
+struct lufira_sound_info {
+    uint8_t available;
+    uint8_t volume;
+    char    driver[16];
+};
+
+static inline long sys_sound_info(struct lufira_sound_info *out) {
+    return __syscall5(SYS_SOUND_INFO, (long)out, 0, 0, 0, 0);
+}
+static inline long sys_sound_set_volume(unsigned int volume) {
+    return __syscall5(SYS_SOUND_SET_VOLUME, (long)volume, 0, 0, 0, 0);
 }
 
 // Мирроит lufira_ps_entry_t (kernel/system/syscall/syscall.h) байт-в-байт —

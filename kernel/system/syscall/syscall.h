@@ -272,6 +272,21 @@
 // регистров RTC так и не совпали (см. rtc.c про UPDATE_IN_PROGRESS).
 #define SYS_RTC_GETTIME 67
 
+// SYS_SOUND_INFO (68): buf_ptr -> lufira_sound_info_t. Обёртка над
+// sound_is_available()/sound_get_volume()/sound_driver_name() (drivers/
+// sound/sound.h) — нужен userspace "Настройки" (lufira-packages/apps/
+// settings.c), у которого нет доступа к драйверу напрямую (в отличие от
+// kernel-native command_mixer(), shell/commands/sound.c). Всегда
+// возвращает 0 — "звука нет" это валидный, не ошибочный ответ (available=0,
+// driver="none"), а не повод вернуть -EIO.
+#define SYS_SOUND_INFO 68
+
+// SYS_SOUND_SET_VOLUME (69): volume (0-100, значения выше молча
+// обрезаются до 100 — тот же приём, что уже делает sound_set_volume()
+// сама). Возврат: 0 успех, -1 — звук недоступен (нет активного
+// HDA/AC'97-драйвера, см. sound_is_available()).
+#define SYS_SOUND_SET_VOLUME 69
+
 // Флаги для sys_open
 #define O_RDONLY    0
 #define O_WRONLY    1
@@ -352,6 +367,15 @@ typedef struct {
     uint8_t  minute;
     uint8_t  second;
 } lufira_rtc_time_t;
+
+// Для SYS_SOUND_INFO — driver зеркалит sound_driver_name() ("HDA" / "AC'97" /
+// "none"), всегда NUL-терминирована (sound_driver_name() сама не длиннее
+// 15 байт — литералы в sound.c/hda.c/ac97.c).
+typedef struct {
+    uint8_t available; // 1 — есть активный звуковой драйвер, 0 — нет
+    uint8_t volume;    // 0-100, значим только если available=1
+    char    driver[16];
+} lufira_sound_info_t;
 
 // Одна запись снимка SYS_PSLIST (30) — то же, что process_ps() печатает
 // построчно, плюс ppid/uid/cpu_ticks (для per-process разбивки в

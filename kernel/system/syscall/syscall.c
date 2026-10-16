@@ -27,6 +27,7 @@
 #include "drivers/input/input.h"
 #include "net/http_client.h"
 #include "net/net.h"
+#include "drivers/sound/sound.h"
 
 extern lufirafs_t lufirafs;
 
@@ -988,6 +989,42 @@ static uint64_t sys_rtc_gettime(uint64_t buf_ptr, uint64_t unused1, uint64_t unu
     return 0;
 }
 
+// SYS_SOUND_INFO (68): buf_ptr -> lufira_sound_info_t. Тот же стиль, что
+// SYS_RTC_GETTIME выше — вся работа уже сделана sound.c (диспетчер HDA/
+// AC'97), здесь только проверка user-указателя, сборка структуры и
+// копирование. "Звука нет" — валидный ответ (available=0), а не -EIO.
+static uint64_t sys_sound_info(uint64_t buf_ptr, uint64_t unused1, uint64_t unused2,
+                                uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+
+    if (!current_process ||
+        !is_user_range_valid(current_process->page_table, buf_ptr, sizeof(lufira_sound_info_t), 1))
+        return (uint64_t)-EFAULT;
+
+    lufira_sound_info_t out;
+    memset(&out, 0, sizeof(out));
+    out.available = (uint8_t)sound_is_available();
+    out.volume = out.available ? sound_get_volume() : 0;
+    const char *name = sound_driver_name();
+    size_t i = 0;
+    for (; name[i] && i < sizeof(out.driver) - 1; i++) out.driver[i] = name[i];
+    out.driver[i] = '\0';
+
+    memcpy((void *)buf_ptr, &out, sizeof(out));
+    return 0;
+}
+
+// SYS_SOUND_SET_VOLUME (69): volume (0-100). sound_set_volume() сама
+// обрезает значения выше 100 — не дублируем клэмп здесь.
+static uint64_t sys_sound_set_volume(uint64_t volume, uint64_t unused1, uint64_t unused2,
+                                      uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+
+    if (!sound_is_available()) return (uint64_t)-1;
+    sound_set_volume((uint8_t)volume);
+    return 0;
+}
+
 // SYS_PSLIST (30): buf_ptr -> lufira_ps_entry_t[max_count], max_count —
 // снимок ВСЕХ живых процессов одним вызовом (process_pslist(), process.c) —
 // v0.7 план, этап 5, под-этап 4 ("ps"), единственная новая точка входа во
@@ -1862,6 +1899,8 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_DUP2] = sys_dup2,
     [SYS_NET_FETCH] = sys_net_fetch,
     [SYS_RTC_GETTIME] = sys_rtc_gettime,
+    [SYS_SOUND_INFO] = sys_sound_info,
+    [SYS_SOUND_SET_VOLUME] = sys_sound_set_volume,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
@@ -1896,7 +1935,7 @@ void syscall_init(void) {
     // SYS_COUNT — номера SYS_* просто #define'ы) — бумить вручную при
     // добавлении нового syscall'а. Застало 0.8: тут всё ещё было "27" при
     // 65 реально зарегистрированных (SYS_NET_FETCH=66 последний по номеру).
-    DLOG("[SYSCALL] 65 system calls registered\n");
+    DLOG("[SYSCALL] 67 system calls registered\n");
 }
 
 // ========== ДИСПАТЧЕР ==========
