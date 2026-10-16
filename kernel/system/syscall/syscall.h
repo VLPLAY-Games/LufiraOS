@@ -300,6 +300,40 @@
 // потоков в этом ядре нет нигде). Возврат: 0 успех, -1 — звук недоступен.
 #define SYS_SOUND_PLAY_PCM 70
 
+// SYS_WM_UNREGISTER (71): без аргументов. Явный отказ от регистрации —
+// нужен WM (lufira-packages/apps/wm.c) для передачи полноэкранного
+// владения экраном/вводом дочернему процессу (doom.elf) через честный
+// fork()+wait(), вместо старого трюка "exec() самого себя" (тот терял
+// исходный WM-процесс навсегда — после выхода игры возвращало в голую
+// консоль, а не обратно в WM). Разрешено только текущему владельцу
+// (process_wm_unregister() сверяет pid) — 0 успех, -1 вызывающий не
+// текущий WM (ничего не меняется).
+#define SYS_WM_UNREGISTER 71
+
+// SYS_SOUND_STOP (72): без аргументов. Обёртка над sound_stop() — немедленно
+// останавливает канал, включая кольцо ac97_stream_write() (см. его большой
+// комментарий в ac97.c) — doomgeneric вызывает на выходе (I_ShutdownSound()),
+// иначе кольцо продолжило бы крутить последние проигранные страницы
+// бесконечно после выхода из игры. Всегда 0 — "звука нет" не повод для
+// ошибки, как и у SYS_SOUND_INFO.
+#define SYS_SOUND_STOP 72
+
+// SYS_PING (73): (dst_ip, id, seq, timeout_ms) — один ICMP Echo Request +
+// блокирующее (до timeout_ms) ожидание Echo Reply, тот же порядок, что у
+// kernel-native command_ping() (kernel/shell/commands/net.c, теперь мёртвый
+// код) — icmp_ping_send()+icmp_ping_wait() (kernel/net/icmp.c), просто
+// вызванные ОДИН раз за syscall, не в цикле: цикл по seq/печать "icmp_seq=N:
+// time=Xms" между пакетами — дело вызывающего (userspace/user/ping.c), как
+// и раньше делал сам kernel-native command_ping().
+//
+// Возврат: RTT в мс (>=0) при успехе; -1 таймаут; -2 нет сетевого
+// устройства; -3 ошибка отправки (icmp_ping_send(), включая ARP-таймаут на
+// маршруте); -4 сеть занята другим sys_net_fetch()/sys_ping() дольше 5с
+// (net_lock_acquire() — то же разделение, что и у SYS_NET_FETCH, см. его
+// большой комментарий в syscall.c, "g_conn/g_ping стека рассчитаны ровно
+// на одно соединение разом").
+#define SYS_PING 73
+
 // Флаги для sys_open
 #define O_RDONLY    0
 #define O_WRONLY    1

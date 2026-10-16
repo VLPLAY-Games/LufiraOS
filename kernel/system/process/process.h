@@ -334,6 +334,7 @@ extern volatile uint32_t g_wm_pid;
 
 // 0 при успехе, -1 если WM уже зарегистрирован (ровно один на систему).
 int process_wm_register(uint32_t pid);
+int process_wm_unregister(uint32_t pid);
 uint32_t process_get_wm_pid(void);
 
 // 1, если следующий вызов shell_task() — пересоздание после того, как

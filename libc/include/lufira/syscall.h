@@ -86,6 +86,9 @@
 #define SYS_SOUND_INFO 68
 #define SYS_SOUND_SET_VOLUME 69
 #define SYS_SOUND_PLAY_PCM 70
+#define SYS_WM_UNREGISTER 71
+#define SYS_SOUND_STOP 72
+#define SYS_PING 73
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -309,6 +312,21 @@ static inline long sys_sound_set_volume(unsigned int volume) {
 // смикшированный слайс за кадр.
 static inline long sys_sound_play_pcm(const short *samples, unsigned int frames) {
     return __syscall5(SYS_SOUND_PLAY_PCM, (long)samples, (long)frames, 0, 0, 0);
+}
+
+// Немедленно останавливает канал (включая непрерывный AC'97-поток, если он
+// играл) — вызывать на выходе, иначе звук продолжит крутиться по кругу.
+static inline long sys_sound_stop(void) {
+    return __syscall5(SYS_SOUND_STOP, 0, 0, 0, 0, 0);
+}
+
+// Один ICMP Echo Request + блокирующее ожидание ответа. Возврат: RTT в мс
+// (>=0) при успехе; -1 таймаут; -2 нет сетевого устройства; -3 ошибка
+// отправки; -4 сеть занята другим sys_net_fetch()/sys_ping() — см.
+// подробности у SYS_PING в kernel-side syscall.h.
+static inline long sys_ping(unsigned int dst_ip, unsigned int id, unsigned int seq,
+                             unsigned int timeout_ms) {
+    return __syscall5(SYS_PING, dst_ip, id, seq, timeout_ms, 0);
 }
 
 // Мирроит lufira_ps_entry_t (kernel/system/syscall/syscall.h) байт-в-байт —
@@ -612,6 +630,11 @@ static inline long sys_ipc_recv(struct lufira_ipc_msg *out, int timeout_ms) {
 // успехе, -1 если кто-то другой уже зарегистрирован.
 static inline long sys_wm_register(void) {
     return __syscall5(SYS_WM_REGISTER, 0, 0, 0, 0, 0);
+}
+
+// Отказ от регистрации — 0 при успехе, -1 если вызывающий не текущий WM.
+static inline long sys_wm_unregister(void) {
+    return __syscall5(SYS_WM_UNREGISTER, 0, 0, 0, 0, 0);
 }
 
 // Байт-в-байт зеркало lufira_fb_info_t (kernel/system/syscall/syscall.h).

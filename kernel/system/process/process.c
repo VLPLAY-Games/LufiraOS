@@ -1499,6 +1499,19 @@ uint32_t process_get_wm_pid(void) {
     return g_wm_pid;
 }
 
+// Явный отказ от регистрации ДО выхода процесса — нужен WM (apps/wm.c)
+// для передачи полноэкранного владения doom.elf: fork() + эта функция в
+// родителе + sys_wm_register() в ребёнке, вместо старого трюка с exec()
+// самого себя (тот терял PID WM навсегда — после выхода игры возвращало в
+// голую консоль, а не обратно в WM). 0 — успех, -1 — вызывающий не
+// текущий владелец (ничего не меняем — защита от случайного освобождения
+// чужой регистрации).
+int process_wm_unregister(uint32_t pid) {
+    if (g_wm_pid != pid) return -1;
+    g_wm_pid = 0;
+    return 0;
+}
+
 // Ищет process_t по pid в process_list. NULL, если не найден. Нужно и
 // process_set_foreground(), и его обходу вверх по ppid.
 process_t* process_find_by_pid(uint32_t pid)

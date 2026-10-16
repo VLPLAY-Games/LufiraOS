@@ -27,6 +27,8 @@
 #include "drivers/input/input.h"
 #include "net/http_client.h"
 #include "net/net.h"
+#include "net/icmp.h"
+#include "drivers/net/rtl8139.h"
 #include "drivers/sound/sound.h"
 
 extern lufirafs_t lufirafs;
@@ -1043,6 +1045,20 @@ static uint64_t sys_sound_play_pcm(uint64_t buf_ptr, uint64_t frames, uint64_t u
         !is_user_range_valid(current_process->page_table, buf_ptr, (size_t)frames * 4, 0))
         return (uint64_t)-EFAULT;
 
+    // НАЙДЕННЫЙ ЖИВЫМ ТЕСТОМ БАГ, тот же самый класс, что и БАГ #1 у
+    // SYS_NET_FETCH (см. его большой комментарий ниже по файлу): FMASK
+    // маскирует IF на входе в ЛЮБОЙ syscall, и ничто до этого места его не
+    // возвращает — hda_run_buffer() (kernel/drivers/sound/hda.c) ждёт BCIS
+    // через pit_wait_ms(), а pit_ticks растёт ТОЛЬКО из обработчика
+    // прерывания таймера, которое физически не может быть доставлено при
+    // IF=0 — итог: при активном HDA-бэкенде doom.elf (и вообще любой
+    // вызывающий этот syscall) вис НАВСЕГДА на первом же кадре звука, 0
+    // вывода. AC'97-бэкенд (ac97_play_pcm_stereo()) этим не страдает — его
+    // блокирующее ожидание крутит `pause` на статус-регистре напрямую, без
+    // зависимости от прерываний — поэтому баг не проявлялся, пока не
+    // появился реальный вызывающий с HDA.
+    asm volatile("sti");
+
     return (uint64_t)sound_play_pcm_stereo((const int16_t *)buf_ptr, (uint32_t)frames);
 }
 
@@ -1693,6 +1709,50 @@ static uint64_t sys_wm_register(uint64_t unused0, uint64_t unused1, uint64_t unu
     return (process_wm_register(current_process->pid) == 0) ? 0 : (uint64_t)-1;
 }
 
+// SYS_WM_UNREGISTER (71) — см. syscall.h.
+static uint64_t sys_wm_unregister(uint64_t unused0, uint64_t unused1, uint64_t unused2,
+                                  uint64_t unused3, uint64_t unused4) {
+    (void)unused0; (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    return (process_wm_unregister(current_process->pid) == 0) ? 0 : (uint64_t)-1;
+}
+
+// SYS_SOUND_STOP (72) — см. syscall.h.
+static uint64_t sys_sound_stop(uint64_t unused0, uint64_t unused1, uint64_t unused2,
+                               uint64_t unused3, uint64_t unused4) {
+    (void)unused0; (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    sound_stop();
+    return 0;
+}
+
+// SYS_PING (73) — см. syscall.h.
+static uint64_t sys_ping(uint64_t dst_ip, uint64_t id, uint64_t seq, uint64_t timeout_ms,
+                         uint64_t unused4) {
+    (void)unused4;
+
+    if (!rtl8139_found()) return (uint64_t)-2;
+
+    // См. разбор БАГ #1 у SYS_NET_FETCH ниже по файлу — icmp_ping_wait()
+    // меряет таймаут через pit_get_ticks(), которому нужны тикающие
+    // прерывания таймера, физически не доставляемые при IF=0 (FMASK
+    // маскирует IF на входе в ЛЮБОЙ syscall).
+    asm volatile("sti");
+
+    if (net_lock_acquire(5000) != 0) return (uint64_t)-4;
+
+    if (icmp_ping_send((uint32_t)dst_ip, (uint16_t)id, (uint16_t)seq) != 0) {
+        net_lock_release();
+        return (uint64_t)-3;
+    }
+
+    uint32_t rtt_ms = 0;
+    int wait_rc = icmp_ping_wait((uint32_t)timeout_ms, &rtt_ms);
+    net_lock_release();
+
+    if (wait_rc != 0) return (uint64_t)-1;
+    return (uint64_t)rtt_ms;
+}
+
 // SYS_FB_INFO (60) — см. syscall.h.
 static uint64_t sys_fb_info(uint64_t out_ptr, uint64_t unused1, uint64_t unused2,
                             uint64_t unused3, uint64_t unused4) {
@@ -1923,6 +1983,9 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_SOUND_INFO] = sys_sound_info,
     [SYS_SOUND_SET_VOLUME] = sys_sound_set_volume,
     [SYS_SOUND_PLAY_PCM] = sys_sound_play_pcm,
+    [SYS_WM_UNREGISTER] = sys_wm_unregister,
+    [SYS_SOUND_STOP] = sys_sound_stop,
+    [SYS_PING] = sys_ping,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
