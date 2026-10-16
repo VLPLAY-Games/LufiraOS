@@ -74,19 +74,36 @@ int console_input_read(uint8_t *out, int max) {
 #define KEY_DEBOUNCE_TICKS 1
 
 static int last_key = 0;
+static int last_pressed = -1; // -1 = ещё не было ни одного события
 static uint64_t last_key_tick = 0;
 
 // Перенесено из keyboard.c без изменений — единственное отличие в том, что
 // теперь этот путь общий для PS/2 и (позже) USB HID клавиатуры.
 void input_keyboard_event(int key) {
+    input_keyboard_event_ex(key, 1);
+}
+
+// Порт doomgeneric: играм нужно знать не только "клавиша нажата", но и
+// "клавиша отпущена" (держать "идём вперёд", пока WASD зажаты). pressed=0
+// раньше было вообще недостижимо наружу — keyboard_scancode_to_key()
+// молча съедала release-скан-коды. Теперь прокидываем оба случая, но
+// ТОЛЬКО тому, кто умеет их различать (WM/GUI-клиенты) — обычный
+// консольный/текстовый путь ниже как получал раньше исключительно нажатия,
+// так и получает: отпускания до него не доходят вовсе (return сразу после
+// проверки WM), чтобы не плодить лишние символы в текстовом вводе.
+void input_keyboard_event_ex(int key, int pressed) {
     if (key == 0) return;
 
     // Дедупликация PS/2+USB HID — см. комментарий у KEY_DEBOUNCE_TICKS
     // выше: дубликат не должен просачиваться ни в ring buffer ниже, ни в
-    // Ctrl+C/scroll-обработку в конце функции.
+    // Ctrl+C/scroll-обработку в конце функции. pressed учитывается в самой
+    // сигнатуре дубликата: иначе быстрый тап (нажал-отпустил в пределах
+    // одного тика) ошибочно схлопнулся бы в одно событие.
     uint64_t now = pit_get_ticks();
-    int is_duplicate = (key == last_key && (now - last_key_tick) < KEY_DEBOUNCE_TICKS);
+    int is_duplicate = (key == last_key && pressed == last_pressed &&
+                         (now - last_key_tick) < KEY_DEBOUNCE_TICKS);
     last_key = key;
+    last_pressed = pressed;
     last_key_tick = now;
     if (is_duplicate) return;
 
@@ -104,9 +121,15 @@ void input_keyboard_event(int key) {
         memset(&req, 0, sizeof(req));
         req.opcode = WM_INPUT_KEY;
         req.a[0] = key;
+        req.a[1] = pressed;
         mailbox_send(wm_pid, WM_SENDER_KERNEL, &req, sizeof(req));
         return;
     }
+
+    // Нет WM — обычный текстовый /dev/console. Отпускания клавиш тут
+    // никому не нужны (строка ввода не отличает "держат" от "нажали один
+    // раз"), только нажатия, как и было раньше.
+    if (!pressed) return;
 
     // Кольцевой буфер /dev/console (см. input.h) — то, что реально читает
     // shell.elf через SYS_READ. Ctrl+Up/Down (скролл вьюпорта) и KEY_CTRL_C

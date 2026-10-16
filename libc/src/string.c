@@ -80,3 +80,23 @@ char *strchr(const char *s, int c) {
     }
     return (c == '\0') ? (char *)s : NULL;
 }
+
+// Добавлены вместе с vsnprintf() для порта doomgeneric (w_wad.c/m_misc.c и
+// т.п. в оригинальном Doom-коде используют оба).
+char *strrchr(const char *s, int c) {
+    const char *last = (c == '\0') ? s + strlen(s) : NULL;
+    for (; *s; s++) {
+        if (*s == (char)c) last = s;
+    }
+    return (char *)last;
+}
+
+char *strstr(const char *haystack, const char *needle) {
+    if (!*needle) return (char *)haystack;
+    for (; *haystack; haystack++) {
+        const char *h = haystack, *n = needle;
+        while (*h && *n && *h == *n) { h++; n++; }
+        if (!*n) return (char *)haystack;
+    }
+    return NULL;
+}

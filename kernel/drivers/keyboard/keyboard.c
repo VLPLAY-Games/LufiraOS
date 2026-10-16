@@ -111,7 +111,27 @@ uint8_t keyboard_read_scancode(void) {
     return inb(KEYBOARD_DATA_PORT);
 }
 
-int keyboard_scancode_to_key(uint8_t scancode) {
+// НАЙДЕННЫЙ БАГ (порт doomgeneric: нужно знать, когда клавиша ОТПУЩЕНА —
+// Doom держит "идём вперёд", пока WASD зажаты, а не по одному разовому
+// событию на нажатие). Раньше release-скан-коды (бит 0x80) использовались
+// только для сброса состояния модификаторов (shift/ctrl/alt) — для любой
+// обычной буквы/цифры/стрелки функция молча возвращала 0, и ни один байт
+// "эта клавиша отпущена" наружу не уходил вообще.
+//
+// Теперь функция дополнительно возвращает *out_pressed (1 = нажата, 0 =
+// отпущена) через out-параметр. Проблема в том, что код клавиши при
+// отпускании нужно вернуть ТОТ ЖЕ, что был выдан при нажатии — а он мог
+// быть с учётом Shift ('!' вместо '1'), тогда как release-скан-код сам по
+// себе кодирует только физическую клавишу, без какого-либо регистра.
+// down_key_for_scancode[] запоминает, какой именно key-код был выдан при
+// нажатии данного физического скан-кода, и возвращает его же при
+// отпускании — иначе Doom увидел бы "нажат '!', отпущен '1'" и решил бы,
+// что нажатых клавиш стало на одну больше.
+static int down_key_for_scancode[128];
+
+int keyboard_scancode_to_key(uint8_t scancode, int *out_pressed) {
+    *out_pressed = 1;
+
     if (scancode == 0xE0) {
         extended_scancode = 1;
         return 0;
@@ -119,40 +139,35 @@ int keyboard_scancode_to_key(uint8_t scancode) {
 
     if (scancode & 0x80) {
         uint8_t keycode = scancode & 0x7F;
+        *out_pressed = 0;
 
         if (extended_scancode) {
-            switch (keycode) {
-                case 0x1D: // Right Ctrl
-                    ctrl_pressed = 0;
-                    break;
-
-                case 0x38: // Right Alt
-                    alt_pressed = 0;
-                    break;
-
-                default:
-                    break;
-            }
-
             extended_scancode = 0;
-            return 0;
+            switch (keycode) {
+                case 0x1D: ctrl_pressed = 0; return 0;      // Right Ctrl
+                case 0x38: alt_pressed = 0; return 0;        // Right Alt
+                // Стрелки не нуждаются в down_key_for_scancode — они не
+                // зависят от Shift/CapsLock, скан-код однозначно определяет
+                // код клавиши в обе стороны.
+                case 0x4B: return KEY_LEFT_ARROW;
+                case 0x4D: return KEY_RIGHT_ARROW;
+                case 0x48: return KEY_UP_ARROW;
+                case 0x50: return KEY_DOWN_ARROW;
+                default: return 0;
+            }
         }
 
         switch (keycode) {
-            case 0x2A:
-            case 0x36:
-                shift_pressed = 0;
-                break;
-
-            case 0x1D:
-                ctrl_pressed = 0;
-                break;
-
-            case 0x38:
-                alt_pressed = 0;
-                break;
+            case 0x2A: case 0x36: shift_pressed = 0; return 0;
+            case 0x1D: ctrl_pressed = 0; return 0;
+            case 0x38: alt_pressed = 0; return 0;
         }
 
+        if (keycode < 128) {
+            int key = down_key_for_scancode[keycode];
+            down_key_for_scancode[keycode] = 0;
+            return key;
+        }
         return 0;
     }
 
@@ -188,6 +203,7 @@ int keyboard_scancode_to_key(uint8_t scancode) {
         }
         result = use_upper ? scancode_to_char_shift[scancode]
                           : scancode_to_char[scancode];
+        down_key_for_scancode[scancode] = result;
     }
     return result;
 }
@@ -197,8 +213,9 @@ void keyboard_irq_handler(void) {
     while (inb(KEYBOARD_STATUS_PORT) & 1) {
         uint8_t scancode = keyboard_read_scancode();
 
-        int key = keyboard_scancode_to_key(scancode);
-        input_keyboard_event(key);
+        int pressed = 1;
+        int key = keyboard_scancode_to_key(scancode, &pressed);
+        input_keyboard_event_ex(key, pressed);
     }
 }
 

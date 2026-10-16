@@ -10,7 +10,7 @@
 
 #define WM_SENDER_KERNEL 0
 
-#define WM_INPUT_KEY   100
+#define WM_INPUT_KEY   100 // a[0]=код клавиши, a[1]=1 нажата/0 отпущена
 #define WM_INPUT_MOUSE 101
 #define WM_NOTIFY_PROCESS_EXIT 102 // a[0] = pid завершившегося процесса — см. kernel-side версию этого файла
 

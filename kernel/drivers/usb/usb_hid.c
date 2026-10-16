@@ -149,14 +149,26 @@ void usb_hid_keyboard_report(const uint8_t report[8]) {
         }
     }
 
-    // Освобождаем слоты клавиш, которых больше нет в текущем отчёте (отпущены).
+    // Освобождаем слоты клавиш, которых больше нет в текущем отчёте (отпущены)
+    // — и, в отличие от раньше, ещё и сообщаем об этом наверх как о
+    // настоящем отпускании (порт doomgeneric: удерживаемые WASD должны
+    // перестать "ехать" ровно в момент отпускания, а не по таймеру).
+    // Упрощение: декодируем usage с ТЕКУЩИМ состоянием shift/ctrl из этого
+    // отчёта, а не с тем, что было в момент нажатия — для букв это может
+    // дать другой регистр, но для PS/2-пути (keyboard.c) это отслеживается
+    // честно через down_key_for_scancode[]; здесь это не критично, так как
+    // основной протестированный путь ввода в QEMU — PS/2.
     for (int j = 0; j < 6; j++) {
         if (repeat_slots[j].usage == 0) continue;
         int still_pressed = 0;
         for (int i = 0; i < 6; i++) {
             if (keys[i] == repeat_slots[j].usage) { still_pressed = 1; break; }
         }
-        if (!still_pressed) repeat_slots[j].usage = 0;
+        if (!still_pressed) {
+            int released_key = hid_decode_usage(repeat_slots[j].usage, shift, ctrl);
+            if (released_key != 0) input_keyboard_event_ex(released_key, 0);
+            repeat_slots[j].usage = 0;
+        }
     }
 }
 

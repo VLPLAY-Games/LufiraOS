@@ -16,7 +16,7 @@ extern uint32_t input_buffer_index;
 void keyboard_init(void);
 void keyboard_irq_handler(void);           // обработчик прерывания клавиатуры
 uint8_t keyboard_read_scancode(void);
-int keyboard_scancode_to_key(uint8_t scancode);
+int keyboard_scancode_to_key(uint8_t scancode, int *out_pressed);
 int keyboard_is_initialized(void);
 int keyboard_ctrl_pressed(void);
 
