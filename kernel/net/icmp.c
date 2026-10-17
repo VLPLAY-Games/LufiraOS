@@ -34,10 +34,8 @@ int icmp_ping_send(uint32_t dst_ip, uint16_t id, uint16_t seq) {
     }
 
     // Без htons(): чексум раскладывается по байтам вручную (>>8/&0xFF), а
-    // net_checksum() уже отдаёт его старшим байтом первым (см. net.h) —
-    // то есть в нужном порядке. htons() здесь свопнул бы байты ВТОРОЙ раз
-    // и дал неверный чексум (баг: SLIRP молча дропал такой ICMP, pcap
-    // подтвердил).
+    // net_checksum() уже отдаёт его старшим байтом первым — в нужном
+    // порядке. htons() здесь свопнул бы байты второй раз и дал неверный чексум.
     uint16_t csum = net_checksum(packet, sizeof(packet));
     packet[2] = (uint8_t)(csum >> 8);
     packet[3] = (uint8_t)csum;
@@ -63,7 +61,7 @@ int icmp_ping_wait(uint32_t timeout_ms, uint32_t *out_rtt_ms) {
             g_ping.waiting = 0;
             return 0;
         }
-        process_sleep(1); // НАЙДЕННЫЙ БАГ — см. net_lock_acquire() в net.h
+        process_sleep(1);
     }
 
     g_ping.waiting = 0;

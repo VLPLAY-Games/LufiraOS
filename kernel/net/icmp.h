@@ -5,9 +5,9 @@
 #define ICMP_TYPE_ECHO_REPLY   0u
 #define ICMP_TYPE_ECHO_REQUEST 8u
 
-// Вызывается из ip_receive() на ICMP-пакеты: отвечает на Echo Request'ы,
-// а Echo Reply сверяет с текущим "в полёте" пингом (см. icmp_ping_send()) —
-// один пинг единовременно, как и у синхронного foreground-command ping.
+// Вызывается из ip_receive() на ICMP-пакеты: отвечает на Echo Request,
+// а Echo Reply сверяет с текущим "в полёте" пингом (icmp_ping_send()) —
+// один пинг единовременно.
 void icmp_receive(uint32_t src_ip, const void *payload, uint16_t len);
 
 // Отправляет Echo Request и взводит ожидание ответа на этот id/seq.

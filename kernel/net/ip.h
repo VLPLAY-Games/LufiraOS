@@ -26,8 +26,7 @@ typedef struct __attribute__((packed)) {
 // через eth_send(). 0 = успех, -1 = ошибка (в т.ч. ARP-таймаут).
 int ip_send(uint32_t dst_ip, uint8_t protocol, const void *payload, uint16_t len);
 
-// Вызывается из eth_receive() на IP-кадры. Отбрасывает неверную
-// версию/IHL>5 (без опций)/битый чексум/фрагментированные пакеты (нет
-// реассемблинга) и всё адресованное не нам. Иначе диспетчеризует по
-// protocol в icmp_receive()/tcp_receive()/udp_receive().
+// Вызывается из eth_receive(). Отбрасывает неверную версию/IHL>5 (без
+// опций)/битый чексум/фрагменты (нет реассемблинга)/не-наш адрес, иначе
+// диспетчеризует по protocol в icmp_receive()/tcp_receive()/udp_receive().
 void ip_receive(const uint8_t *frame, uint16_t len);

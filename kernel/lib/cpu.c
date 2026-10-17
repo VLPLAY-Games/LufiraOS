@@ -6,12 +6,10 @@ int interrupts_enabled(void) {
     return (int)((rflags >> 9) & 1ULL);
 }
 
-// Живой EFLAGS.IF почти бесполезен для команды "status": шелл выполняет
-// команды синхронно ИЗНУТРИ keyboard_irq_handler() (см. комментарий про exec
-// в elf.c), где CPU аппаратно снимает IF на входе в interrupt gate — то есть
-// interrupts_enabled() всегда вернёт 0 в момент выполнения "status", даже
-// когда система в целом работает с разрешёнными прерываниями. Отдельный
-// флаг фиксирует факт "sti + irq_enable() пройдены на загрузке" один раз.
+// Живой EFLAGS.IF бесполезен для команды "status": шелл выполняет команды
+// синхронно внутри keyboard_irq_handler(), где CPU аппаратно снимает IF —
+// interrupts_enabled() там всегда вернёт 0. Этот флаг фиксирует факт, что
+// sti + irq_enable() были пройдены на загрузке, один раз.
 static int g_interrupts_active = 0;
 
 void cpu_mark_interrupts_active(void) {

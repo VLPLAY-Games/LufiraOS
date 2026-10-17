@@ -86,17 +86,14 @@ int arp_resolve(uint32_t ip, uint8_t out_mac[6]) {
 
     arp_send_request(ip);
 
-    // Таймаут считаем в тиках PIT (pit_get_ticks()), не итерациями цикла:
-    // process_sleep(1) округляет вверх до 10мс, так что счёт итерациями
-    // растянул бы таймаут в 10x (тот же units-баг уже был в USB MSD).
+    // Таймаут считаем в тиках PIT, не итерациями цикла: process_sleep(1)
+    // округляет вверх до 10мс, счёт итерациями растянул бы таймаут в 10x.
     uint64_t deadline = pit_get_ticks() + 200; // ~2000мс
     while (pit_get_ticks() < deadline) {
         net_poll();
         if (arp_cache_lookup(ip, out_mac) == 0) return 0;
-        // process_sleep(1), а не pit_wait_ms(1) — НАЙДЕННЫЙ БАГ, см.
-        // подробный комментарий у net_lock_acquire() в net.h: без этого
-        // ARP-резолв (как и весь остальной сетевой стек) держал процессор
-        // ВСЕЙ системы на себе, ни один другой процесс не мог выполниться.
+        // process_sleep(1), не busy-wait: иначе ARP-резолв держит
+        // процессор системы, не давая выполниться другим процессам.
         process_sleep(1);
     }
     return -1;

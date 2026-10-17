@@ -4,9 +4,8 @@
 #include "eth.h"
 #include "lib/string.h"
 
-// DNS-запросы/ответы (единственный сегодняшний потребитель, см. dns.c) —
-// маленькие, UDP_MAX_PAYLOAD даёт большой запас над типичными ~50-300
-// байтами, не подбирая его впритык под один конкретный протокол.
+// DNS-запросы/ответы (основной потребитель, см. dns.c) маленькие;
+// UDP_MAX_PAYLOAD даёт запас над типичными ~50-300 байтами.
 #define UDP_MAX_PAYLOAD (ETH_MTU_PAYLOAD - IP_HEADER_LEN - UDP_HEADER_LEN)
 
 typedef struct {
@@ -24,9 +23,8 @@ static udp_state_t g_udp;
 int udp_send(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const void *data, uint16_t len) {
     if (len > UDP_MAX_PAYLOAD) return -1;
 
-    // Тот же приём псевдо-заголовка, что и tcp_send_segment_seq() (tcp.c):
-    // псевдо-заголовок участвует только в арифметике чексума, на провод
-    // уходит лишь настоящий UDP-заголовок+данные через ip_send() ниже.
+    // Псевдо-заголовок (как в tcp_send_segment_seq(), tcp.c) участвует
+    // только в чексуме; на провод уходит лишь UDP-заголовок+данные.
     uint8_t buf[12 + UDP_HEADER_LEN + UDP_MAX_PAYLOAD];
 
     uint32_t src_ip_n = htonl(net_get_config()->our_ip);
@@ -48,10 +46,8 @@ int udp_send(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const void *
     if (len > 0 && data) memcpy(buf + 12 + UDP_HEADER_LEN, data, len);
 
     uint16_t csum = net_checksum(buf, (uint32_t)(12 + udp_len));
-    // RFC 768: вычисленный чексум 0x0000 передаётся как 0xFFFF (поле 0x0000
-    // зарезервировано под "чексум не считался" — редкий, но законный случай
-    // одно-дополнительной суммы, лучше обработать явно, чем отправить
-    // датаграм, который примут за непроверенный).
+    // RFC 768: чексум 0x0000 передаётся как 0xFFFF — 0x0000 зарезервирован
+    // под "чексум не считался".
     hdr->checksum = htons(csum == 0 ? 0xFFFFu : csum);
 
     return ip_send(dst_ip, IP_PROTO_UDP, hdr, udp_len);

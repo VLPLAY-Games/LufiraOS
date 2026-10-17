@@ -31,11 +31,10 @@ static int dns_write_qname(uint8_t *buf, int pos, int buf_cap, const char *hostn
     return pos;
 }
 
-// Пропускает закодированное DNS-имя с buf[pos] (обычные labels,
-// опционально завершённые compression-указателем, см. RFC 1035 §4.1.4) —
-// само имя не разворачивается, нужна только позиция СРАЗУ ПОСЛЕ него (both
-// в вопросе, который мы сами же составили, и в ответах, где имя может быть
-// сжато указателем на вопрос). Возвращает -1 при выходе за buf_len.
+// Пропускает закодированное DNS-имя с buf[pos] (labels, опционально
+// завершённые compression-указателем, RFC 1035 §4.1.4) — само имя не
+// разворачивается, нужна только позиция сразу после него. Возвращает -1
+// при выходе за buf_len.
 static int dns_skip_name(const uint8_t *buf, int pos, int buf_len) {
     while (pos < buf_len) {
         uint8_t b = buf[pos];
@@ -119,15 +118,14 @@ int dns_resolve(const char *hostname, uint32_t *out_ip) {
                     }
                     p += rdlen; // не A (напр. CNAME) - пропускаем, смотрим следующую запись
                 }
-                // Ответ пришёл, но без A-записи в ANCOUNT записях (напр.
-                // голый CNAME без glue) - сдаёмся, как и при NXDOMAIN.
+                // Ответ без A-записи (напр. голый CNAME без glue) —
+                // сдаёмся, как и при NXDOMAIN.
                 udp_stop_listen();
                 return -1;
             }
-            // ID не совпал/не ответ - не наш пакет (вперемешку мог прийти
-            // поздний ответ на предыдущий резолв) - продолжаем ждать.
+            // ID не совпал/не ответ - не наш пакет, продолжаем ждать.
         }
-        process_sleep(1); // НАЙДЕННЫЙ БАГ — см. net_lock_acquire() в net.h
+        process_sleep(1);
     }
 
     udp_stop_listen();

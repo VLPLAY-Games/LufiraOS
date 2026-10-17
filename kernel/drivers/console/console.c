@@ -13,7 +13,7 @@ static void clear_console_line(uint32_t y);
 uint32_t current_x = 0;
 uint32_t current_y = 0;
 
-// См. console_mark_pending_open() и разбор у put_char() ниже.
+// См. console_mark_pending_open() и put_char() ниже.
 static volatile int pending_line_open = 0;
 
 void console_mark_pending_open(void) {
@@ -33,30 +33,19 @@ uint32_t screen_height_pixels = 0;
 uint32_t pixel_format = 0;
 
 // ==================== ДВОЙНАЯ БУФЕРИЗАЦИЯ ====================
-//
-// Раньше put_pixel() писал прямо в MMIO (hw-framebuffer) на каждый вызов —
-// терпимо для одного символа, но многопиксельные операции (gfx_fill_rect/
-// draw_line/blit) рисовали бы видимо по пикселю через некэшируемую память.
-//
-// Включается не в initialize_console() (heap_init() ещё не отработал), а
-// отдельным вызовом console_enable_double_buffering() из kernel.c после
-// того, как тикает таймер — до этой точки боковые сообщения загрузки идут
-// прямо в hw-буфер, так что зависание/падение покажет реальное последнее
-// состояние, а не кадр, который некому было бы отправить на экран.
-//
-// Flush через "грязный" флаг, не на каждый put_pixel(): console_tick_present()
-// (из pit_timer_handler()) копирует back buffer в hw-буфер один раз за тик
-// (100 Гц), только если что-то изменилось — амортизирует стоимость кадра
-// на весь батч операций, а не на каждый пиксель.
+// put_pixel() писал бы прямо в MMIO на каждый вызов — дорого для
+// многопиксельных операций через некэшируемую память. Включается не в
+// initialize_console() (heap ещё не готов), а отдельно из kernel.c после
+// старта таймера: до этого момента сообщения загрузки идут прямо в
+// hw-буфер и видны при зависании/падении.
+// Flush — по "грязному" флагу из console_tick_present(), а не на каждый
+// put_pixel(), чтобы амортизировать копирование кадра на весь батч операций.
 static uint32_t *hw_framebuffer = NULL;
 static int double_buffering_enabled = 0;
 static int fb_dirty = 0;
-// Грязный прямоугольник, а не весь экран — баг: курсор WM заметно
-// "тормозил". fb_dirty раньше был просто bool'ом, и gfx_present() на
-// каждый грязный тик копировал весь кадр (~4МБ для 1280x800) из back buffer
-// в hw_framebuffer (часто MMIO/VRAM, дорого под QEMU TCG) — каждое
-// шевеление мыши стоило полного кадра (до 100 раз/сек). Теперь область
-// накапливается как объединение прямоугольников с прошлого flush'а.
+// Прямоугольник, а не весь экран: полный memcpy кадра в MMIO/VRAM на
+// каждый тик был бы дорог при мелких изменениях. Область накапливается
+// как объединение прямоугольников с прошлого flush'а.
 static int32_t dirty_x0 = 0, dirty_y0 = 0, dirty_x1 = 0, dirty_y1 = 0;
 
 void console_enable_double_buffering(void) {
@@ -72,10 +61,9 @@ void console_enable_double_buffering(void) {
     double_buffering_enabled = 1;
 }
 
-// Копирует ТОЛЬКО накопленный грязный прямоугольник back buffer -> hw-буфер
-// (если ничего не грязно — no-op, дешевле лишней проверки у вызывающего).
-// Вызывать когда реально нужно (прямые вызовы вроде дампа исключения,
-// idt.c) или когда fb_dirty уже проверен (console_tick_present()).
+// Копирует только накопленный грязный прямоугольник back buffer -> hw-буфер
+// (no-op, если ничего не грязно). Для прямых вызовов (дамп исключения,
+// idt.c) либо из console_tick_present(), где fb_dirty уже проверен.
 void gfx_present(void) {
     if (!double_buffering_enabled || !fb_dirty) return;
     for (int32_t py = dirty_y0; py < dirty_y1; py++) {
@@ -86,9 +74,8 @@ void gfx_present(void) {
     fb_dirty = 0;
 }
 
-// Вызывается из pit_timer_handler() на каждый тик (pit.c) — присутствует
-// ТОЛЬКО если что-то рисовали с прошлого тика, иначе no-op (не тратит
-// память/CPU на memcpy всего кадра 100 раз в секунду вхолостую).
+// Вызывается из pit_timer_handler() на каждый тик — no-op, если с
+// прошлого тика ничего не рисовали (не гонять memcpy кадра 100 раз/сек вхолостую).
 void console_tick_present(void) {
     if (double_buffering_enabled && fb_dirty) gfx_present();
 }
@@ -111,13 +98,11 @@ static void mark_dirty_rect_raw(int32_t x0, int32_t y0, int32_t x1, int32_t y1) 
     fb_dirty = 1;
 }
 
-// Для вызывающих, которые пишут в framebuffer[] напрямую, в обход
-// put_pixel() (gfx_fill_rect()/gfx_blit() в graphics2d.c — построчно
-// через указатель/memcpy ради скорости, см. их же комментарии), но НЕ
-// знают точных границ (скролл, очистка экрана) — иначе их изменения
-// просто не попадут на экран до следующего put_pixel() где-нибудь ещё.
-// Метит ВЕСЬ экран — см. console_mark_dirty_rect() для вызывающих,
-// которые границы знают.
+// Для кода, который пишет в framebuffer[] напрямую, минуя put_pixel()
+// (gfx_fill_rect()/gfx_blit() в graphics2d.c), и не знает точных границ
+// (скролл, очистка экрана) — иначе изменения не попадут на экран до
+// следующего put_pixel() где-то ещё. Метит весь экран; для вызывающих,
+// которые границы знают, см. console_mark_dirty_rect().
 void console_mark_dirty(void) {
     mark_dirty_rect_raw(0, 0, (int32_t)screen_width_pixels, (int32_t)screen_height_pixels);
 }
@@ -317,21 +302,13 @@ static int interrupts_enabled(void) {
     return (int)((rflags >> 9) & 1ULL);
 }
 
-// Преобразование цвета RGB (как его пишет остальной код: (R<<16)|(G<<8)|B,
-// "0xRRGGBB") в формат, который реально ожидает framebuffer — pixel_format
-// приходит из BootInfo уже нормализованным загрузчиком (boot/system/
-// graphics.c) до 0 (PixelRedGreenBlueReserved8BitPerColor — байт 0 по
-// адресу = Red) или 1 (PixelBlueGreenRedReserved8BitPerColor — байт 0 =
-// Blue), см. bootinfo.h.
-//
-// Ветка была закомментирована (return color всегда), а когда её впервые
-// включили здесь (v0.8-мост, пункт 1) и проверили живьём в QEMU —
-// "логический красный" оказался синим. Причина: условие в закомментированной
-// версии было перепутано местами. На little-endian x86 запись uint32_t
-// v=(R<<16)|(G<<8)|B кладёт в память байт0=B, байт1=G, байт2=R — то есть
-// БЕЗ swap'а эта запись уже соответствует PixelBlueGreenRedReserved...
-// (байт0=Blue), а не Red-первому формату, как могло бы показаться по
-// названию "RGB". Значит swap нужен ровно для pixel_format==0, а не ==1.
+// Преобразование RGB (R<<16)|(G<<8)|B в формат, который ожидает framebuffer.
+// pixel_format приходит из BootInfo (см. bootinfo.h): 0 =
+// PixelRedGreenBlueReserved8BitPerColor (байт0=Red), 1 =
+// PixelBlueGreenRedReserved8BitPerColor (байт0=Blue).
+// На little-endian x86 запись (R<<16)|(G<<8)|B кладёт в память байт0=B —
+// то есть без swap'а это уже формат с байт0=Blue, а не Red, как можно
+// подумать по названию "RGB". Swap нужен ровно для pixel_format==0.
 uint32_t convert_color(uint32_t color) {
     if (pixel_format == 1) {
         return color; // байт0=Blue — (R<<16)|(G<<8)|B уже в этом порядке
@@ -431,24 +408,9 @@ void initialize_console(BootInfo* bi) {
 void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
     if (x >= screen_width_pixels || y >= screen_height_pixels) return;
     framebuffer[y * pixels_per_scan_line + x] = color;
-    // НАЙДЕННЫЙ БАГ (жалоба пользователя: экран визуально "зависает" на
-    // "LufiraOS Booting", хотя шелл под капотом реально работает и даже
-    // принимает ввод вслепую) — put_pixel() САМЫЙ частый путь отрисовки
-    // (им рисуется весь текст, put_char_graphic() ниже) и раньше просто
-    // напрямую выставлял fb_dirty=1, в обход mark_dirty_rect_raw(). После
-    // перехода "грязного" флага на прямоугольник (см. комментарий у
-    // dirty_x0 выше) это переcтало обновлять сами границы dirty_x0..y1 —
-    // первый же put_pixel() после console_enable_double_buffering()
-    // выставлял fb_dirty=1 при ВСЁ ЕЩЁ нулевом прямоугольнике (0,0,0,0),
-    // gfx_present() на ближайшем тике видел fb_dirty и честно "обрабатывал"
-    // его — но цикл по пустому прямоугольнику не копировал ни одного
-    // пикселя — и тут же сбрасывал fb_dirty обратно в 0. Экран навсегда
-    // оставался таким, каким был на момент enable (как раз "Booting..."),
-    // а дальнейший текст рисовался только в back buffer, никогда не
-    // попадая на реальный экран. console_mark_dirty_rect() ниже — тот же
-    // push, что и у gfx_blit()/gfx_fill_rect() (graphics2d.c), но на один
-    // пиксель — до console_enable_double_buffering() это так же безобидно
-    // (gfx_present()/console_tick_present() сами no-op без неё).
+    // Как и gfx_blit()/gfx_fill_rect() (graphics2d.c), помечает затронутую
+    // область грязной — здесь всего один пиксель. Без double buffering
+    // mark_dirty_rect() сама no-op, так что вызов безобиден и до enable.
     console_mark_dirty_rect((int)x, (int)y, 1, 1);
 }
 
@@ -560,12 +522,10 @@ void draw_text_tilted(const char *text, uint32_t px, uint32_t py, uint32_t scale
     }
 }
 
-// v0.8 (GUI+WM): put_char_graphic() выше считает x/y КЛЕТКАМИ текстовой
-// сетки (умножает на CHAR_WIDTH+CHAR_PADDING_X и т.д.) - окнам/титлбару
-// нужно позиционирование произвольными ПИКСЕЛЯМИ (рамка окна не обязана
-// совпадать с сеткой символов консоли). Та же отрисовка через put_pixel()
-// (значит, тот же экран/back buffer, что и put_char_graphic()), просто
-// без клеточного умножения координат.
+// put_char_graphic() выше считает x/y клетками текстовой сетки — окнам/
+// титлбару нужны произвольные пиксельные координаты (рамка окна не
+// обязана совпадать с сеткой символов). Та же отрисовка через put_pixel(),
+// просто без умножения на размер клетки.
 void put_char_graphic_px(int c, int x, int y, uint32_t fg_color, uint32_t bg_color) {
     if (c < 32 || c > 127) c = '?';
     unsigned char *glyph = full_font_data[c - 32];
@@ -582,13 +542,10 @@ void put_char_graphic_px(int c, int x, int y, uint32_t fg_color, uint32_t bg_col
     }
 }
 
-// Тот же глиф 8x8, но в ПРОИЗВОЛЬНЫЙ вызывающий буфер (не экран/back
-// buffer) - нужно gui_window_draw_text() (gui.c), чтобы рисовать текст в
-// приватный пиксельный буфер окна. Только foreground - фон окна рисует
-// сам вызывающий заранее (gui_window_fill()), затирать его здесь не
-// нужно (в отличие от put_char_graphic()/put_char_graphic_px() выше,
-// где bg_color осмыслен - экран без явного фона остаётся "дырявым" от
-// предыдущего кадра).
+// Тот же глиф 8x8, но в произвольный буфер вызывающего (gui_window_draw_text()
+// в gui.c рисует в приватный буфер окна). Только foreground: фон уже
+// залит вызывающим (gui_window_fill()), в отличие от put_char_graphic(),
+// где bg_color нужен — экран без перезаписи остаётся "дырявым".
 void font_draw_glyph_to_buffer(uint32_t *buf, uint32_t buf_w, uint32_t buf_h,
                                int x, int y, int c, uint32_t fg_color) {
     if (c < 32 || c > 127) c = '?';
@@ -605,7 +562,6 @@ void font_draw_glyph_to_buffer(uint32_t *buf, uint32_t buf_w, uint32_t buf_h,
     }
 }
 
-// v0.8 (GUI+WM), этап 3 — см. комментарий у объявления в console.h.
 uint32_t console_get_font_size(void) {
     return (uint32_t)sizeof(full_font_data);
 }
@@ -627,17 +583,13 @@ void put_char(char c) {
         erase_cursor();
     }
 
-    // НАЙДЕННЫЙ БАГ (живое железо, devmode: "[ .. ] Initializing syscalls...
-    // [SYSCALL] 65 system calls registered" на ОДНОЙ строке) — LOG_PENDING
-    // (log.h) печатает "[ .. ] X..." БЕЗ \n и ждёт LOG_DONE_OK/_FAIL/_WARN,
-    // которые вернутся через '\r' и перетрут ту же строку на "[ OK ] ...".
-    // Но если сама инициализируемая подсистема между ними что-то печатает
-    // (DLOG/printf) — её текст раньше просто приклеивался к ещё открытой
-    // "[ .. ] X..." строке, потому что курсор так и оставался на ней же.
-    // '\r' не трогаем — это легитимный сигнал от LOG_DONE_*, не чужой вывод.
-    // ВАЖНО: это должно случиться ДО serial_putc(c) ниже — иначе сам
-    // символ c, которым мы обнаружили разрыв, успевал бы уйти на COM1 ещё
-    // на старой строке, а синтетический '\n' — только после него.
+    // LOG_PENDING (log.h) печатает "[ .. ] X..." без \n и ждёт
+    // LOG_DONE_OK/_FAIL/_WARN, который придёт через '\r' и перетрёт строку.
+    // Если между ними что-то выводится (DLOG/printf), закрываем висящую
+    // строку синтетическим \n, иначе чужой текст приклеится к ней же.
+    // '\r' не трогаем — это сигнал LOG_DONE_*, а не чужой вывод. Делать
+    // это нужно ДО serial_putc(c): иначе сам символ c уйдёт на COM1 ещё
+    // на старой строке, раньше синтетического '\n'.
     if (pending_line_open && c != '\r') {
         pending_line_open = 0;
         if (c != '\n') {
@@ -839,24 +791,13 @@ void itoa(int64_t value, char* buffer, int base) {
     utoa((uint64_t)value, buffer, base);
 }
 
-// НАЙДЕННЫЙ БАГ (пользователь, Debug-режим — devmode): строки лога
-// инициализации изредка слипались в одну на экране. Причина — настоящая
-// гонка, не опечатка с '\n': таймерный IRQ (100Гц, timer_irq_handler() в
-// pit.c) безусловно каждый тик зовёт usb_poll() -> xhci_poll_hotplug(),
-// который при обнаружении устройства печатает через DLOG()/printf() —
-// то есть put_char() дёргается и из foreground-кода (обычный printf() в
-// kernel.c при инициализации подсистем), и асинхронно из IRQ-обработчика,
-// без какой-либо синхронизации между ними. current_x/current_y/
-// pending_line_open — обычные глобальные переменные (см. их объявления
-// выше), и если таймерный IRQ срабатывает ПОСЕРЕДИНЕ ещё не завершённого
-// printf() (например между символами "Initializing syscalls..."), два
-// логически разных сообщения перемешиваются посимвольно на одной строке.
-// Тот же класс бага уже чинили для userspace-записи в /dev/console (см.
-// console_write_lock()/console_write_unlock() в vfs.c, тот же приём —
-// сохраняем РЕАЛЬНОЕ состояние EFLAGS.IF, а не безусловный cli/sti, чтобы
-// корректно работать и при вызове уже из отключённых прерываний, например
-// из того же IRQ-обработчика) — здесь то же самое, но для ядерного
-// printf(), который vfs.c не защищает (это два разных пути вызова).
+// Гонка: таймерный IRQ (100Гц, pit.c) зовёт usb_poll()->xhci_poll_hotplug(),
+// который может DLOG()/printf() асинхронно, пока foreground printf() ещё
+// не закончил писать строку через put_char() — символы обоих вызовов
+// перемешиваются в current_x/current_y/pending_line_open.
+// Сохраняем реальное EFLAGS.IF, а не безусловный cli/sti — чтобы работать
+// и при вызове уже из отключённых прерываний (из того же IRQ-обработчика).
+// Тот же приём для userspace-пути — см. console_write_lock() в vfs.c.
 static inline uint64_t console_printf_lock(void) {
     uint64_t flags;
     asm volatile("pushfq; popq %0" : "=r"(flags) :: "memory");
@@ -1535,17 +1476,13 @@ void console_scroll_down(void) {
     }
 }
 
-// v0.8 (GUI+WM): закрытие последнего окна возвращает экран в текстовый
-// режим - back buffer к этому моменту полностью перезаписан рабочим
-// столом/окнами (композитинг теперь в userspace WM-процессе, см.
-// lufira-packages/src/apps/wm.c, который зовёт SYS_FB_PRESENT), так что
-// просто "поставить dirty-флаг" недостаточно, нужно реально перерисовать
-// текст заново.
-// console_scroll_to_bottom() для этого не подходит - она молча ничего не
-// делает, если console_history_scroll уже 0 (обычный случай: GUI-режим
-// не трогает прокрутку вовсе), та же отрисовка, что и в её собственной
-// ветке "lines >= screen_height_chars", но БЕЗ этой защиты раннего
-// выхода.
+// Закрытие последнего окна возвращает экран в текстовый режим: back buffer
+// к этому моменту полностью перезаписан рабочим столом/окнами (композитинг
+// в userspace WM, lufira-packages/src/apps/wm.c), так что просто
+// выставить dirty-флаг недостаточно — текст нужно перерисовать заново.
+// console_scroll_to_bottom() не подходит: она no-op при console_history_scroll
+// уже равном 0 (обычный случай для GUI-режима). Здесь та же отрисовка,
+// но без этой защиты раннего выхода.
 void console_redraw_from_history(void) {
     for (uint32_t y = 0; y < screen_height_chars; y++) {
         uint32_t logical_line = console_history_count > screen_height_chars
@@ -1557,17 +1494,11 @@ void console_redraw_from_history(void) {
         }
     }
 
-    // НАЙДЕННЫЙ БАГ (v0.8 GUI+WM, этап 3, живое тестирование: тонкая синяя
-    // полоса оставалась внизу экрана после закрытия всех окон и возврата в
-    // текстовый режим) — screen_height_chars = screen_height_pixels /
-    // (CHAR_HEIGHT+CHAR_PADDING_Y) целочисленно, так что при разрешении,
-    // не кратном высоте строки (800 / 12 = 66 строк, 792px, остаток 8px),
-    // нижняя полоска экрана не накрывается НИ ОДНОЙ строкой из цикла выше
-    // и раньше молча хранила то, что там нарисовал последний кадр WM
-    // (таскбар, см. lufira-packages/apps/wm.c) — цикл по clear_console_line()
-    // просто не доходит до этих пикселей. Раньше (первый срез, без
-    // таскбара) это тоже было верно, просто сливалось с чёрным фоном
-    // рабочего стола и было незаметно.
+    // screen_height_chars = screen_height_pixels / (CHAR_HEIGHT+CHAR_PADDING_Y)
+    // целочисленно, так что при разрешении, не кратном высоте строки
+    // (800 / 12 = 66 строк, остаток 8px), нижняя полоска экрана не
+    // накрывается циклом выше и хранит то, что там нарисовал последний
+    // кадр WM (таскбар) — дочищаем её отдельно.
     uint32_t covered_height = screen_height_chars * (CHAR_HEIGHT + CHAR_PADDING_Y);
     for (uint32_t py = covered_height; py < screen_height_pixels; py++) {
         for (uint32_t px = 0; px < screen_width_pixels; px++) {

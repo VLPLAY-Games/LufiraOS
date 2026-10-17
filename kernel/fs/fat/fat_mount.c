@@ -1,9 +1,7 @@
-// VFS-интеграция USB/FAT-монтирования — см. разбор архитектуры и границ
-// в fat_mount.h. Параллельно с kernel/shell/commands/mount.c (мёртвый
-// кернел-native код, не трогается) — свой собственный, отдельный реестр
-// монтирований, т.к. тот модуль не экспортирует свой g_mounts/статические
-// хелперы наружу, а сплетать новую VFS-функциональность с мёртвым шелл-
-// кодом было бы лишним риском.
+// VFS-интеграция USB/FAT-монтирования (архитектура и границы — fat_mount.h).
+// Свой отдельный реестр монтирований, параллельно с
+// kernel/shell/commands/mount.c: тот модуль не экспортирует g_mounts и
+// свои статические хелперы наружу.
 #include "fat_mount.h"
 #include "fat.h"
 #include "../vfs/vfs.h"
@@ -27,13 +25,10 @@ typedef struct {
 
 static vfs_fat_mount_t g_vfs_mounts[MAX_VFS_FAT_MOUNTS];
 
-// fat_blockdev_t — связывает общий (протокольный, не знающий про USB)
-// fat.c с конкретным транспортом (xHCI/MSD) этого монтирования. ctx —
-// usb_index, упакованный в void* (устройства — малые целые, не указатели).
-// Батчинг по XHCI_MSD_MAX_BATCH_BLOCKS и ретраи — здесь, в ОДНОМ месте,
-// а не в каждом месте, что раньше гоняло xhci_msd_*_blocks() напрямую
-// (mount-time полное чтение образа и sync_mount_to_usb() дублировали этот
-// код раньше — теперь и то, и другое просто вызывает fs->dev.*).
+// fat_blockdev_t связывает протокольный fat.c с транспортом (xHCI/MSD)
+// этого монтирования. ctx — usb_index, упакованный в void* (малое целое,
+// не указатель). Батчинг по XHCI_MSD_MAX_BATCH_BLOCKS и ретраи собраны в
+// одном месте — всё остальное зовёт только fs->dev.*.
 static int fat_dev_read(void *ctx, uint32_t lba, uint32_t count, void *buf) {
     int usb_index = (int)(uint64_t)ctx;
     uint8_t *p = (uint8_t *)buf;
@@ -67,12 +62,10 @@ static int fat_dev_write(void *ctx, uint32_t lba, uint32_t count, const void *bu
 }
 
 // Открытый FAT-файл целиком читается в этот буфер при open() и пишется
-// целиком обратно через fat_write_file() при каждом write() — fat_read_file()/
-// fat_write_file() в fat.c сами умеют только "весь файл с начала", без
-// произвольного offset (fat_lookup_path()/курсор по кластерам с offset
-// никогда не были реализованы, см. fat_mount.h). Для файлов, с которыми
-// реально работают на флешке (конфиги, мелкие документы), это безопаснее,
-// чем самому с нуля писать offset-based чтение/запись по цепочке кластеров.
+// целиком обратно через fat_write_file() на каждый write() — fat_read_file()/
+// fat_write_file() умеют только "весь файл с начала", без произвольного
+// offset. Для типичных файлов на флешке (конфиги, мелкие документы) это
+// проще и безопаснее, чем писать offset-based доступ по цепочке кластеров.
 typedef struct {
     vfs_fat_mount_t *m;
     char short_name[13];
@@ -81,11 +74,10 @@ typedef struct {
     uint32_t cap;
 } fat_file_private_t;
 
-// Транслирует код ошибки fat_init() (см. его контракт в fat.h) в код
-// vfs_fat_mount() — тот самый, что sys_mount()/mount.elf (lufira-packages)
-// уже показывают пользователю (switch по -2..-9 в base/mount.c). -9
-// ("unrecognized") специально оставлен для "это не FAT" — тогда
-// sys_mount() идёт пробовать ext2/exFAT дальше, как и раньше.
+// Транслирует код ошибки fat_init() (контракт в fat.h) в код vfs_fat_mount(),
+// который sys_mount()/mount.elf показывают пользователю (switch по -2..-9 в
+// base/mount.c). -9 ("unrecognized") — "это не FAT", sys_mount() пробует
+// ext2/exFAT дальше.
 static int map_fat_init_error(int fat_err) {
     switch (fat_err) {
         case -3: return -6; // метаданные не влезают в RAM-потолок ("device too large")
@@ -99,11 +91,9 @@ static int root_dir_cluster(fat_fs_t *fs) {
     return (fs->fat_type == 32) ? (int)fs->root_cluster : 0;
 }
 
-// v0.9: раньше здесь был свой цикл по dirty_map (дублировал то, что делал
-// mount.c для своих N монтирований) - теперь это просто fat_sync() в
-// fat.c, которая работает через m->fs.dev (fat_dev_read/write выше), а не
-// напрямую через xhci_msd_*. Имя-обёртка оставлена для читаемости вызовов
-// ниже (REAL-TIME-запись - см. fat_mount.h).
+// Тонкая обёртка над fat_sync() — для читаемости вызовов REAL-TIME-записи
+// ниже (см. fat_mount.h). fat_sync() пишет через m->fs.dev (fat_dev_read/write
+// выше), не напрямую через xhci_msd_*.
 static void sync_mount_to_usb(vfs_fat_mount_t *m) {
     fat_sync(&m->fs);
 }
@@ -119,10 +109,9 @@ static vfs_fat_mount_t *find_mount_for_path(const char *path, char *rel_name_out
         const char *rel = path + plen;
         while (*rel == '/') rel++;
 
-        // ГРАНИЦА (см. fat_mount.h): только корневой уровень — если после
-        // префикса остаётся ещё один '/', значит это подкаталог, который
-        // мы сознательно не поддерживаем. Нет strchr() в этом freestanding
-        // lib/string.h (см. тот же комментарий в других местах кернела).
+        // ГРАНИЦА (fat_mount.h): только корневой уровень — '/' после
+        // префикса значит подкаталог, который мы не поддерживаем. Нет
+        // strchr() в этом freestanding lib/string.h.
         int has_slash = 0;
         for (const char *s = rel; *s; s++) if (*s == '/') { has_slash = 1; break; }
         if (has_slash) continue;
@@ -160,14 +149,10 @@ int vfs_fat_mount(int usb_index, const char *prefix) {
     if (xhci_msd_get_info(usb_index, &max_lba, &block_size) != 0) return -4; // нет такого устройства
     if (block_size != 512) return -5; // неподдерживаемый размер блока
 
-    // v0.9: раньше тут читалось устройство ЦЕЛИКОМ в один kmalloc()
-    // (отсюда и MOUNT_MAX_IMAGE_BYTES = 8MB — половина кучи ядра,
-    // жёсткий потолок на размер флешки). Теперь fat_init() сам читает
-    // через fat_dev_read/write только метаданные (+ маленький кэш корня
-    // для FAT32) — реальное содержимое файлов никогда не копируется в ОЗУ
-    // целиком, см. разбор в fat.h. Предел на размер устройства теперь
-    // зависит только от размера метаданных (FAT_META_MAX_SECTORS), а не
-    // от емкости флешки.
+    // fat_init() читает через fat_dev_read/write только метаданные (+ кэш
+    // корня для FAT32) — содержимое файлов в ОЗУ целиком не копируется (см.
+    // fat.h). Предел на размер устройства зависит от размера метаданных
+    // (FAT_META_MAX_SECTORS), а не от емкости флешки.
     fat_blockdev_t dev = {
         .ctx = (void *)(uint64_t)usb_index,
         .read_blocks = fat_dev_read,

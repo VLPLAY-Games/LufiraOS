@@ -165,10 +165,9 @@ static int dhcp_parse_reply(const uint8_t *data, uint16_t len, uint32_t xid,
 }
 
 // Одна фаза DISCOVER->OFFER или REQUEST->ACK/NAK: до 3 широковещательных
-// попыток, каждая со своим ~3000мс бюджетом (тот же порядок, что у
-// dns_resolve()/tcp_connect()), всё вместе не длиннее overall_deadline.
-// *inout_reply на входе для REQUEST несёт offered_ip/server_id из OFFER;
-// на успешном выходе — разобранный ответ (OFFER или ACK).
+// попыток по ~3000мс, суммарно не длиннее overall_deadline. *inout_reply
+// на входе для REQUEST несёт offered_ip/server_id из OFFER, на выходе —
+// разобранный ответ.
 static int dhcp_exchange(uint8_t msg_type, uint32_t xid, const uint8_t mac[6],
                           uint64_t overall_deadline, dhcp_reply_info_t *inout_reply,
                           int expect_msg_type, int *out_got_nak) {
@@ -200,7 +199,7 @@ static int dhcp_exchange(uint8_t msg_type, uint32_t xid, const uint8_t mac[6],
                     // Чужой/поздний ответ на предыдущую попытку — продолжаем ждать.
                 }
             }
-            process_sleep(1); // НАЙДЕННЫЙ БАГ — см. net_lock_acquire() в net.h
+            process_sleep(1);
         }
     }
     return -1;

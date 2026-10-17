@@ -45,9 +45,8 @@ extern uint32_t color_palette_256[];
 // Прототипы функций
 void initialize_console(BootInfo* bi);
 
-// Двойная буферизация (v0.8-мост, пункт 2) — см. подробный комментарий в
-// console.c. Включать ПОСЛЕ heap_init() И после того, как уже тикает
-// таймер (kernel.c зовёт сразу после sti/irq_enable).
+// Включать ПОСЛЕ heap_init() и после того, как уже тикает таймер
+// (kernel.c зовёт сразу после sti/irq_enable). См. console.c.
 void console_enable_double_buffering(void);
 // Копирует back buffer в hw-буфер немедленно, безусловно.
 void gfx_present(void);
@@ -55,34 +54,25 @@ void gfx_present(void);
 // прошлого раза — зовётся из pit_timer_handler() каждый тик.
 void console_tick_present(void);
 // Для кода, который пишет в framebuffer[] напрямую в обход put_pixel()
-// (graphics2d.c). Метит "грязным" ВЕСЬ экран — используется там, где
-// вызывающий не знает точных границ (скролл/очистка и т.п.). Для
-// вызывающих, которые границы ЗНАЮТ (gfx_blit()/gfx_fill_rect()),
-// см. console_mark_dirty_rect() ниже — она не раздувает grязную область
-// до целого экрана по каждому мелкому изменению.
+// (graphics2d.c) и не знает точных границ (скролл/очистка). Метит
+// "грязным" весь экран; для вызывающих, которые границы знают
+// (gfx_blit()/gfx_fill_rect()), см. console_mark_dirty_rect() ниже.
 void console_mark_dirty(void);
-// То же самое, но только для прямоугольника (x,y,w,h), экранные
-// координаты — накапливается как объединение с уже грязной областью с
-// прошлого flush'а (gfx_present()). НАЙДЕННЫЙ БАГ (жалоба пользователя:
-// курсор WM идёт с заметной задержкой в реальном использовании) —
-// gfx_present() раньше копировал ВЕСЬ кадр в hw-framebuffer (часто MMIO,
-// заметно дороже RAM) на КАЖДЫЙ "грязный" тик, даже когда реально
-// поменялся один маленький курсор поверх уже готовой сцены. См. подробный
-// разбор в gfx_present()/gfx_blit().
+// То же самое, но для прямоугольника (x,y,w,h) в экранных координатах —
+// накапливается как объединение с уже грязной областью с прошлого
+// flush'а (gfx_present()). Избегает лишних MMIO-копий всего кадра на
+// каждую мелкую правку (см. gfx_present()/gfx_blit()).
 void console_mark_dirty_rect(int x, int y, int w, int h);
 void put_pixel(uint32_t x, uint32_t y, uint32_t color);
 uint32_t convert_color(uint32_t color);
 void put_char_graphic(int c, uint32_t x, uint32_t y, uint32_t fg_color, uint32_t bg_color);
-// v0.8 (GUI+WM) — см. комментарии у реализаций в console.c.
 void put_char_graphic_px(int c, int x, int y, uint32_t fg_color, uint32_t bg_color);
 void font_draw_glyph_to_buffer(uint32_t *buf, uint32_t buf_w, uint32_t buf_h,
                                int x, int y, int c, uint32_t fg_color);
-// v0.8 (GUI+WM), этап 3: экспорт битмап-шрифта (full_font_data, static в
-// console.c) для SYS_FB_FONT (syscall.c) — userspace WM-процесс (wm.c)
-// больше не может звать put_char_graphic_px()/font_draw_glyph_to_buffer()
-// напрямую (не его адресное пространство), ему нужны сырые байты глифов,
-// чтобы рисовать титлбар/кнопку закрытия в СВОЕМ compositor-буфере. См.
-// console_get_font_data() у реализации.
+// Экспорт битмап-шрифта (full_font_data) для SYS_FB_FONT: userspace WM
+// (wm.c) не в адресном пространстве ядра и не может звать
+// put_char_graphic_px()/font_draw_glyph_to_buffer() напрямую — рисует
+// глифы сам из сырых байт (титлбар, кнопка закрытия).
 uint32_t console_get_font_size(void);
 void console_get_font_data(void *out, uint32_t max_bytes);
 void draw_text_scaled(const char *text, uint32_t px, uint32_t py, uint32_t scale, uint32_t fg_color);
@@ -90,8 +80,8 @@ void draw_text_tilted(const char *text, uint32_t px, uint32_t py, uint32_t scale
 uint32_t text_scaled_width(const char *text, uint32_t scale);
 void put_char(char c);
 
-// Открывает "висящую" (ещё не завершённую \n) статус-строку — см. LOG_PENDING
-// в log.h и разбор бага у put_char() в console.c. Вызывать ТОЛЬКО оттуда.
+// Открывает "висящую" (без \n) статус-строку — см. LOG_PENDING в log.h
+// и put_char() в console.c. Вызывать только оттуда.
 void console_mark_pending_open(void);
 void print_string(const char* str);
 void printf(const char* format, ...);
@@ -130,5 +120,5 @@ void display_system_info(BootInfo* bi);
 void console_scroll_up(void);
 void console_scroll_down(void);
 void console_scroll_to_bottom(void);
-void console_redraw_from_history(void); // v0.8 (GUI+WM) - см. комментарий у реализации
+void console_redraw_from_history(void); // см. реализацию в console.c
 int console_is_scrolled(void);

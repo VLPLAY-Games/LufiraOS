@@ -14,7 +14,6 @@
 #include "system/timer/pit.h"
 
 extern lufirafs_t lufirafs;
-// cwd_inode теперь макрос поверх current_process->cwd_inode (shell.h).
 
 // help, clear, reboot, shutdown, version, status, trap
 void command_help(void) {
@@ -111,11 +110,8 @@ void command_reboot(void) {
     printf("done.\nRebooting system...\n");
     acpi_reset(); // спецификационный сброс через FADT RESET_REG, если платформа его поддерживает
     __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64)); // 8042-контроллер
-    // PCI RST_CNT (0xCF9) — универсальный fallback на i440fx/Q35 (и на реальном
-    // железе с совместимым чипсетом), НЕ ACPI-порт выключения. Раньше здесь
-    // стоял outw(0x604, 0x2000) — это код ACPI-ВЫКЛЮЧЕНИЯ (SLP_TYPa=0|SLP_EN),
-    // скопированный по ошибке из acpi_shutdown(): вместо перезагрузки он
-    // в реальности выключал машину, если 8042-сброс не срабатывал.
+    // PCI RST_CNT (0xCF9) — универсальный fallback на i440fx/Q35 (и на
+    // совместимом железе), НЕ ACPI-порт выключения.
     __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0x06), "Nd"((uint16_t)0xCF9));
     __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0x0E), "Nd"((uint16_t)0xCF9));
     printf("Reboot failed. Please restart manually.\n");
@@ -124,11 +120,9 @@ void command_shutdown(void) {
     printf("\nSyncing filesystem... ");
     lufirafs_flush(&lufirafs);
     printf("done.\nShutting down system...\n");
-    
-    // Используем ACPI shutdown
+
     acpi_shutdown();
-    
-    // Если ACPI не сработал, пробуем legacy
+
     printf("Shutdown command sent. System may require manual power off.\n");
 }
 void command_version(void) {
@@ -166,13 +160,11 @@ void command_free(void) {
            (unsigned long)(heap_free / 1024));
 }
 
-// cpuload — сэмплирует idle/total тики PIT (pit.c) и cpu_ticks каждого
-// процесса (process.h) до и после короткой паузы, печатает загрузку в
-// процентах системно и по процессам. Пауза сделана через process_sleep()
-// (настоящий yield планировщику — см. process.c), а НЕ через pit_wait_ms()
-// (busy-hlt-цикл): pit_wait_ms() не меняет current_process, так что сам
-// шелл всё это время оставался бы "текущим" и cpuload намеряла бы себе же
-// 100% просто за факт своего собственного ожидания.
+// cpuload — сэмплирует idle/total тики PIT (pit.c) и cpu_ticks процессов
+// до/после короткой паузы и печатает загрузку в процентах. Пауза — через
+// process_sleep() (настоящий yield, см. process.c), а не pit_wait_ms()
+// (busy-hlt): тот не меняет current_process, и шелл намерял бы себе 100%
+// просто за факт собственного ожидания.
 #define CPULOAD_SAMPLE_MS 500
 void command_cpuload(void) {
     uint64_t total_before = pit_get_total_ticks();
@@ -319,9 +311,9 @@ void command_kill(const char *args)
         const char *sig_arg = args + 1;
         int len = token_length(sig_arg);
 
-        // execute_command() лоуеркейсит всю строку команды до разбора, так
-        // что sig_arg сюда всегда приходит нижним регистром (даже если
-        // пользователь набрал "kill -KILL 3") — сравниваем с ним же.
+        // execute_command() лоуеркейсит всю команду до разбора, так что
+        // sig_arg всегда нижнего регистра (даже "kill -KILL 3") — сравниваем
+        // с ним же.
         if (token_equals(sig_arg, "kill")) sig = SIGKILL;
         else if (token_equals(sig_arg, "term")) sig = SIGTERM;
         else if (token_equals(sig_arg, "stop")) sig = SIGSTOP;
@@ -355,15 +347,11 @@ void command_kill(const char *args)
     if (result == 0) {
         printf("Signal %d sent to PID %d\n", sig, pid);
 
-        // SIGKILL/SIGTERM переводят процесс в PROCESS_TERMINATED, но сам по
-        // себе он остаётся "зомби" в списке (и в выводе ps) до тех пор,
-        // пока родитель не заберёт его через process_wait() — это
-        // нормальная UNIX-семантика, но в этом шелле нет отдельного
-        // авто-reap'а для процессов, о которых никто явно не спросит через
-        // "wait". Раз уж мы (шелл, реальный родитель run/runbg) сами только
-        // что синхронно попросили процесс завершиться — тут же и забираем
-        // его, чтобы "kill" ощущался как окончательное действие, а не как
-        // полдела, требующее ещё и "wait <pid>" вручную.
+        // SIGKILL/SIGTERM переводят процесс в PROCESS_TERMINATED, но он
+        // остаётся "зомби" (виден в ps) до process_wait() родителя — обычная
+        // UNIX-семантика без авто-reap'а. Раз шелл сам (как родитель
+        // run/runbg) только что попросил завершение — забираем зомби сразу,
+        // чтобы "kill" не требовал ручного "wait <pid>".
         if (sig == SIGKILL || sig == SIGTERM) {
             process_wait((uint32_t)pid, NULL);
         }

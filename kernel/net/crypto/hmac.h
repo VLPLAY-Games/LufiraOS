@@ -4,12 +4,10 @@
 #include "sha256.h"
 
 /*
- * HMAC-SHA256 (RFC 2104) и построенный на нём PRF TLS 1.2 (RFC 5246 §5) —
- * ровно то, что нужно net/tls.c для вывода master_secret, key_block и
- * verify_data сообщений Finished. Других применений (и других хешей под
- * HMAC) в ядре нет, поэтому реализация жёстко привязана к SHA-256, а не
- * параметризована абстрактным "дайджестом" — см. тот же принцип
- * "ровно необходимый минимум" в tcp.c/dns.c.
+ * HMAC-SHA256 (RFC 2104) и PRF TLS 1.2 на его основе (RFC 5246 §5) — для
+ * вывода master_secret, key_block и verify_data в tls.c. Других применений
+ * в ядре нет, поэтому реализация жёстко привязана к SHA-256, а не
+ * параметризована абстрактным дайджестом (тот же минимализм, что в tcp.c/dns.c).
  */
 
 typedef struct {
@@ -26,12 +24,10 @@ void hmac_sha256(const void *key, size_t key_len,
                  const void *data, size_t len,
                  uint8_t out[SHA256_DIGEST_SIZE]);
 
-// PRF TLS 1.2 (RFC 5246 §5): P_SHA256(secret, label || seed), развёрнутый
-// до out_len байт. label — обычная С-строка без завершающего нуля в
-// вычислении ("master secret", "key expansion", "client finished",
-// "server finished"); seed вызывающий склеивает сам (обычно
-// client_random || server_random в том или другом порядке — порядок
-// РАЗНЫЙ для master_secret и key_block, см. tls.c).
+// PRF TLS 1.2 (RFC 5246 §5): P_SHA256(secret, label||seed) до out_len байт.
+// label — C-строка без завершающего нуля ("master secret", "key expansion", ...);
+// seed склеивает вызывающий (обычно client_random||server_random, порядок
+// разный для master_secret и key_block, см. tls.c).
 void tls12_prf_sha256(const void *secret, size_t secret_len,
                       const char *label,
                       const void *seed, size_t seed_len,

@@ -3,11 +3,10 @@
 #include "lufirafs_format.h"
 #include "fs/vfs/vfs.h"
 
-// Рабочее (in-memory, ядерное) состояние одной смонтированной LufiraFS.
-// Как и fat_fs_t — единственный на всю систему экземпляр (extern lufirafs_t
-// lufirafs; в kernel.c), весь диск целиком отражён в память при загрузке
-// (bi->FATImageBase), запись идёт в эту копию, а на реальный диск
-// сбрасывается через dirty-битовую карту (см. lufirafs_sync()).
+// In-memory состояние смонтированной LufiraFS. Единственный экземпляр на
+// систему (extern lufirafs_t lufirafs в kernel.c): весь диск отражён в
+// память при загрузке, запись идёт в эту копию, на диск сбрасывается через
+// dirty-битовую карту (lufirafs_sync()).
 typedef struct {
     uint8_t *image;          // указатель на начало РЕГИОНА этой ФС в RAM
     uint32_t image_size;     // байт в регионе
@@ -47,10 +46,9 @@ int lufirafs_resolve_parent(lufirafs_t *fs, uint32_t start_inode, const char *pa
                              uint32_t *out_parent, char *out_name);
 
 // Восстанавливает абсолютный путь для inode, поднимаясь по ".." до корня и
-// на каждом шаге находя своё имя в родительском каталоге. Используется вместо
-// ручного редактирования строки cwd_path — так cd корректно работает для
-// "..", ".", абсолютных и составных путей без дублирования логики lookup.
-// -1, если inode не найден или путь не влезает в out_size.
+// находя своё имя в родительском каталоге на каждом шаге — вместо ручного
+// редактирования строки cwd_path. -1, если inode не найден или путь не
+// влезает в out_size.
 int lufirafs_get_path(lufirafs_t *fs, uint32_t ino, char *out, uint32_t out_size);
 
 // mode — LUFIRAFS_MODE_FILE или LUFIRAFS_MODE_DIR. Для директорий сразу

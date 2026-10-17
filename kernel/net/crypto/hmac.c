@@ -1,10 +1,8 @@
 #include "hmac.h"
 #include "lib/string.h"
 
-// Локальная strlen для label'ов PRF: lib/string.h её объявляет, но этот
-// файл должен собираться и хостовым gcc в selftest/ без остального ядра,
-// а тащить туда весь lib/string.c незачем — label'ы тут всегда короткие
-// литералы из tls.c.
+// Локальная strlen для label'ов PRF: файл должен собираться хостовым gcc
+// в selftest/ без остального lib/string.c; label'ы — короткие литералы из tls.c.
 static size_t hmac_label_len(const char *s) {
     size_t n = 0;
     while (s[n]) n++;
@@ -15,8 +13,7 @@ void hmac_sha256_init(hmac_sha256_ctx_t *ctx, const void *key, size_t key_len) {
     uint8_t k[SHA256_BLOCK_SIZE];
     uint8_t pad[SHA256_BLOCK_SIZE];
 
-    // Ключ длиннее блока хешируется (RFC 2104 §2), короче — добивается
-    // нулями справа.
+    // Ключ длиннее блока хешируется (RFC 2104 §2), короче — добивается нулями справа.
     memset(k, 0, sizeof(k));
     if (key_len > SHA256_BLOCK_SIZE) {
         sha256(key, key_len, k);
@@ -62,10 +59,8 @@ void tls12_prf_sha256(const void *secret, size_t secret_len,
                       uint8_t *out, size_t out_len) {
     size_t label_len = hmac_label_len(label);
 
-    // P_hash(secret, seed) = HMAC(secret, A(1)||seed) + HMAC(secret, A(2)||seed) + ...
-    // где A(0) = seed, A(i) = HMAC(secret, A(i-1)), а "seed" для TLS это
-    // label || настоящий seed (RFC 5246 §5). A(i) всегда ровно размер
-    // дайджеста, поэтому буфер фиксированный.
+    // P_hash(secret,seed) = HMAC(secret,A(1)||seed) + HMAC(secret,A(2)||seed) + ...,
+    // A(i)=HMAC(secret,A(i-1)); seed для TLS = label||настоящий seed (RFC 5246 §5).
     uint8_t a[SHA256_DIGEST_SIZE];
     hmac_sha256_ctx_t ctx;
 

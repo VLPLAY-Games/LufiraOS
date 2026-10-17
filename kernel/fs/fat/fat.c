@@ -25,10 +25,9 @@ static void write_le32(uint8_t *p, uint32_t val) {
 }
 
 /* ======== Доступ к кластерам ДАННЫХ (содержимое файлов, не-корневые
- * каталоги) — НАПРЯМУЮ на устройство, без постоянного кеширования. Это и
- * есть "не грузить флешку целиком в ОЗУ" (v0.9): единственные персистентные
- * в ОЗУ области — метаданные (fs->image) и кэш корневого каталога
- * (fs->root_image, только FAT32), см. их разбор в fat.h. ======== */
+ * каталоги) — напрямую на устройство, без кеширования. Персистентны в ОЗУ
+ * только метаданные (fs->image) и кэш корня (fs->root_image, FAT32), см.
+ * fat.h. ======== */
 static int read_cluster_raw(fat_fs_t *fs, uint32_t cluster, void *buf) {
     if (cluster < 2 || cluster >= fs->max_cluster) return -1;
     uint32_t lba = fs->data_start + (cluster - 2) * fs->cluster_size;
@@ -41,13 +40,10 @@ static int write_cluster_raw(fat_fs_t *fs, uint32_t cluster, const void *buf) {
     return fs->dev.write_blocks(fs->dev.ctx, lba, fs->cluster_size, buf);
 }
 
-/* ======== Доступ к КОРНЕВОМУ каталогу FAT32 — через резидентный кэш
- * (fs->root_image), по номеру кластера ищем его позицию в уже загруженной
- * цепочке. Согласно границе из fat_mount.h, этот драйвер обходит ТОЛЬКО
- * корень — ни один вызов ниже не должен получать cluster, не входящий в
- * fs->root_chain[]; если это всё же произойдёт (повреждённая ФС), честно
- * возвращаем NULL, как и раньше возвращал cluster_to_sector() на выходе за
- * пределы устройства. ======== */
+/* ======== Доступ к корневому каталогу FAT32 через резидентный кэш
+ * (fs->root_image): по номеру кластера ищем его позицию в загруженной
+ * цепочке. Драйвер обходит только корень (ГРАНИЦА в fat_mount.h) — при
+ * cluster не из fs->root_chain[] (повреждённая ФС) возвращаем NULL. ======== */
 static uint8_t* root_chain_ptr(fat_fs_t *fs, uint32_t cluster) {
     for (uint32_t i = 0; i < fs->root_chain_len; i++)
         if (fs->root_chain[i] == cluster)
@@ -55,11 +51,9 @@ static uint8_t* root_chain_ptr(fat_fs_t *fs, uint32_t cluster) {
     return NULL;
 }
 
-// Пишет ВСЮ кэш-копию корневого каталога обратно на устройство. Корень
-// почти всегда 1-несколько кластеров, так что "пишем всё целиком" дешевле
-// и надёжнее, чем вычислять, какой именно кластер поменялся — вызывается
-// из fat_sync() (а не из каждого мутатора по отдельности), см. его
-// комментарий и REAL-TIME-запись в fat_mount.h.
+// Пишет весь кэш корня обратно на устройство. Корень почти всегда 1-пара
+// кластеров, так что "целиком" дешевле, чем отслеживать, какой изменился;
+// вызывается из fat_sync(), не из каждого мутатора отдельно.
 static void root_chain_flush(fat_fs_t *fs) {
     uint32_t bytes_per_cluster = fs->cluster_size * 512;
     for (uint32_t i = 0; i < fs->root_chain_len; i++) {
@@ -69,8 +63,8 @@ static void root_chain_flush(fat_fs_t *fs) {
     }
 }
 
-/* ======== Dirty bitmap helpers — покрывают ТОЛЬКО fs->image
- * (image_sectors, т.е. метаданные), не весь диск. ======== */
+/* ======== Dirty bitmap: покрывает только fs->image (метаданные), не весь
+ * диск. ======== */
 void fat_mark_sector_dirty(fat_fs_t *fs, uint32_t lba) {
     if (lba >= fs->image_sectors) return;
     fs->dirty_map[lba >> 3] |= (1 << (lba & 7));
@@ -90,9 +84,8 @@ static void mark_fat_sector_dirty(fat_fs_t *fs, uint32_t cluster) {
         fat_mark_sector_dirty(fs, lba + 1);
 }
 
-/* ======== Работа с таблицей FAT — без изменений: таблица всегда лежит в
- * резидентных метаданных (fs->image), независимо от того, как читаются
- * данные/корень. ======== */
+/* ======== Таблица FAT всегда лежит в резидентных метаданных (fs->image),
+ * независимо от того, как читаются данные/корень. ======== */
 uint32_t get_fat_entry(fat_fs_t *fs, uint32_t cluster) {
     if (cluster < 2) return 0xFFF7;
     uint8_t *fat = fs->image + fs->fat_start * 512;
@@ -193,8 +186,8 @@ void to_short_name(const char *filename, char out[11]) {
 static int load_fat32_root_chain(fat_fs_t *fs) {
     uint32_t bytes_per_cluster = fs->cluster_size * 512;
 
-    // Проход 1: просто считаем длину цепочки — обращения только к уже
-    // резидентной таблице FAT (fs->image), никакого I/O на устройство.
+    // Проход 1: считаем длину цепочки — только по резидентной таблице FAT,
+    // без I/O на устройство.
     uint32_t count = 0;
     uint32_t cluster = fs->root_cluster;
     while (cluster >= 2 && count < FAT_ROOT_CHAIN_MAX) {
@@ -233,25 +226,13 @@ void fat_deinit(fat_fs_t *fs) {
     if (fs->scratch_cluster) { kfree(fs->scratch_cluster); fs->scratch_cluster = NULL; }
 }
 
-// НАЙДЕННЫЙ БАГ (история, v0.9): fat_mkdir()/fat_rm()/fat_create_file()/
-// fat_write_file()/fat_append_file() раньше сами звали fat_flush()/
-// fat_sync(fs) в конце, а те писали через disk_write_sectors() — ATA-диск
-// самой LufiraFS, хотя fat_init() во всём дереве вызывается только для
-// USB-флешек. Значит внутренние fat_sync() писали FAT-метаданные USB по
-// LBA, пересчитанным от начала флешки, НА РЕАЛЬНЫЙ СИСТЕМНЫЙ ДИСК — тихо
-// портили LufiraFS при первой же записи на смонтированную флешку.
-// Исправление, в силе и сейчас: синхронизация — ответственность
-// вызывающего (fat_mount.c вызывает fat_sync(), которая работает через
-// fs->dev — настоящее устройство, а не disk.c).
-//
-// v0.9, фаза 2 — РЕДИЗАЙН: раньше fat_init() требовал образ ФС целиком в
-// ОЗУ одним kmalloc()'ом (image, image_size) — отсюда и жёсткий потолок
-// "флешка не больше 8MB" у вызывающих (половина кучи ядра). Теперь
-// fat_init() сам читает устройство через fs->dev блоками: в ОЗУ остаются
-// только метаданные (reserved + таблицы FAT + фикс.корень 12/16,
-// FAT_META_MAX_SECTORS) и, для FAT32, маленький кэш корневого каталога
-// (FAT_ROOT_CHAIN_MAX кластеров) — см. их разбор в fat.h. Содержимое
-// файлов НИКОГДА не копируется в ОЗУ целиком — читается/пишется по месту.
+// Синхронизация с диском — ответственность вызывающего: fat_mount.c сам
+// зовёт fat_sync(), который пишет через fs->dev (реальное устройство), а
+// не через disk.c (ATA-диск самой LufiraFS) — fat_init() вызывается только
+// для USB-флешек, и LBA метаданных считаются от начала флешки, не системного
+// диска. fat_init() не требует образ ФС целиком в ОЗУ: читает устройство
+// через fs->dev блоками, в ОЗУ остаются только метаданные и, для FAT32, кэш
+// корня (см. fat.h) — содержимое файлов читается/пишется по месту.
 int fat_init(fat_fs_t *fs, const fat_blockdev_t *dev, uint32_t total_sectors) {
     if (!fs || !dev || !dev->read_blocks || !dev->write_blocks) return -1;
     if (total_sectors == 0) return -1;
@@ -262,9 +243,8 @@ int fat_init(fat_fs_t *fs, const fat_blockdev_t *dev, uint32_t total_sectors) {
     uint8_t boot_sector[512];
     if (fs->dev.read_blocks(fs->dev.ctx, 0, 1, boot_sector) != 0) return -1;
 
-    // Сигнатура загрузочного сектора — ДО любого разбора полей (см.
-    // историю бага с ext2-образом и делением на 0 ниже в старом
-    // комментарии этой функции — ha, сейчас сверяем так же рано).
+    // Сигнатура загрузочного сектора проверяется до разбора полей — валидный
+    // 0xAA55 сам по себе не гарантирует, что остальные поля не мусор.
     if (read_le16(boot_sector+510) != 0xAA55) return -1;
 
     fs->bpb.bytes_per_sector = read_le16(boot_sector+11);
@@ -284,18 +264,14 @@ int fat_init(fat_fs_t *fs, const fat_blockdev_t *dev, uint32_t total_sectors) {
     uint32_t total_sec = fs->bpb.total_sectors_16 ?
                          fs->bpb.total_sectors_16 : fs->bpb.total_sectors_32;
 
-    // Те же поля ниже используются как делители — ноль у любого из них
-    // (валидная сигнатура 0xAA55 не исключает дальше мусорных полей сама
-    // по себе) привёл бы к делению на 0.
+    // Эти поля используются как делители ниже — ноль привёл бы к делению на 0.
     if (bytes_per_sec == 0 || sec_per_cl == 0 || fats == 0 || total_sec == 0) return -1;
     if (bytes_per_sec != 512) return -1; // этот драйвер поддерживает только 512-байт секторы
 
     if (total_sec > total_sectors) return -2; // BPB заявляет больше, чем реально на устройстве
 
-    // Кластер должен укладываться в один батч fs->dev-операции (см.
-    // XHCI_MSD_MAX_BATCH_BLOCKS у вызывающего) и в scratch_cluster ниже —
-    // 128 секторов (64KB) — щедрый верхний предел, спецификация FAT
-    // реалистично не требует больше.
+    // Кластер должен укладываться в батч fs->dev-операции (XHCI_MSD_MAX_BATCH_BLOCKS)
+    // и в scratch_cluster — 128 секторов с запасом хватает любой реальной FAT.
     if (sec_per_cl > 128) return -2;
 
     uint32_t sectors_per_fat = fs->bpb.sectors_per_fat_16;
@@ -357,8 +333,7 @@ int fat_init(fat_fs_t *fs, const fat_blockdev_t *dev, uint32_t total_sectors) {
     if (!fs->scratch_cluster) { fat_deinit(fs); return -4; }
 
     if (fat_type == 32) {
-        // FAT32: корень — кластерная цепочка в data-регионе (см. разбор у
-        // fat_fs_t.root_image) — кэшируем её отдельно и целиком.
+        // FAT32: корень — кластерная цепочка в data-регионе, кэшируем её целиком.
         if (load_fat32_root_chain(fs) != 0) { fat_deinit(fs); return -5; } // OOM или ошибка чтения
     }
 
@@ -452,9 +427,8 @@ int fat_read_file(fat_fs_t *fs, const char *filename, void *buffer, uint32_t siz
     uint8_t *dest = (uint8_t*)buffer;
     uint32_t remaining = size;
     uint32_t bytes_per_cluster = fs->cluster_size * 512;
-    // Содержимое файла читается НАПРЯМУЮ с устройства, кластер за
-    // кластером, прямо в буфер вызывающего — ни разу не копируется целиком
-    // в ОЗУ (см. разбор v0.9 в fat_init()/fat.h).
+    // Читается напрямую с устройства кластер за кластером, прямо в буфер
+    // вызывающего — без промежуточной копии целиком в ОЗУ.
     while (remaining > 0 && cluster >= 2) {
         uint32_t to_copy = (remaining < bytes_per_cluster) ? remaining : bytes_per_cluster;
         if (to_copy == bytes_per_cluster) {
@@ -629,13 +603,10 @@ static fat_dir_entry_t* find_free_dir_entry(fat_fs_t *fs, uint32_t parent_cluste
 
 /* ---------- Создание/удаление объектов ---------- */
 
-// Мутаторы ниже (fat_mkdir/fat_rm/fat_create_file/fat_write_file/
-// fat_append_file) для FAT12/16 фикс.корня отмечают изменённые секторы
-// метаданных через fat_mark_sector_dirty() — flush, как и раньше,
-// ответственность вызывающего (fat_sync(), см. его комментарий). Для
-// FAT32 (кэш root_image) никакой отдельной пометки не нужно: fat_sync()
-// сбрасывает ВЕСЬ кэш корня безусловно при каждом вызове — см.
-// root_chain_flush().
+// Мутаторы ниже помечают изменённые секторы метаданных через
+// fat_mark_sector_dirty() для FAT12/16; flush — дело fat_sync(). Для FAT32
+// пометка не нужна: fat_sync() сбрасывает весь кэш корня безусловно
+// (root_chain_flush()).
 int fat_mkdir(fat_fs_t *fs,
               uint32_t parent_cluster,
               const char *name)
@@ -688,11 +659,8 @@ int fat_mkdir(fat_fs_t *fs,
     else
         set_fat_entry(fs, new_cluster, 0x0FFFFFFF);
 
-    // Новый кластер новой под-папки — НЕ часть кэшируемого корня, строим
-    // его "." / ".." в разовом scratch_cluster и пишем прямо на устройство
-    // (см. разбор в fat.h: только корень резидентен, под-папки — нет; а
-    // согласно ГРАНИЦЕ из fat_mount.h, внутрь этой под-папки после этого
-    // всё равно никто не сможет попасть через VFS).
+    // Новый кластер под-папки не входит в кэшируемый корень — строим "." /
+    // ".." в разовом scratch_cluster и пишем прямо на устройство.
     uint8_t *data = fs->scratch_cluster;
     memset(data, 0, fs->cluster_size * 512);
 
@@ -895,13 +863,11 @@ int fat_create_file(fat_fs_t *fs, uint32_t parent_cluster, const char *name) {
 }
 
 /* ======== Синхронизация с устройством ========
- * Метаданные (fs->image) — отложенная dirty-bitmap синхронизация, как и
- * раньше, но теперь только по image_sectors (сама область метаданных), не
- * по всему диску — содержимое файлов сюда больше не попадает (пишется
- * напрямую и немедленно, см. fat_write_file()/fat_append_file()). Кэш
- * корня (FAT32) синкается безусловно целиком при каждом вызове — см.
- * root_chain_flush(). Вызывающий (fat_mount.c) делает это сразу после
- * каждой мутации — REAL-TIME-запись, см. fat_mount.h. */
+ * Метаданные — отложенная dirty-bitmap синхронизация по image_sectors;
+ * содержимое файлов пишется напрямую и немедленно (fat_write_file()/
+ * fat_append_file()). Кэш корня (FAT32) синкается целиком при каждом
+ * вызове (root_chain_flush()). Вызывающий (fat_mount.c) зовёт это сразу
+ * после каждой мутации. */
 void fat_sync(fat_fs_t *fs) {
     if (!fs) return;
 
@@ -930,10 +896,9 @@ void fat_sync(fat_fs_t *fs) {
 }
 
 /* ======== ЗАПИСЬ В ФАЙЛ ========
- * Содержимое файла — в отличие от метаданных и корня — НИКОГДА не
- * копируется в ОЗУ целиком: каждый кластер читается/пишется напрямую на
- * устройство по месту, см. read_cluster_raw()/write_cluster_raw() выше и
- * разбор в fat.h. */
+ * В отличие от метаданных и корня, содержимое файла никогда не копируется
+ * в ОЗУ целиком — каждый кластер читается/пишется напрямую (read_cluster_raw()/
+ * write_cluster_raw()). */
 
 static uint32_t fat_alloc_cluster(fat_fs_t *fs, uint32_t prev_cluster) {
     uint32_t new_cluster = find_free_cluster(fs);

@@ -26,9 +26,8 @@ static inline uint32_t rotr32(uint32_t v, int n) {
     return (v >> n) | (v << (32 - n));
 }
 
-// Сжатие одного 64-байтного блока (big-endian слова — SHA-256 весь
-// определён в сетевом порядке байт, поэтому разбор ручной, без приведения
-// указателей).
+// Сжатие 64-байтного блока (big-endian слова — SHA-256 весь в сетевом
+// порядке байт, разбор ручной, без приведения указателей).
 static void sha256_compress(sha256_ctx_t *ctx, const uint8_t *block) {
     uint32_t w[64];
 
@@ -76,9 +75,8 @@ void sha256_update(sha256_ctx_t *ctx, const void *data, size_t len) {
     const uint8_t *p = (const uint8_t *)data;
     ctx->total_len += (uint64_t)len;
 
-    // Сначала добиваем недобранный хвост предыдущего вызова до полного
-    // блока — только после этого имеет смысл гонять данные блоками "на
-    // месте", без лишнего копирования.
+    // Сначала добиваем хвост предыдущего вызова до полного блока — только
+    // после этого есть смысл гонять данные блоками "на месте", без копирования.
     if (ctx->block_len > 0) {
         uint32_t need = SHA256_BLOCK_SIZE - ctx->block_len;
         uint32_t take = (len < need) ? (uint32_t)len : need;
@@ -106,9 +104,8 @@ void sha256_update(sha256_ctx_t *ctx, const void *data, size_t len) {
 void sha256_final(sha256_ctx_t *ctx, uint8_t out[SHA256_DIGEST_SIZE]) {
     uint64_t bit_len = ctx->total_len * 8u;
 
-    // Padding: 0x80, затем нули до остатка 56 (mod 64), затем 8 байт длины
-    // в битах big-endian. Если после 0x80 до 56 не дотянуть — закрываем
-    // текущий блок нулями и длину кладём в следующий.
+    // Padding: 0x80, нули до остатка 56 (mod 64), затем 8 байт длины в битах
+    // big-endian. Не дотянуть до 56 после 0x80 — закрываем блок нулями, длину кладём в следующий.
     ctx->block[ctx->block_len++] = 0x80;
     if (ctx->block_len > 56) {
         memset(ctx->block + ctx->block_len, 0, SHA256_BLOCK_SIZE - ctx->block_len);

@@ -24,9 +24,6 @@ void command_beep(void)
 
 void command_mixer(const char* args)
 {
-    /*
-     * Без аргументов — показать состояние аудиосистемы.
-     */
     if (!args || *args == '\0') {
         printf("\nAudio Mixer\n");
         printf("-----------\n");
@@ -45,9 +42,6 @@ void command_mixer(const char* args)
         return;
     }
 
-    /*
-     * Читаем число 0..100.
-     */
     uint32_t value = 0;
     const char* p = args;
 

@@ -20,13 +20,10 @@ int ip_send(uint32_t dst_ip, uint8_t protocol, const void *payload, uint16_t len
 
     uint8_t next_hop_mac[6];
     if (dst_ip == 0xFFFFFFFFu) {
-        // Ограниченный широковещательный адрес (RFC 919 §7) — всегда
-        // только локальный сегмент, никогда не маршрутизируется через
-        // шлюз. ARP для него не работает (никто не отвечает на запрос
-        // "чей MAC у 255.255.255.255") и не нужен — кадр просто шлётся на
-        // Ethernet-broadcast напрямую. Единственный сегодняшний
-        // потребитель — dhcp.c (DHCPDISCOVER/DHCPREQUEST, клиент ещё не
-        // знает ни своего IP, ни адреса сервера).
+        // Ограниченный broadcast (RFC 919 §7) — только локальный сегмент,
+        // не маршрутизируется. ARP для него не работает и не нужен — кадр
+        // шлётся на Ethernet-broadcast напрямую. Потребитель — dhcp.c
+        // (клиент ещё не знает ни своего IP, ни адреса сервера).
         memset(next_hop_mac, 0xFF, 6);
     } else {
         uint32_t next_hop = ((dst_ip ^ cfg->our_ip) & cfg->netmask) == 0 ? dst_ip : cfg->gateway;
@@ -76,16 +73,12 @@ void ip_receive(const uint8_t *frame, uint16_t len) {
         return;
     }
 
-    // Принимаем и то, что адресовано именно нам, и ограниченный broadcast
-    // (255.255.255.255) — нужен dhcp.c: до получения DHCPACK у нас ещё нет
-    // настоящего IP, а сервер отвечает на broadcast ИЛИ на предложенный
-    // yiaddr, который мы тоже пока не настроили (см. DHCP_FLAG_BROADCAST в
-    // dhcp.c — просим сервер отвечать широковещательно именно по этой
-    // причине). Остальным протоколам (ICMP/TCP) безопасно: udp_receive()/
-    // icmp_receive() дальше по цепочке и так проверяют порт/контекст
-    // отдельно, широковещательный ICMP echo этот стек не обрабатывает
-    // особым образом (отвечает как на обычный, что соответствует RFC 1122 —
-    // не включает это никакого нового риска для однопользовательской ОС).
+    // Принимаем адресованное нам и ограниченный broadcast (255.255.255.255)
+    // — нужен dhcp.c: до DHCPACK своего IP ещё нет, сервер отвечает на
+    // broadcast (см. DHCP_FLAG_BROADCAST в dhcp.c). Остальным протоколам
+    // безопасно: порт/контекст дальше сами проверяют icmp_receive()/
+    // udp_receive(), широковещательный ICMP echo обрабатывается как
+    // обычный (RFC 1122).
     uint32_t dst_ip = ntohl(hdr->dst);
     if (dst_ip != net_get_config()->our_ip && dst_ip != 0xFFFFFFFFu) return;
 
@@ -98,8 +91,7 @@ void ip_receive(const uint8_t *frame, uint16_t len) {
     } else if (hdr->protocol == IP_PROTO_TCP) {
         tcp_receive(src_ip, payload, payload_len);
     } else if (hdr->protocol == IP_PROTO_UDP) {
-        // Пакетный менеджер (dlpg sync/upgrade): DNS-резолвер (dns.c) —
-        // первый и пока единственный потребитель UDP в этом стеке.
+        // DNS-резолвер (dns.c) — единственный потребитель UDP в этом стеке.
         udp_receive(src_ip, payload, payload_len);
     }
     // остальные протоколы молча отбрасываем

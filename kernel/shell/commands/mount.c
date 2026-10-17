@@ -1,25 +1,21 @@
 // Команды mount/unmount — активируют FAT-драйвер (fs/fat/fat.c) для USB-
 // флешек. VFS сегодня не умеет монтировать вторую ФС (нет реестра
-// filesystem_t, всё жёстко завязано на LufiraFS), поэтому это не настоящий
-// VFS-mount, а отдельная подсистема поверх N параллельных fat_fs_t
-// контекстов (см. MAX_MOUNTS ниже), работающая напрямую с xhci_msd_*/fat_*,
-// в стороне от VFS — как usbinfo/usbread/usbwrite (usb.c).
+// filesystem_t, всё жёстко завязано на LufiraFS), поэтому это отдельная
+// подсистема поверх N параллельных fat_fs_t контекстов (см. MAX_MOUNTS
+// ниже), работающая напрямую с xhci_msd_*/fat_*, в стороне от VFS — как
+// usbinfo/usbread/usbwrite (usb.c).
 //
-// v0.9: fat_init() больше не требует образ ФС целиком в RAM (см. разбор в
-// fat.h/fat.c) — сам читает метаданные через fat_blockdev_t (fat_dev_read/
-// write ниже), так что отдельного image-буфера/ручного полного чтения
-// устройства тут больше нет. Синхронизация назад на флешку — fat_sync()
-// из fat.c (она сама работает через fs->dev, не напрямую через
-// disk_write_sectors() — см. историю БАГА в комментарии fat_init()).
+// fat_init() не грузит образ ФС целиком в RAM — читает метаданные через
+// fat_blockdev_t (fat_dev_read/write ниже). Синхронизация обратно на
+// флешку — fat_sync() из fat.c, которая работает через fs->dev, а не
+// напрямую через disk_write_sectors().
 //
-// Именованные монтирования (mount <usb> [name]), а не настоящие пути VFS:
-// LufiraFS-инод не может указывать на FAT-запись (это две независимые
-// системы адресации), так что "cd в примонтированную флешку" тут
-// НЕ поддерживается — доступ к файлам внутри конкретного монтирования идёт
-// через mountls/mountcat/mountwrite <name> <...>, ограниченные КОРНЕВЫМ
-// каталогом каждого монтирования (тот же предел, что и у первоначального
-// листинга при mount — полноценный путь-резолвер типа fat_lookup_path()
-// сюда сознательно не выносится, это отдельная, более крупная задача).
+// Монтирования именованные (mount <usb> [name]), а не настоящие пути VFS:
+// LufiraFS-инод не может указывать на FAT-запись (две независимые системы
+// адресации), так что "cd в примонтированную флешку" не поддерживается —
+// доступ к файлам идёт через mountls/mountcat/mountwrite <name> <...>,
+// ограниченные корневым каталогом монтирования (полноценный путь-резолвер
+// типа fat_lookup_path() сюда сознательно не выносится).
 #include "../commands.h"
 #include "drivers/console/console.h"
 #include "drivers/usb/xhci.h"
@@ -27,10 +23,9 @@
 #include "system/mm/heap.h"
 #include "lib/string.h"
 
-// Каждый маунт — свой fat_fs_t (см. v0.9-комментарий выше про то, что
-// больше не несёт на себе образ ФС целиком). 2, а не больше — тот же
-// запас, что и раньше, на случай будущего расширения этого (мёртвого)
-// кода, без какой-то конкретной текущей причины.
+// Каждый маунт — свой fat_fs_t (см. комментарий выше: образ ФС целиком не
+// хранится). 2 — просто запас на случай расширения этого кода, без
+// конкретной технической причины ограничения.
 #define MAX_MOUNTS 2
 #define MOUNT_NAME_MAX 16
 
@@ -58,9 +53,8 @@ static void copy_bounded_name(char *out, const char *src, int max_len) {
 #define MOUNT_IO_RETRIES 3
 
 // fat_blockdev_t для fat_init()/fat.c — ctx хранит usb_index (малое целое,
-// не указатель), как и в fat_mount.c (тот же приём, не экспортируется
-// оттуда — см. файловый комментарий про то, что эти две подсистемы
-// намеренно не делят код).
+// не указатель), как и в fat_mount.c (не экспортируется оттуда — эти две
+// подсистемы намеренно не делят код).
 static int fat_dev_read(void *ctx, uint32_t lba, uint32_t count, void *buf) {
     int usb_index = (int)(uint64_t)ctx;
     uint8_t *p = (uint8_t *)buf;
@@ -131,8 +125,8 @@ static int mount_fat_from_usb(int usb_index, const char *name) {
         return -1;
     }
 
-    // v0.9: fat_init() больше не грузит устройство целиком в RAM (см.
-    // разбор в fat.h) — читает метаданные сам через этот blockdev.
+    // fat_init() не грузит устройство целиком в RAM — читает метаданные
+    // сам через этот blockdev (см. fat.h).
     fat_blockdev_t dev = {
         .ctx = (void *)(uint64_t)usb_index,
         .read_blocks = fat_dev_read,
@@ -152,13 +146,6 @@ static int mount_fat_from_usb(int usb_index, const char *name) {
     return slot;
 }
 
-// v0.9: раньше здесь был свой цикл по dirty_map, пишущий напрямую через
-// xhci_msd_write_blocks() — отдельно от fat_flush()/fat_sync() (fat.c),
-// потому что те раньше жёстко писали через disk_write_sectors() (ATA-диск
-// с самой LufiraFS), что при вызове отсюда молча испортило бы disk.img
-// вместо флешки. Теперь fat_sync() сама работает через fs->dev (это
-// монтирование передаёт fat_dev_read/write выше, а не disk.c) — так что
-// можно звать её напрямую.
 static void mount_fat_sync_to_usb(fat_mount_t *m) {
     fat_sync(&m->fs);
     printf("\n[MOUNT] Synced usb%d ('%s')\n", m->usb_index, m->name);

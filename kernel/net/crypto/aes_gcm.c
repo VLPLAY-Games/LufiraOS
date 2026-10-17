@@ -32,9 +32,8 @@ static inline uint8_t xtime(uint8_t b) {
     return (uint8_t)((b << 1) ^ ((b & 0x80) ? 0x1b : 0x00));
 }
 
-// Состояние AES здесь хранится как 16 байт "по столбцам": s[4*c + r] это
-// элемент state[r][c] из FIPS 197 — ровно тот же порядок, в котором байты
-// лежат во входном/выходном блоке, так что загрузка/выгрузка это memcpy.
+// s[4*c+r] = state[r][c] из FIPS 197; порядок совпадает со входным/выходным
+// блоком, поэтому загрузка/выгрузка — просто memcpy.
 static void aes_add_round_key(uint8_t s[16], const uint32_t *w) {
     for (int c = 0; c < 4; c++) {
         uint32_t k = w[c];
@@ -49,8 +48,7 @@ static void aes_sub_bytes(uint8_t s[16]) {
     for (int i = 0; i < 16; i++) s[i] = AES_SBOX[s[i]];
 }
 
-// Строка r циклически сдвигается влево на r (строка 0 — не сдвигается).
-// В раскладке "по столбцам" элементы строки r это s[r], s[4+r], s[8+r], s[12+r].
+// ShiftRows: строка r сдвигается влево на r (s[r], s[4+r], s[8+r], s[12+r] в раскладке по столбцам).
 static void aes_shift_rows(uint8_t s[16]) {
     uint8_t t;
     t = s[1];  s[1] = s[5];  s[5] = s[9];   s[9] = s[13];  s[13] = t;   // влево на 1
@@ -109,10 +107,8 @@ static void aes128_expand_key(const uint8_t key[16], uint32_t w[44]) {
 
 // ========== GHASH (NIST SP 800-38D §6.3-6.4) ==========
 
-// y = y * H в GF(2^128). Таблица h_bits заранее содержит H, сдвинутый на
-// 0..127 бит с приведением (см. комментарий в aes_gcm.h) — остаётся
-// сложить (XOR) те её строки, которым соответствуют единичные биты y,
-// перебираемые СТАРШИМ БИТОМ ПЕРВОГО БАЙТА вперёд (порядок бит в GCM).
+// y = y*H в GF(2^128): h_bits[i] — H, сдвинутый на i бит (см. aes_gcm.h), так
+// что умножение — XOR тех строк, чьим битам y (старший бит первого байта вперёд) равна 1.
 static void ghash_mul(const aes_gcm_ctx_t *ctx, uint8_t y[16]) {
     uint8_t z[16];
     memset(z, 0, 16);
@@ -126,8 +122,8 @@ static void ghash_mul(const aes_gcm_ctx_t *ctx, uint8_t y[16]) {
     memcpy(y, z, 16);
 }
 
-// Домешивает len байт в хеш GHASH, добивая последний неполный блок нулями
-// (тот самый padding 0^v/0^u из определения S, SP 800-38D §6.5 шаг 5).
+// Добавляет len байт в GHASH, дополняя последний неполный блок нулями
+// (padding 0^v/0^u из определения S, SP 800-38D §6.5 шаг 5).
 static void ghash_update(const aes_gcm_ctx_t *ctx, uint8_t y[16],
                          const uint8_t *data, uint32_t len) {
     uint32_t off = 0;
@@ -143,8 +139,7 @@ static void ghash_update(const aes_gcm_ctx_t *ctx, uint8_t y[16],
 // ========== Общая часть encrypt/decrypt ==========
 
 static void gcm_inc32(uint8_t counter[16]) {
-    // Инкрементируются ТОЛЬКО младшие 4 байта, с переносом внутри них и
-    // без переноса в IV-часть (inc32 из SP 800-38D §6.2).
+    // inc32 (SP 800-38D §6.2): переносятся только младшие 4 байта, без переноса в IV-часть.
     for (int i = 15; i >= 12; i--) {
         if (++counter[i] != 0) break;
     }
@@ -215,9 +210,8 @@ void aes_gcm_init(aes_gcm_ctx_t *ctx, const uint8_t key[16]) {
     }
 }
 
-// J0 для 12-байтного IV — это IV || 0^31 || 1 (SP 800-38D §7.1 шаг 2,
-// случай len(IV) == 96 бит; другие длины IV TLS 1.2 не использует и мы их
-// не поддерживаем, см. aes_gcm.h).
+// J0 для 12-байтного IV = IV || 0^31 || 1 (SP 800-38D §7.1 шаг 2, len(IV)=96 бит;
+// другие длины TLS 1.2 не использует и здесь они не поддержаны, см. aes_gcm.h).
 static void gcm_build_j0(const uint8_t iv[AES_GCM_IV_SIZE], uint8_t j0[16]) {
     memcpy(j0, iv, AES_GCM_IV_SIZE);
     j0[12] = 0; j0[13] = 0; j0[14] = 0; j0[15] = 1;
@@ -244,9 +238,8 @@ int aes_gcm_decrypt(aes_gcm_ctx_t *ctx, const uint8_t iv[AES_GCM_IV_SIZE],
     uint8_t j0[16], counter[16], expected[AES_GCM_TAG_SIZE];
     gcm_build_j0(iv, j0);
 
-    // Тег считается по ШИФРТЕКСТУ и ДО расшифрования — именно поэтому
-    // plaintext может совпадать с ciphertext, и именно поэтому при
-    // несовпадении вызывающий не получает ни одного расшифрованного байта.
+    // Тег считается по шифртексту ДО расшифрования — поэтому plaintext может
+    // совпадать с ciphertext, и при несовпадении вызывающий не получает ни байта.
     gcm_tag(ctx, j0, aad, aad_len, ciphertext, len, expected);
 
     uint8_t diff = 0;

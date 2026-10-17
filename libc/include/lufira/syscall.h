@@ -499,18 +499,15 @@ static inline long sys_poll(struct lufira_pollfd *fds, unsigned long nfds, long 
     return __syscall5(SYS_POLL, (long)fds, (long)nfds, timeout_ms, 0, 0);
 }
 
-// SYS_SIGACTION (46) / SYS_SIGRETURN (47) — v0.8-мост, пункт 5. SIGINT/
-// SIGTERM/SIGALRM (см. комментарий у SYS_SIGACTION, kernel/system/syscall/
-// syscall.h) — SIGKILL/SIGSTOP/SIGCONT нельзя поймать.
+// SYS_SIGACTION (46) / SYS_SIGRETURN (47). SIGINT/SIGTERM/SIGALRM можно
+// перехватить, SIGKILL/SIGSTOP/SIGCONT — нельзя.
 //
-// ВАЖНО, контракт этого ABI (НЕ настоящий POSIX sigaction/sigreturn):
-// обработчик обязан заканчиваться вызовом sys_sigreturn(), а не обычным
-// C "return" — у этого ядра нет сигнального трамплина в памяти процесса
-// (sys_sigreturn() просто подменяет кадр ВОЗВРАТА ИЗ ЭТОГО САМОГО
-// вызова на сохранённое состояние прерванного кода, см. process_sigreturn()
-// в kernel/system/process/process.c) — обычный "ret" из обработчика
-// попытался бы вернуться туда же, откуда его вызвал syscall_handler()
-// (т.е. никуда конкретного, скорее всего крах).
+// Контракт этого ABI (НЕ POSIX sigaction/sigreturn): обработчик обязан
+// заканчиваться sys_sigreturn(), а не обычным "return" — сигнального
+// трамплина в памяти процесса нет, sys_sigreturn() подменяет кадр возврата
+// ИЗ ЭТОГО САМОГО вызова на сохранённое состояние прерванного кода (см.
+// process_sigreturn(), process.c); обычный "ret" вернулся бы туда, откуда
+// позвал syscall_handler() — почти наверняка крах.
 //
 //   void on_sigterm(int sig) {
 //       ...
@@ -542,16 +539,13 @@ static inline long sys_alarm(unsigned long milliseconds) {
     return __syscall5(SYS_ALARM, (long)milliseconds, 0, 0, 0, 0);
 }
 
-// ===== v0.8 (GUI+WM) =====
-// Этап 3: оконный сервер (WM) — обычный userspace-процесс
-// (lufira-packages/src/apps/wm.c), не часть ядра. sys_win_*() ниже
-// НЕ ИЗМЕНИЛИСЬ с первого среза (ни сигнатуры, ни семантика) — приложения
-// и gui_widgets.h/.c, написанные против первого среза, работают без
-// изменений: внутри ядра они теперь просто релеятся WM-процессу через
-// SYS_IPC_SEND/RECV (см. ниже), а не исполняются кернел-резидентным кодом.
-// Содержимое окна по-прежнему не отображается в адресное пространство
-// клиента — клиент рисует только через эти syscall'ы. Без иконок — только
-// прямоугольники/текст битмап-шрифтом 8x8.
+// ===== GUI+WM =====
+// Оконный сервер (WM) — обычный userspace-процесс (lufira-packages/src/
+// apps/wm.c), не часть ядра: sys_win_*() ниже релеятся ему через
+// SYS_IPC_SEND/RECV, а не исполняются кернел-резидентным кодом.
+// Содержимое окна не отображается в адресное пространство клиента — клиент
+// рисует только через эти syscall'ы. Без иконок — только прямоугольники/
+// текст битмап-шрифтом 8x8.
 //
 // Типичный цикл приложения:
 //   int win = sys_win_create(100, 100, 300, 200, "Моё окно");
@@ -695,16 +689,12 @@ static inline long sys_fb_present(const uint32_t *buf, unsigned int w, unsigned 
     return __syscall5(SYS_FB_PRESENT, (long)buf, w, h, 0, 0);
 }
 
-// То же самое, но в реальный framebuffer копируется ТОЛЬКО под-
-// прямоугольник (x,y,rw,rh) буфера buf (buf всё ещё обязан быть ПОЛНЫМ
-// кадром размера w*h — stride для под-прямоугольника берётся как w, см.
-// подробности в SYS_FB_PRESENT, syscall.h ядра). На порядки дешевле
-// полного sys_fb_present() для маленьких изменений (типичный случай —
-// один только сдвинувшийся курсор поверх уже отрисованной сцены) —
-// именно это убирает заметную задержку движения мыши, когда прошлая
-// версия presentила весь кадр (возможно, в MMIO/VRAM) на каждое
-// шевеление. rw/rh обязаны быть > 0 — с rw==0 или rh==0 используй обычный
-// sys_fb_present().
+// То же самое, но в реальный framebuffer копируется ТОЛЬКО под-прямоугольник
+// (x,y,rw,rh) буфера buf (buf всё ещё обязан быть полным кадром размера
+// w*h, stride берётся как w — см. SYS_FB_PRESENT в syscall.h ядра). На
+// порядки дешевле полного sys_fb_present() для маленьких изменений
+// (например, один сдвинувшийся курсор над уже отрисованной сценой). rw/rh
+// обязаны быть > 0 — с rw==0 или rh==0 используй обычный sys_fb_present().
 static inline long sys_fb_present_rect(const uint32_t *buf, unsigned int w, unsigned int h,
                                         int x, int y, unsigned int rw, unsigned int rh) {
     long dirty_xy = ((long)(int64_t)x << 32) | (long)(uint32_t)y;

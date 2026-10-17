@@ -10,10 +10,8 @@
 #define DER_TAG_SEQUENCE      0x30
 #define DER_TAG_CONTEXT_0     0xA0 // [0] EXPLICIT — так закодировано поле version в TBSCertificate
 
-// Разбирает один TLV, начинающийся в buf[pos]. Возвращает 0 и заполняет
-// тег, длину заголовка (тег + байты длины) и длину значения; -1, если
-// структура не влезает в buf_len или использует форму длины, которой в
-// сертификатах не бывает (неопределённая длина, длина больше 4 байт).
+// Разбирает TLV в buf[pos]: 0 и тег/длина заголовка/длина значения, либо -1,
+// если не влезает в buf_len или форма длины нереальна для сертификатов (неопр. длина, >4 байт).
 static int der_read(const uint8_t *buf, uint32_t buf_len, uint32_t pos,
                     uint8_t *out_tag, uint32_t *out_hdr_len, uint32_t *out_val_len) {
     if (pos + 2 > buf_len) return -1;
@@ -42,8 +40,7 @@ static int der_read(const uint8_t *buf, uint32_t buf_len, uint32_t pos,
     return 0;
 }
 
-// Пропускает один TLV целиком: возвращает позицию СРАЗУ ПОСЛЕ него, или
-// -1. Если expect_tag не 0, дополнительно требует совпадения тега.
+// Пропускает TLV целиком: позиция сразу после него, или -1; expect_tag != 0 требует совпадения тега.
 static int64_t der_skip(const uint8_t *buf, uint32_t buf_len, uint32_t pos, uint8_t expect_tag) {
     uint8_t tag; uint32_t hdr, len;
     if (der_read(buf, buf_len, pos, &tag, &hdr, &len) != 0) return -1;
@@ -62,9 +59,8 @@ static int der_enter(const uint8_t *buf, uint32_t buf_len, uint32_t pos, uint8_t
     return 0;
 }
 
-// Читает DER INTEGER как беззнаковое целое: отдаёт указатель на его байты
-// без ведущего нулевого байта (DER добавляет его, когда старший бит
-// значения единичный, чтобы INTEGER не читался как отрицательный).
+// Читает DER INTEGER как беззнаковое целое: указатель на байты без ведущего
+// нулевого (DER добавляет его, когда старший бит значения единичный).
 static int der_read_uint(const uint8_t *buf, uint32_t buf_len, uint32_t pos,
                          const uint8_t **out_bytes, uint32_t *out_len, uint32_t *out_next) {
     uint8_t tag; uint32_t hdr, len;
@@ -91,8 +87,7 @@ int x509_extract_rsa_pubkey(const uint8_t *der, uint32_t der_len, rsa_public_key
      *     serialNumber INTEGER, signature AlgorithmIdentifier (SEQUENCE),
      *     issuer Name (SEQUENCE), validity (SEQUENCE), subject Name (SEQUENCE),
      *     subjectPublicKeyInfo SubjectPublicKeyInfo, ... }
-     * Нас интересует только последнее поле, поэтому всё предыдущее просто
-     * пропускается по тегам, без чтения содержимого.
+     * Нас интересует только subjectPublicKeyInfo — остальное пропускается по тегам, без чтения.
      */
     uint32_t cert_pos, cert_len;
     if (der_enter(der, der_len, 0, DER_TAG_SEQUENCE, &cert_pos, &cert_len) != 0) return -1;
@@ -127,15 +122,13 @@ int x509_extract_rsa_pubkey(const uint8_t *der, uint32_t der_len, rsa_public_key
     uint32_t bits_pos, bits_len;
     if (der_enter(der, spki_end, (uint32_t)next, DER_TAG_BIT_STRING, &bits_pos, &bits_len) != 0) return -1;
     if (bits_len < 2) return -1;
-    // Первый байт BIT STRING — число неиспользуемых бит в последнем байте;
-    // для DER-ключа он всегда 0, и сам ключ начинается после него.
+    // Первый байт BIT STRING — число неиспользуемых бит в последнем байте; для DER-ключа всегда 0.
     if (der[bits_pos] != 0x00) return -1;
     uint32_t key_pos = bits_pos + 1;
     uint32_t key_end = bits_pos + bits_len;
 
     // RSAPublicKey ::= SEQUENCE { modulus INTEGER, publicExponent INTEGER }.
-    // Если ключ не RSA (EC/Ed25519), эта структура не разберётся — и это
-    // корректный отказ: проверять подпись нам всё равно было бы нечем.
+    // Не-RSA ключ (EC/Ed25519) тут не разберётся — корректный отказ, проверять подпись нечем.
     uint32_t rsa_pos, rsa_len;
     if (der_enter(der, key_end, key_pos, DER_TAG_SEQUENCE, &rsa_pos, &rsa_len) != 0) return -1;
     uint32_t rsa_end = rsa_pos + rsa_len;
@@ -186,12 +179,10 @@ int rsa_pkcs1_sha256_verify(const rsa_public_key_t *key,
     }
 
     /*
-     * EM должен быть ровно 0x00 || 0x01 || PS || 0x00 || DigestInfo, где
-     * PS — не меньше 8 байт 0xFF. Сравнение ПОЛНОЕ и жёсткое: любая
-     * вольность тут (например, "найдём DigestInfo где-нибудь в хвосте")
-     * — это классическая дыра в проверке PKCS#1 v1.5, позволяющая
-     * подделать подпись при малом показателе. Поэтому и padding, и
-     * позиция DigestInfo проверяются точно.
+     * EM должен быть точно 0x00||0x01||PS||0x00||DigestInfo, PS — не менее 8
+     * байт 0xFF. Сравнение полное и жёсткое: допущение вида "найти DigestInfo
+     * где-то в хвосте" — классическая дыра PKCS#1 v1.5, позволяющая подделать
+     * подпись при малом показателе.
      */
     if (em[0] != 0x00 || em[1] != 0x01) return -1;
 

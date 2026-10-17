@@ -529,8 +529,7 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
     const char *path = (const char *)path_ptr;
 
     // Смонтированные FAT/RAMFS/ext2/exFAT — до LufiraFS, тот же приоритет,
-    // что у vfs_open()/sys_mkdir()/sys_remove() (баг: "cd /mnt/a" отвечал
-    // ENOENT после успешного mount — sys_chdir() не получил этот фикс сразу).
+    // что у vfs_open()/sys_mkdir()/sys_remove().
     if (path[0] == '/') {
         // private_data освобождаем для ВСЕХ, КРОМЕ RAMFS: у FAT (корень
         // монтирования)/ext2/exFAT это одноразовая обёртка под конкретный
@@ -567,10 +566,9 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t unused1, uint64_t unused2,
     // монтирования — обязательно для RAMFS: в отличие от FAT (только
     // корневой уровень), у неё есть настоящие вложенные каталоги, и "cd bar"
     // из "/tmp/foo" ("/tmp/foo/bar") иначе ничем не резолвился бы, кроме как
-    // абсолютным путём. Условие на path[0] != '/' обязательно (баг: раньше
-    // перехватывало и абсолютные пути вроде "cd /mnt2", отвечая ENOENT
-    // вместо проваливания в lufirafs_lookup(), который и так резолвит
-    // абсолютные пути от корня независимо от cwd_inode).
+    // абсолютным путём. Условие на path[0] != '/' обязательно: абсолютные
+    // пути (напр. "cd /mnt2") должны проваливаться в lufirafs_lookup(),
+    // который и так резолвит их от корня независимо от cwd_inode.
     if (current_process->cwd_inode == NON_LUFIRAFS_MOUNT_CWD_INODE && path[0] != '/') {
         if (strcmp(path, ".") == 0) return 0;
 
@@ -1046,18 +1044,13 @@ static uint64_t sys_sound_play_pcm(uint64_t buf_ptr, uint64_t frames, uint64_t u
         !is_user_range_valid(current_process->page_table, buf_ptr, (size_t)frames * 4, 0))
         return (uint64_t)-EFAULT;
 
-    // НАЙДЕННЫЙ ЖИВЫМ ТЕСТОМ БАГ, тот же самый класс, что и БАГ #1 у
-    // SYS_NET_FETCH (см. его большой комментарий ниже по файлу): FMASK
-    // маскирует IF на входе в ЛЮБОЙ syscall, и ничто до этого места его не
-    // возвращает — hda_run_buffer() (kernel/drivers/sound/hda.c) ждёт BCIS
-    // через pit_wait_ms(), а pit_ticks растёт ТОЛЬКО из обработчика
-    // прерывания таймера, которое физически не может быть доставлено при
-    // IF=0 — итог: при активном HDA-бэкенде doom.elf (и вообще любой
-    // вызывающий этот syscall) вис НАВСЕГДА на первом же кадре звука, 0
-    // вывода. AC'97-бэкенд (ac97_play_pcm_stereo()) этим не страдает — его
-    // блокирующее ожидание крутит `pause` на статус-регистре напрямую, без
-    // зависимости от прерываний — поэтому баг не проявлялся, пока не
-    // появился реальный вызывающий с HDA.
+    // IF маскируется на входе в любой syscall и ничто до этого места его не
+    // возвращает. HDA-путь (hda_run_buffer(), drivers/sound/hda.c) ждёт BCIS
+    // через pit_wait_ms(), а pit_ticks растёт только из таймерного IRQ,
+    // который не может быть доставлен при IF=0 — без sti здесь HDA-бэкенд
+    // зависал бы навсегда на первом кадре звука. AC'97-путь
+    // (ac97_play_pcm_stereo()) не зависит от прерываний (крутит `pause` на
+    // статус-регистре напрямую), поэтому не проявляет эту проблему.
     asm volatile("sti");
 
     return (uint64_t)sound_play_pcm_stereo((const int16_t *)buf_ptr, (uint32_t)frames);
@@ -1214,9 +1207,7 @@ static uint64_t sys_reboot(uint64_t unused1, uint64_t unused2, uint64_t unused3,
     lufirafs_flush(&lufirafs);
     acpi_reset(); // спецификационный сброс через FADT RESET_REG, если платформа его поддерживает
     __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64)); // 8042-контроллер
-    // PCI RST_CNT (0xCF9) — см. подробный комментарий в command_reboot()
-    // (system.c): раньше тут по ошибке стоял ACPI-ВЫКЛЮЧАЮЩИЙ outw(0x604,
-    // 0x2000), перенесённый из shutdown-пути.
+    // PCI RST_CNT (0xCF9) — см. подробный комментарий в command_reboot() (system.c).
     __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0x06), "Nd"((uint16_t)0xCF9));
     __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0x0E), "Nd"((uint16_t)0xCF9));
     return (uint64_t)-1; // не должны сюда дойти, если сброс сработал
@@ -1733,10 +1724,10 @@ static uint64_t sys_ping(uint64_t dst_ip, uint64_t id, uint64_t seq, uint64_t ti
 
     if (!rtl8139_found()) return (uint64_t)-2;
 
-    // См. разбор БАГ #1 у SYS_NET_FETCH ниже по файлу — icmp_ping_wait()
-    // меряет таймаут через pit_get_ticks(), которому нужны тикающие
-    // прерывания таймера, физически не доставляемые при IF=0 (FMASK
-    // маскирует IF на входе в ЛЮБОЙ syscall).
+    // icmp_ping_wait() меряет таймаут через pit_get_ticks(), которому нужны
+    // тикающие прерывания таймера — недоставимые при IF=0 (FMASK маскирует
+    // IF на входе в любой syscall). См. подробный разбор у SYS_NET_FETCH
+    // ниже по файлу.
     asm volatile("sti");
 
     if (net_lock_acquire(5000) != 0) return (uint64_t)-4;
@@ -1911,39 +1902,25 @@ static uint64_t sys_net_fetch(uint64_t url_ptr, uint64_t out_buf_ptr, uint64_t o
     // буфер остаётся валиден: каждый возврат сюда снова происходит в
     // контексте current_process == этого же процесса с тем же CR3.
     //
-    // НАЙДЕННЫЙ БАГ #1 (живое тестирование: "dlpg sync" зависал НАВСЕГДА —
-    // не 60-80 секунд по бюджету, а буквально бесконечно, 0 вывода) —
-    // FMASK (0xC0000084, см. syscall_init()) выставлен в 0x200: сам CPU
-    // маскирует IF на входе В ЛЮБОЙ syscall через инструкцию `syscall`, и
-    // ничто в syscall_entry.S/syscall_handler() не делает sti() обратно —
-    // IF остаётся 0 до самого iretq в эпилоге. Для КОРОТКИХ syscall'ов
-    // это незаметно; но http_fetch()/tcp_connect()/dns_resolve()/tls.c —
-    // ВСЕ их таймауты меряются через pit_get_ticks(), который растёт
-    // ТОЛЬКО из обработчика прерывания таймера (timer_irq_handler(),
-    // pit.c) — а прерывание таймера физически не может быть доставлено,
-    // пока IF=0. Итог: каждый "deadline = pit_get_ticks() + БЮДЖЕТ"
-    // навсегда сравнивался с одним и тем же статичным pit_get_ticks() —
-    // бюджет никогда не истекал, потому что время для ядра буквально
-    // стояло на месте. sti() здесь — обязателен, не просто оптимизация.
-    // Явный cli() перед возвратом НЕ нужен: эпилог syscall_entry.S вызывает
-    // iretq, который БЕЗУСЛОВНО берёт итоговый IF из сохранённых user
-    // RFLAGS (r11, см. пролог) — текущее значение IF в момент iretq не
-    // имеет значения, так что финальное состояние всё равно будет
-    // корректным (IF=1 в ring3) независимо от sti() тут.
+    // FMASK (0xC0000084, см. syscall_init()) маскирует IF на входе в ЛЮБОЙ
+    // syscall, и ничто в syscall_entry.S/syscall_handler() не возвращает его
+    // — IF остаётся 0 до iretq в эпилоге. http_fetch()/tcp_connect()/
+    // dns_resolve()/tls.c меряют все свои таймауты через pit_get_ticks(),
+    // который растёт только из таймерного IRQ — недоставимого при IF=0, —
+    // так что без sti() здесь любой deadline сравнивался бы с застывшим
+    // счётчиком и никогда не истекал. Явный cli() перед возвратом не нужен:
+    // iretq безусловно берёт итоговый IF из сохранённых user RFLAGS (r11),
+    // так что финальное состояние (IF=1 в ring3) корректно независимо от
+    // этого sti().
     //
-    // НАЙДЕННЫЙ БАГ #2 (v0.9: "вся система встаёт на всё время dlpg sync") —
-    // КАЖДЫЙ блокирующий цикл стека (tcp_connect()/tcp_send()/tcp_close()/
-    // dns_resolve()/tls_recv()/http_client.c/arp_resolve()) был устроен как
-    // "опросить -> pit_wait_ms(1)", а pit_wait_ms() всего лишь делает hlt
-    // до следующего тика В ТОМ ЖЕ процессе — schedule() никогда не
-    // вызывался, так что ни один другой READY-процесс (включая сам shell)
-    // не получал ни кванта времени, пока fetch не закончится полностью.
-    // Исправлено заменой pit_wait_ms(1) на process_sleep(1) во всех этих
-    // циклах — см. подробности и обязательную пару к этой починке
-    // (net_lock_acquire()/net_lock_release() ниже — g_conn/g_ping стека
-    // рассчитаны ровно на одно соединение разом, без неё два параллельных
-    // sys_net_fetch() корёжили бы состояние друг друга) в net_lock_acquire()
-    // (net.h).
+    // Отдельно: блокирующие циклы сетевого стека (tcp_*/dns_resolve()/
+    // tls_recv()/arp_resolve()) ждут через process_sleep(1), а не
+    // pit_wait_ms(1), — последний просто делает hlt в ТЕКУЩЕМ процессе без
+    // schedule(), что держало бы CPU занятым и не давало бы кванта другим
+    // READY-процессам на всё время fetch. net_lock_acquire()/release() ниже
+    // — обязательная пара: g_conn/g_ping стека рассчитаны ровно на одно
+    // соединение разом, без лока два параллельных sys_net_fetch() испортили
+    // бы состояние друг друга (см. net_lock_acquire(), net.h).
     asm volatile("sti");
 
     // Бюджет ожидания лока — тот же порядок, что у http_fetch() на весь
@@ -2072,10 +2049,9 @@ void syscall_init(void) {
     asm volatile("wrmsr" : : "c"(0xC0000080), "a"((uint32_t)efer),
                  "d"((uint32_t)(efer >> 32)));
     
-    // Плоское число, не выведенное из syscall.h автоматически (нет единого
-    // SYS_COUNT — номера SYS_* просто #define'ы) — бумить вручную при
-    // добавлении нового syscall'а. Застало 0.8: тут всё ещё было "27" при
-    // 65 реально зарегистрированных (SYS_NET_FETCH=66 последний по номеру).
+    // Число не выводится из syscall.h автоматически (нет единого SYS_COUNT —
+    // номера SYS_* просто #define'ы) — бумить вручную при добавлении нового
+    // syscall'а.
     DLOG("[SYSCALL] 67 system calls registered\n");
 }
 

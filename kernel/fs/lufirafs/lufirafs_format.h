@@ -20,13 +20,12 @@
 
 #include <stdint.h>
 
-// UEFI-прошивка умеет читать файлы ТОЛЬКО с FAT12/16/32 (требование самой
-// спецификации) — поэтому первые LUFIRAFS_ESP_SIZE байт диска остаются
-// маленьким FAT-разделом (ESP) с /EFI/BOOT/BOOTX64.EFI и /kernel.bin, а всё
-// остальное место занимает LufiraFS. fat_loader.c грузит в RAM весь диск с
-// LBA 0 одним куском, так что ядру достаточно прибавить это смещение к
-// bi->FATImageBase (см. kernel.c). Значение общее для kernel и mkfs —
-// расхождение означает, что mkfs отформатирует не тот регион, что читает ядро.
+// UEFI умеет читать только FAT12/16/32, поэтому первые LUFIRAFS_ESP_SIZE
+// байт диска — FAT-раздел (ESP) с /EFI/BOOT/BOOTX64.EFI и /kernel.bin, а
+// остальное занимает LufiraFS. fat_loader.c грузит весь диск с LBA 0 одним
+// куском, так что ядру достаточно прибавить это смещение к
+// bi->FATImageBase. Значение общее для kernel и mkfs — расхождение значит,
+// что mkfs отформатирует не тот регион, что читает ядро.
 #define LUFIRAFS_ESP_SIZE     (4u * 1024u * 1024u)
 
 #define LUFIRAFS_MAGIC        0x31534C4Fu   // "OLS1" по байтам little-endian

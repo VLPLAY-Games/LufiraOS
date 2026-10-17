@@ -67,24 +67,14 @@ static void pic_remap(void) {
     outb(PIC1_DATA, 0xFF);
     outb(PIC2_DATA, 0xFF);
 
-    // НАЙДЕННЫЙ БАГ (живое железо: зависание ровно на границе "[DISK] Using
-    // AHCI" -> тишина, не воспроизводилось в QEMU) — этот кернел целиком на
-    // легаси 8259 PIC, ни Local APIC, ни IOAPIC нигде не программируются.
-    // На многих реальных чипсетах (в QEMU — никогда, у неё IMCR просто не
-    // смоделирован и PIC всегда подключён напрямую) есть IMCR (порты
-    // 0x22/0x23, Intel MP Spec) — он решает, куда реально идут выходы PIC1:
-    // в CPU (INTR) или в Local APIC. Прошивка, которая готовила multi-core
-    // bring-up (INIT-SIPI-SIPI через APIC) ещё до передачи управления ядру,
-    // вполне может оставить IMCR в "APIC mode" — тогда irq_enable(0)/sti
-    // проходят без единой ошибки, PIC считает, что всё размаскировано и
-    // готово, но ни один IRQ физически не долетает до CPU. Результат ровно
-    // такой: первый код, которому реально НУЖНО дождаться тика таймера
-    // (xhci_init() -> pit_wait_ms() -> hlt в ожидании прерывания, которое
-    // никогда не придёт) виснет намертво, а всё до этого момента (PIT/HPET
-    // init, ACPI, PCI, AHCI) работает — там ничего не ждёт живого IRQ.
-    // Фикс — принудительно выбрать "PIC mode" через IMCR: безопасен и на
-    // чипсетах без IMCR вовсе (запись в несуществующий регистр по этим
-    // портам по спецификации просто игнорируется).
+    // Ядро целиком на легаси 8259 PIC (Local APIC/IOAPIC не программируются).
+    // На части реального железа IMCR (порты 0x22/0x23, Intel MP Spec) держит
+    // выходы PIC1 переключёнными на Local APIC вместо CPU — так могла оставить
+    // прошивка после multi-core bring-up через APIC. sti/irq_enable(0) в этом
+    // случае проходят без ошибок, но IRQ физически не доходит до CPU: первый
+    // код, которому нужно реально дождаться тика таймера (xhci_init() ->
+    // pit_wait_ms()), виснет намертво. Принудительно переключаем IMCR в
+    // "PIC mode" — безопасно и на чипсетах без IMCR (запись игнорируется).
     outb(0x22, 0x70);
     outb(0x23, 0x01);
 }
@@ -116,24 +106,16 @@ static void draw_shell_watermark(void) {
     draw_text_tilted("LufiraOS", 10, 4, 2, RGB_DARK_GRAY);
 }
 
-// v0.7 план, этап 5, под-этап 6: шелл теперь настоящий userspace ELF
-// (/bin/shell.elf) вместо кернел-функции shell_task() (удалена) — читает
-// файл СЫРЫМИ примитивами LufiraFS (lufirafs_lookup()/lufirafs_read()), а
-// не через vfs_open(): на самом первом вызове (из _start(), до создания
-// хоть одного процесса) current_process/current_fd_table, на которые
-// опирается VFS, ещё не существуют. Та же последовательность действий,
-// что elf_exec_internal(..., background=1) (elf.c) делает для run/runbg,
-// только инлайнена здесь, чтобы сразу получить готовый process_t* и
-// выставить is_shell/cwd на нём самом, а не через отдельный проход по
-// process_list после.
+// Шелл — userspace ELF (/bin/shell.elf), читается СЫРЫМИ примитивами
+// LufiraFS (lufirafs_lookup/lufirafs_read), а не через vfs_open(): на
+// первом вызове (из _start(), до создания процессов) current_process и
+// VFS ещё не существуют. Логика как в elf_exec_internal(background=1)
+// (elf.c) для run/runbg, но инлайнена для прямого доступа к process_t*.
 static process_t *spawn_shell_process(void) {
-    // shell_is_respawn=1 значит: это не первая загрузка, а пересоздание
-    // после того, как предыдущий /bin/shell.elf завершился (крашнулся,
-    // "exit", или его убил Ctrl+C как foreground-процесс — см.
-    // respawn_shell_if_needed() в process.c, которая взводит этот флаг
-    // ДО вызова этой функции). В этом случае вступительный баннер не
-    // печатаем — иначе это слишком явно выглядело бы как перезагрузка
-    // системы.
+    // shell_is_respawn=1: пересоздание шелла после завершения предыдущего
+    // (краш/"exit"/Ctrl+C) — флаг взводит respawn_shell_if_needed() в
+    // process.c перед вызовом. Баннер не печатаем, чтобы это не выглядело
+    // как перезагрузка системы.
     if (shell_is_respawn) {
         shell_is_respawn = 0;
     } else {
@@ -252,11 +234,10 @@ void _start(BootInfo* bi) {
     pic_remap();
     LOG_DONE_OK("PIC remapped");
 
-    // ВАЖНО: сначала PMM, потом PAGING, потом HEAP. reserved_base/reserved_size —
-    // весь диск, который бутлоадер грузит в RAM одним куском (bi->FATImageBase,
-    // AllocatePages(..., EfiLoaderData, ...) в boot/loaders/fat_loader.c) —
-    // см. подробный комментарий у pmm_init() в pmm.c про то, почему это
-    // раньше НЕ резервировалось и к чему это приводило.
+    // Порядок важен: сначала PMM, потом PAGING, потом HEAP.
+    // reserved_base/reserved_size покрывают весь диск, загруженный бутлоадером
+    // в RAM одним куском (bi->FATImageBase, см. fat_loader.c) — зачем это
+    // резервировать, см. подробности у pmm_init() в pmm.c.
     pmm_init(bi->MemoryMap, bi->MemoryMapSize, bi->MemoryMapDescriptorSize,
                 bi->KernelBase, bi->KernelSize,
                 bi->FATImageBase, bi->FATImageSize);
@@ -270,12 +251,10 @@ void _start(BootInfo* bi) {
     // ядру тут нечего инициализировать (g_wm_pid/mailbox уже по умолчанию
     // 0/пустой, см. process.c).
 
-    // Бутлоадер грузит в RAM ВЕСЬ диск одним куском с LBA 0 (см. подробный
-    // комментарий у LUFIRAFS_ESP_SIZE) — первые LUFIRAFS_ESP_SIZE байт это
-    // маленький FAT-раздел (ESP) для самой прошивки, а сама LufiraFS
-    // начинается сразу за ним. lba_offset нужен lufirafs_sync(), чтобы
-    // дописывать "грязные" блоки по правильным абсолютным LBA реального
-    // диска через drivers/disk (см. lufirafs.c).
+    // Бутлоадер грузит весь диск в RAM одним куском с LBA 0: первые
+    // LUFIRAFS_ESP_SIZE байт — FAT-раздел (ESP) прошивки, LufiraFS начинается
+    // сразу за ним. lba_offset нужен lufirafs_sync(), чтобы писать "грязные"
+    // блоки по правильным абсолютным LBA через drivers/disk (см. lufirafs.c).
     if (bi->FATImageBase && bi->FATImageSize > LUFIRAFS_ESP_SIZE) {
         LOG_PENDING("Mounting LufiraFS...");
         void *fs_image = (void*)(bi->FATImageBase + LUFIRAFS_ESP_SIZE);
@@ -316,10 +295,9 @@ void _start(BootInfo* bi) {
     pit_init();
     LOG_DONE_OK("PIT initialized at %d Hz", PIT_FREQUENCY);
 
-    // HPET — нужен уже распарсенный ACPI (своя таблица "HPET", см.
-    // acpi_find_table_by_signature() выше) — опциональный, более точный
-    // источник времени поверх PIT, а не замена: scheduler-тики (IRQ0)
-    // по-прежнему только PIT.
+    // HPET требует уже распарсенного ACPI (таблица "HPET") — опциональный,
+    // более точный источник времени поверх PIT, не замена: scheduler-тики
+    // (IRQ0) всё равно только PIT.
     LOG_PENDING("Initializing HPET...");
     hpet_init();
     if (hpet_available()) {
@@ -368,62 +346,34 @@ void _start(BootInfo* bi) {
     irq_enable(2);  // cascade (нужен для IRQ8-15, в т.ч. мыши — IRQ12)
     cpu_mark_interrupts_active();
 
-    // v0.8-мост, пункт 2 (console.c): включаем двойную буферизацию здесь,
-    // а не сразу в initialize_console() — специально ПОСЛЕ sti/irq_enable(0),
-    // чтобы таймер уже реально тикал и console_tick_present() (вызывается
-    // из pit_timer_handler()) сразу же начал флашить back buffer на экран,
-    // без слепого окна. Всё до этой точки по-прежнему шло прямо в hw-буфер.
+    // Двойную буферизацию включаем здесь, а не в initialize_console() —
+    // именно ПОСЛЕ sti/irq_enable(0), чтобы таймер уже тикал и
+    // console_tick_present() (из pit_timer_handler()) сразу флашил back
+    // buffer без слепого окна. До этой точки вывод шёл прямо в hw-буфер.
     console_enable_double_buffering();
 
-    // v0.9, фаза 1 — пробует AHCI/NVMe (ahci.c/nvme.c) перед первым реальным
-    // disk_read_sectors()/disk_write_sectors() вне раннего klog()-пути (тот
-    // случается намного позже, при первой записи LufiraFS — само
-    // монтирование идёт из уже загруженного бутлоадером в RAM образа, см.
-    // комментарий выше). На контроллерах без AHCI/NVMe (или без активного
-    // порта/namespace) остаётся легаси ATA PIO, как раньше.
+    // disk_init() пробует AHCI/NVMe (ahci.c/nvme.c) перед легаси ATA PIO.
+    // Контроллеры ждут готовности busy-wait циклами с фиксированным числом
+    // итераций MMIO-чтения — под TCG-эмуляцией это превращается в заметную
+    // паузу (иногда и в ложный "контроллер не ответил"). Поэтому disk_init(),
+    // как и xhci_init() ниже, вызывается ПОСЛЕ sti/irq_enable(0): ahci.c/
+    // nvme.c используют pit_wait_ms() (откалиброван по тикам PIT) вместо
+    // голого спина.
     //
-    // НАЙДЕННЫЙ БАГ (пользователь: "ahci/nvme грузятся заметно медленнее
-    // ide, причём именно текст тормозит, и nvme вообще иногда не
-    // поднимается") — disk_init() раньше вызывался ЗДЕСЬ ЖЕ, но ДО sti
-    // (там, где сейчас просто pci_init()+sti выше). ahci.c/nvme.c ждут
-    // готовности контроллера busy-wait циклами с ФИКСИРОВАННЫМ числом
-    // итераций MMIO-чтения (до 20 000 000 в ahci.c, до 2 000 000 в
-    // nvme.c) — ровно тот же антипаттерн, что уже чинили для hda_init()/
-    // ac97_init()/xhci_init() (см. длинный разбор у pit_wait_ms() в hda.c):
-    // число итераций, откалиброванное под реальное железо, превращается в
-    // ощутимую паузу (иногда и в ложный "контроллер не ответил" на особо
-    // загруженном хосте) под TCG-эмуляцией, где каждый MMIO-доступ стоит
-    // на порядки дороже. Теперь disk_init() — как и xhci_init() ниже —
-    // вызывается ПОСЛЕ sti/irq_enable(0), так что ahci.c/nvme.c могут
-    // использовать pit_wait_ms() (откалиброванный по реальным тикам PIT,
-    // не зависящий от скорости хоста) вместо голого спина.
-    //
-    // ВТОРАЯ ПОЛОВИНА БАГА (живым тестом, отдельно от этого переноса) —
-    // disk_read_sectors()/disk_write_sectors() сами по себе достижимы
-    // ГОРАЗДО раньше этой точки: klog_init()/klog() выше (при монтировании
-    // LufiraFS) уже пишут на диск, когда ahci_available()/nvme_available()
-    // оба ложны (disk_init() ещё не вызывался) — то есть падают в тот же
-    // legacy ATA PIO путь (disk.c), но ДО sti. ata_wait_ready()/
-    // ata_wait_drq() в disk.c поэтому проверяют cpu_interrupts_active()
-    // перед тем как звать pit_wait_ms(), а не предполагают, что к ним
-    // всегда приходят уже после этой точки — см. разбор там же.
+    // klog_init()/klog() выше (при монтировании LufiraFS) пишут на диск ещё
+    // ДО этой точки, то есть ДО sti, тем же legacy ATA PIO путём (ahci/nvme
+    // пока не инициализированы). Поэтому ata_wait_ready()/ata_wait_drq() в
+    // disk.c проверяют cpu_interrupts_active() перед вызовом pit_wait_ms(),
+    // а не предполагают, что прерывания уже включены.
     disk_init();
 
     // Требует уже тикающего таймера (pit_wait_ms() внутри сброса контроллера).
     //
-    // ВАЖНО: xHCI (USB-клавиатура/мышь через usb_hid.c) теперь инициализируется
-    // ПЕРЕД легаси PS/2 (keyboard_init()/mouse_init() ниже), а не после —
-    // раньше было наоборот, и это было не просто "не по порядку": PS/2-мышь
-    // инициализировалась САМОЙ ПЕРВОЙ в kernel_main(), до sti и до xhci_init(),
-    // и при отсутствии физической PS/2-мыши (обычный случай для usb-только
-    // железа) её безлимитные busy-wait'ы на ответ контроллера вешали ядро
-    // НАСМЕРТЬ — система не доходила даже до xhci_init(), который и поднял
-    // бы настоящую (USB) мышь. Этот зависон исправлен отдельно, таймаутами
-    // в mouse.c (см. PS2_TIMEOUT_ITERS там) — сам по себе отсутствующий
-    // PS/2-девайс больше никогда не вешает загрузку, независимо от порядка.
-    // Но порядок всё равно логичнее поменять: xHCI (современный, более
-    // вероятный источник реальной клавиатуры/мыши) — первым, легаси PS/2 —
-    // вторым, как единственный фоллбэк, а не как блокирующий гейт перед USB.
+    // xHCI (USB-клавиатура/мышь, usb_hid.c) инициализируется ПЕРЕД легаси
+    // PS/2 — это более вероятный источник реального HID, PS/2 остаётся лишь
+    // фоллбэком. Безлимитный busy-wait PS/2 на отсутствующем устройстве
+    // больше не вешает загрузку независимо от порядка — см. таймауты
+    // PS2_TIMEOUT_ITERS в mouse.c.
     xhci_init();
 
     LOG_PENDING("Initializing keyboard...");
@@ -441,14 +391,11 @@ void _start(BootInfo* bi) {
     // тикающих таймерных прерываний.
     net_init();
 
-    // DHCP поверх статического дефолта — v0.9: пробуем получить настоящую
-    // аренду (IP/маску/шлюз/DNS), если в сети есть DHCP-сервер (включая
-    // встроенный в QEMU SLIRP); при неудаче (нет сервера, таймаут, NAK)
-    // net_get_config() просто остаётся на статическом дефолте из net.c —
-    // тот же принцип "не упасть, деградировать на запасной вариант", что и
-    // у остального сетевого стека. ~4с бюджет — заметно короче, чем
-    // HTTP_TOTAL_BUDGET_TICKS у настоящего fetch (http_client.c), чтобы не
-    // раздувать время загрузки, когда DHCP-сервера просто нет.
+    // Пробуем получить DHCP-аренду (IP/маска/шлюз/DNS), если в сети есть
+    // сервер (включая QEMU SLIRP); при неудаче net_get_config() остаётся на
+    // статическом дефолте из net.c — тот же принцип деградации, что и у
+    // остального сетевого стека. ~4с бюджет короче HTTP_TOTAL_BUDGET_TICKS
+    // (http_client.c), чтобы не раздувать время загрузки без DHCP-сервера.
     if (net_found()) {
         if (dhcp_start(4000) == 0) {
             DLOG("[DHCP] lease applied\n");
@@ -457,12 +404,10 @@ void _start(BootInfo* bi) {
         }
     }
 
-    // v0.9, фаза 1 — пробует HDA (hda.c) первым, затем AC'97 (ac97.c) —
-    // тот же disk.c-образный диспетчер, что и у AHCI/NVMe выше, см. sound.c.
-    // По ТОЙ ЖЕ причине, что и xhci_init()/net_init() выше — требует уже
-    // тикающего таймера (pit_wait_ms() внутри CORB/RIRB-обмена с кодеком и
-    // сброса контроллера) — раньше стоял перед sti (как ac97_init()
-    // когда-то), с pit_wait_ms() это зависало намертво, см. разбор в hda.c.
+    // Пробует HDA (hda.c) первым, затем AC'97 (ac97.c) — тот же диспетчер,
+    // что у AHCI/NVMe выше (см. sound.c). Требует тикающего таймера
+    // (pit_wait_ms() в CORB/RIRB-обмене и сбросе контроллера), поэтому
+    // вызывается после sti — см. разбор в hda.c.
     if (sound_init() == 0) {
         DLOG("[ OK ] Audio ready (%s)\n", sound_driver_name());
     } else {
@@ -473,7 +418,7 @@ void _start(BootInfo* bi) {
         printf("\n");
         set_foreground_color(LOG_COLOR_HEADER);
         printf("================================================\n");
-        printf("     LufiraOS Kernel v0.8.0                     \n");
+        printf("     LufiraOS Kernel v0.9.0                     \n");
         printf("================================================\n");
         set_foreground_color(LOG_COLOR_INFO);
 
@@ -484,14 +429,13 @@ void _start(BootInfo* bi) {
         LOG_STATUS_LINE("Console", 1, "READY");
         LOG_STATUS_LINE("Keyboard", keyboard_is_initialized(), keyboard_is_initialized() ? "READY" : "NOT FOUND");
         LOG_STATUS_LINE("Mouse", mouse_is_initialized(), mouse_is_initialized() ? "READY" : "NOT FOUND");
-        LOG_STATUS_LINE("Syscalls", 1, "ACTIVE (45 syscalls)");
+        LOG_STATUS_LINE("Syscalls", 1, "ACTIVE (67 syscalls)");
         LOG_STATUS_LINE("VFS", 1, "READY");
 
         set_foreground_color(STATUS_READY);
         printf("  Memory manager: INITIALIZED\n");
-        // "COOPERATIVE" была стала ещё с v0.4 Phase 1 (см. план) — планировщик
-        // давно вытесняет ring3-код по таймеру (PREEMPT_TIMESLICE_TICKS,
-        // kernel/system/timer/pit.c), просто никто не поправил эту строку.
+        // Планировщик вытесняет ring3-код по таймеру (PREEMPT_TIMESLICE_TICKS,
+        // pit.c) — строка отражает текущее поведение, не историческое "COOPERATIVE".
         printf("  Scheduler: PREEMPTIVE\n");
         printf("  Process manager: INITIALIZED\n");
         printf("  LufiraFS: %s\n", lufirafs_mounted ? "MOUNTED" : "NOT MOUNTED");

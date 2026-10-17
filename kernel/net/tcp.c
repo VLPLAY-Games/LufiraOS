@@ -10,39 +10,20 @@
 #define TCP_MAX_SEGMENT_DATA 1460u
 
 /*
- * НАЙДЕННЫЙ БАГ: приём терял все сегменты в пачке, кроме первого.
- *
- * Было: один буфер на один сегмент (stage_buf + has_data); tcp_receive()
- * отбрасывал новый сегмент, пока предыдущий не забран вызывающим, БЕЗ
- * продвижения rcv_next — тот терялся насовсем, до ретрансмиссии
- * собеседника. rtl8139_poll() вычерпывает из кольца до 8 кадров за вызов,
- * так что ЛЮБАЯ пачка сегментов (весь ответ длиннее MSS) теряла все
- * сегменты, кроме первого, и восстанавливалась только экспоненциальным
- * RTO собеседника (1.5с, 3.0с, 6.0с...) — живой pcap против
- * raw.githubusercontent.com подтвердил ровно это: первый сегмент
- * ACK'ался, остальные ждали ретрансмиссии. Budget ожидания одной записи у
- * tls.c/http_client.c — 300 тиков (3000мс); второй откат RTO в него уже
- * не укладывался, поэтому TLS обрывался сразу после Certificate, а HTTP
- * приносил обрезанное тело. Не ловилось раньше, потому что shell-ный
- * wget (shell/commands/net.c) имел щедрый 10с-без-данных бюджет и просто
- * выглядел медленным, а хостовые тесты (net/selftest/) подменяют tcp.c
- * сокетами, где терять нечему.
- *
- * Стало: настоящая очередь (rx_fifo) плюс честное окно в заголовке —
- * собеседник сам не шлёт больше, чем мы готовы принять. Семантика
- * tcp_recv_poll()/tcp_ack_consumed() не изменилась.
+ * Очередь приёма (rx_fifo) с честным окном в заголовке: собеседник не
+ * шлёт больше, чем мы готовы принять. Семантика tcp_recv_poll()/
+ * tcp_ack_consumed() не меняется.
  *
  * Окно подобрано под кольцо приёма RTL8139 (8КБ): 4 сегмента (~6КБ)
- * помещаются и вычерпываются одним rtl8139_poll() (4 <= 8 кадров/тик);
- * больше — упрёмся в переполнение того же кольца этажом ниже.
+ * вычерпываются одним rtl8139_poll() (4 <= 8 кадров/тик); больше —
+ * переполнение того же кольца этажом ниже.
  */
 #define TCP_RX_FIFO_CAP   8192u
 #define TCP_RX_WINDOW_MAX (4u * TCP_MAX_SEGMENT_DATA)
 
-// Ретрансмиссия — один in-flight сегмент за раз (stop-and-wait ARQ, не
-// скользящее окно/congestion control — осознанно вне области). RTO
-// фиксированный, без адаптивной оценки RTT: достаточно для практически
-// надёжного линка QEMU SLIRP, полноценный TCP не имитируем.
+// Ретрансмиссия: один in-flight сегмент (stop-and-wait, без скользящего
+// окна/congestion control). RTO фиксированный, без оценки RTT — хватает
+// для почти надёжного линка QEMU SLIRP.
 #define TCP_RTO_TICKS   30   // ~300мс на попытку
 #define TCP_MAX_RETRIES 5
 
@@ -61,17 +42,15 @@ typedef struct {
     uint32_t snd_next;
     uint32_t rcv_next;
 
-    // Очередь принятых ПО ПОРЯДКУ байт, ещё не забранных вызывающей
-    // стороной. rx_handed — размер куска, отданного последним
-    // tcp_recv_poll() и ожидающего tcp_ack_consumed(): пока он не ноль,
-    // начало очереди не двигается, поэтому отданный указатель остаётся
-    // действительным (дописывание новых сегментов идёт в хвост).
+    // Очередь принятых по порядку байт, не забранных вызывающим. rx_handed —
+    // размер последнего отданного tcp_recv_poll() куска: до tcp_ack_consumed()
+    // начало очереди не двигается, и отданный указатель остаётся валидным.
     uint8_t  rx_fifo[TCP_RX_FIFO_CAP];
     uint32_t rx_len;
     uint32_t rx_handed;
 
-    // Копия последнего отправленного (SYN/данные/FIN) сегмента — на случай,
-    // если peer_acked_seq не догонит его вовремя (см. tcp_retransmit_if_needed()).
+    // Копия последнего отправленного сегмента (SYN/данные/FIN) — для
+    // повтора, если peer_acked_seq не догонит вовремя (tcp_retransmit_if_needed()).
     uint8_t  last_segment_buf[TCP_MAX_SEGMENT_DATA];
     uint16_t last_segment_len;
     uint8_t  last_segment_flags;
@@ -85,21 +64,18 @@ typedef struct {
 static tcp_conn_t g_conn;
 static uint16_t g_next_local_port = 49152;
 
-// Сколько байт мы готовы принять прямо сейчас — объявляется в каждом
-// исходящем сегменте (в т.ч. ACK из tcp_ack_consumed(), так собеседник
-// узнаёт об освободившемся месте). Ноль — законно: останавливает
-// отправителя до разбора накопленного, вместо молчаливой потери.
+// Сколько байт готовы принять сейчас — объявляется в каждом исходящем
+// сегменте, включая ACK из tcp_ack_consumed(). Ноль — законно: останавливает
+// отправителя до разбора накопленного.
 static uint16_t tcp_rx_window(void) {
     uint32_t free_space = TCP_RX_FIFO_CAP - g_conn.rx_len;
     if (free_space > TCP_RX_WINDOW_MAX) free_space = TCP_RX_WINDOW_MAX;
     return (uint16_t)free_space;
 }
 
-// Собирает псевдо-заголовок (12 байт, только для чексума) + настоящий
-// TCP-заголовок(+данные) в одном буфере, считает чексум по всему этому,
-// но на провод через ip_send() уходит только настоящий сегмент.
-// Явный seq (не всегда g_conn.snd_next): ретрансмиссии повторно шлют
-// старый, уже израсходованный seq.
+// Собирает псевдо-заголовок (12 байт, только для чексума) + TCP-заголовок
+// и данные в одном буфере для чексума; на провод уходит только сегмент.
+// seq передаётся явно — ретрансмиссия повторяет старый, уже использованный.
 static int tcp_send_segment_seq(uint8_t flags, const void *data, uint16_t data_len, uint32_t seq) {
     uint8_t buf[12 + 20 + TCP_MAX_SEGMENT_DATA];
 
@@ -131,10 +107,9 @@ static int tcp_send_segment_seq(uint8_t flags, const void *data, uint16_t data_l
     return ip_send(g_conn.remote_ip, IP_PROTO_TCP, hdr, tcp_len);
 }
 
-// Обычная отправка (не ретрансмиссия): шлёт с текущим snd_next и
-// запоминает сегмент "в полёте" для ретрансмиссии (last_send_tick/
-// retry_count); peer_acked_seq не трогает. Вызывающий сам продвигает
-// snd_next после успеха (SYN/FIN — на 1, данные — на data_len).
+// Обычная отправка (не ретрансмиссия): шлёт с текущим snd_next, запоминает
+// сегмент "в полёте" (last_send_tick/retry_count). snd_next продвигает
+// вызывающий сам после успеха (SYN/FIN — на 1, данные — на data_len).
 static int tcp_send_segment(uint8_t flags, const void *data, uint16_t data_len) {
     uint32_t seq = g_conn.snd_next;
     if (tcp_send_segment_seq(flags, data, data_len, seq) != 0) return -1;
@@ -152,10 +127,9 @@ static int tcp_send_segment(uint8_t flags, const void *data, uint16_t data_len) 
     return 0;
 }
 
-// Вызывать на каждой итерации поллинг-цикла, ждущего ACK
-// (tcp_connect()/tcp_send()/tcp_close()): если последний сегмент не
+// Вызывать в каждой итерации цикла, ждущего ACK: если последний сегмент не
 // подтверждён и прошло больше TCP_RTO_TICKS — шлёт его снова тем же seq.
-// После TCP_MAX_RETRIES сдаётся и переводит соединение в CLOSED.
+// После TCP_MAX_RETRIES переводит соединение в CLOSED.
 static void tcp_retransmit_if_needed(void) {
     if (g_conn.state == TCP_STATE_CLOSED) return;
     if ((int32_t)(g_conn.peer_acked_seq - g_conn.last_segment_end_seq) >= 0) return; // уже подтверждено
@@ -198,7 +172,7 @@ int tcp_connect(uint32_t remote_ip, uint16_t remote_port) {
         tcp_retransmit_if_needed();
         if (g_conn.state == TCP_STATE_ESTABLISHED) return 0;
         if (g_conn.state == TCP_STATE_CLOSED) return -1; // RST или исчерпаны ретраи
-        process_sleep(1); // НАЙДЕННЫЙ БАГ — см. net_lock_acquire() в net.h
+        process_sleep(1);
     }
 
     g_conn.state = TCP_STATE_CLOSED;
@@ -223,7 +197,7 @@ int tcp_send(const void *data, uint16_t len) {
             net_poll();
             tcp_retransmit_if_needed();
             if (g_conn.state == TCP_STATE_CLOSED) return -1;
-            process_sleep(1); // НАЙДЕННЫЙ БАГ — см. net_lock_acquire() в net.h
+            process_sleep(1);
         }
         if ((int32_t)(g_conn.peer_acked_seq - end_seq) < 0) {
             g_conn.state = TCP_STATE_CLOSED;
@@ -239,9 +213,8 @@ int tcp_send(const void *data, uint16_t len) {
 int tcp_recv_poll(uint8_t **out_ptr, uint16_t *out_len) {
     net_poll();
 
-    // Повторный вызов до tcp_ack_consumed() обязан отдать тот же кусок:
-    // вызывающий мог уже скопировать прошлую длину, "выросшая" дала бы
-    // ему дыру в потоке.
+    // Повторный вызов до tcp_ack_consumed() должен отдать тот же кусок:
+    // вызывающий мог уже скопировать прошлую длину, "выросшая" дала бы дыру.
     if (g_conn.rx_handed == 0) {
         uint32_t take = g_conn.rx_len;
         if (take > TCP_MAX_SEGMENT_DATA) take = TCP_MAX_SEGMENT_DATA;
@@ -254,11 +227,10 @@ int tcp_recv_poll(uint8_t **out_ptr, uint16_t *out_len) {
     return 1;
 }
 
-// ACK-only: реактивный ответ, не payload, которую нужно ретранслировать
-// при потере (следующий ACK/ретрансмиссия другой стороны всё поправит —
-// обычное свойство кумулятивных ACK). Намеренно tcp_send_segment_seq(),
-// а не tcp_send_segment(): та перезаписала бы last_segment_*/retry_count
-// слежение за настоящим in-flight сегментом данных.
+// ACK-only: реактивный ответ, не payload для ретрансмиссии (следующий
+// ACK/ретрансмиссия собеседника всё поправит). Намеренно
+// tcp_send_segment_seq(), не tcp_send_segment() — та затёрла бы
+// last_segment_*/retry_count слежение за настоящим сегментом данных.
 static void tcp_send_ack_only(void) {
     tcp_send_segment_seq(TCP_FLAG_ACK, NULL, 0, g_conn.snd_next);
 }
@@ -266,13 +238,13 @@ static void tcp_send_ack_only(void) {
 void tcp_ack_consumed(void) {
     if (g_conn.rx_handed > 0) {
         g_conn.rx_len -= g_conn.rx_handed;
-        // Сдвиг, не кольцо: очередь маленькая, а линейная память отдаёт
-        // вызывающему непрерывный кусок одним указателем, без склейки.
+        // Сдвиг, не кольцо: очередь маленькая, память отдаёт вызывающему
+        // непрерывный кусок одним указателем, без склейки.
         memmove(g_conn.rx_fifo, g_conn.rx_fifo + g_conn.rx_handed, g_conn.rx_len);
         g_conn.rx_handed = 0;
     }
-    // ACK здесь прежде всего обновляет окно: байты уже подтверждены в
-    // tcp_receive(), а место под следующие освободилось только сейчас.
+    // ACK здесь обновляет окно: байты уже подтверждены в tcp_receive(),
+    // место под следующие освободилось только сейчас.
     tcp_send_ack_only();
 }
 
@@ -290,7 +262,7 @@ void tcp_close(void) {
     while (pit_get_ticks() < deadline && g_conn.state != TCP_STATE_CLOSED) {
         net_poll();
         tcp_retransmit_if_needed();
-        process_sleep(1); // НАЙДЕННЫЙ БАГ — см. net_lock_acquire() в net.h
+        process_sleep(1);
     }
 
     g_conn.state = TCP_STATE_CLOSED;
@@ -318,9 +290,8 @@ void tcp_receive(uint32_t src_ip, const void *payload, uint16_t len) {
     const uint8_t *data = (const uint8_t *)payload + data_offset;
     uint32_t seg_seq = ntohl(hdr->seq);
 
-    // Кумулятивный ACK — только НАПЕРЁД (signed-diff: seq/ack 32-битные и
-    // оборачиваются, RFC 1982). tcp_retransmit_if_needed() использует это
-    // поле, чтобы решить, слать ли последний сегмент повторно.
+    // Кумулятивный ACK — только вперёд (signed-diff: seq/ack 32-битные,
+    // оборачиваются, RFC 1982); используется в tcp_retransmit_if_needed().
     if (flags & TCP_FLAG_ACK) {
         uint32_t incoming_ack = ntohl(hdr->ack);
         if ((int32_t)(incoming_ack - g_conn.peer_acked_seq) > 0) {
@@ -338,8 +309,8 @@ void tcp_receive(uint32_t src_ip, const void *payload, uint16_t len) {
     }
 
     // Данные принимаем только строго по порядку (нет буфера пересборки
-    // внеочередных сегментов, см. tcp.h); пришедшее по порядку дописывается
-    // в очередь, а не вытесняет предыдущее (см. "НАЙДЕННЫЙ БАГ" выше).
+    // внеочередных сегментов, см. tcp.h); дописываются в очередь, не
+    // вытесняя предыдущее.
     if (data_len > 0) {
         if (seg_seq == g_conn.rcv_next) {
             uint32_t free_space = TCP_RX_FIFO_CAP - g_conn.rx_len;
@@ -349,8 +320,8 @@ void tcp_receive(uint32_t src_ip, const void *payload, uint16_t len) {
                 g_conn.rx_len += take;
                 g_conn.rcv_next += take;
             }
-            // Подтверждаем ровно столько, сколько приняли: если сегмент
-            // влез не целиком, окно уже отразит занятость, остаток дошлют.
+            // Подтверждаем ровно столько, сколько приняли: окно отразит
+            // занятость, остаток дошлют.
             tcp_send_ack_only();
         } else {
             // Не по порядку (дубликат/дыра): данных не берём, но ACK с

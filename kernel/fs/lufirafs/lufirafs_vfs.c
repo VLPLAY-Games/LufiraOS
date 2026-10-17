@@ -1,13 +1,11 @@
-// VFS-обвязка над LufiraFS — прямой аналог kernel/fs/fat/fat_vfs.c, тот же
-// принцип (см. подробный разбор в комментариях там): каждый inode_t,
-// который видит VFS, несёт в private_data маленькую структуру с номером
-// LufiraFS-inode и (для директорий) курсором обхода.
+// VFS-обвязка над LufiraFS, аналог kernel/fs/fat/fat_vfs.c: каждый inode_t,
+// который видит VFS, несёт в private_data номер LufiraFS-inode и (для
+// директорий) курсор обхода.
 //
-// Пути здесь ВСЕГДА разрешаются от КОРНЯ — как и было у FAT
-// (fat_lookup_path безусловно стартует с dir_cluster=0). Это то, что видят
-// системные вызовы (userland ELF шлёт свои пути syscall'ами). Команды
-// шелла (cd/ls/...), наоборот, работают через lufirafs_* напрямую и сами
-// передают cwd-inode — см. kernel/shell/commands/filesystem.c.
+// Системные вызовы (userland ELF) всегда разрешают путь от корня — как
+// fat_lookup_path с dir_cluster=0. Команды шелла (cd/ls/...), наоборот,
+// работают через lufirafs_* напрямую и сами передают cwd-inode (см.
+// kernel/shell/commands/filesystem.c).
 #include "lufirafs.h"
 #include "system/mm/heap.h"
 #include "drivers/console/console.h"
@@ -42,15 +40,11 @@ int vfs_lufirafs_unlink(const char *path);
 inode_t *vfs_lufirafs_lookup(const char *path);
 inode_t *vfs_lufirafs_get_root(void);
 
-// _at()-варианты — то же самое, но разрешают путь от ПРОИЗВОЛЬНОГО
-// стартового inode, а не всегда от корня. lufirafs_lookup()/
-// lufirafs_resolve_parent() (lufirafs.c) уже умеют это сами (абсолютный
-// путь всё равно уходит от корня — см. их собственный код); не хватало
-// только того, чтобы это НЕ было захардкожено здесь на
-// lufirafs.sb.root_inode. Используются новыми cwd-relative syscall'ами
-// (SYS_MKDIR/RMDIR/UNLINK, syscall.c) — старые root-relative функции ниже
-// остаются как есть (используются SYS_OPEN/SYS_EXEC), просто становятся
-// тонкими обёртками над этими.
+// _at()-варианты разрешают путь от произвольного стартового inode, а не
+// всегда от корня (lufirafs_lookup()/lufirafs_resolve_parent() это умеют —
+// хардкод на root_inode был только здесь). Используются cwd-relative
+// syscall'ами (SYS_MKDIR/RMDIR/UNLINK); root-relative функции ниже
+// (SYS_OPEN/SYS_EXEC) — тонкие обёртки над ними.
 int vfs_lufirafs_open_at(uint32_t base_inode, const char *path, int flags);
 int vfs_lufirafs_create_at(uint32_t base_inode, const char *path);
 int vfs_lufirafs_mkdir_at(uint32_t base_inode, const char *path);
@@ -288,13 +282,9 @@ int vfs_lufirafs_create_at(uint32_t base_inode, const char *path) {
     int res = lufirafs_create(&lufirafs, parent, name, LUFIRAFS_MODE_FILE,
                                uid, gid, LUFIRAFS_DEFAULT_FILE_PERM, &out_ino);
     if (res == 0) lufirafs_sync(&lufirafs);
-    // Раньше здесь любая неудача схлопывалась в -2 ("нет свободного inode"),
-    // теряя различие между "уже существует"/"нет inode"/"нет места" — то же
-    // сырое значение lufirafs_create() уже отдаёт наружу _mkdir_at() ниже.
-    // Единственный вызывающий, которому это было важно (vfs_open()'s
-    // O_CREAT в vfs.c), проверяет только "== 0"/"!= 0" и не смотрит на
-    // конкретное значение — передавать raw-код ему безопасно, а
-    // command_touch() (filesystem.c) теперь как раз на него полагается.
+    // Сырой код lufirafs_create() отдаётся наружу как есть (как и в
+    // _mkdir_at() ниже) — сохраняет различие "уже существует"/"нет
+    // inode"/"нет места" для command_touch() (filesystem.c).
     return res;
 }
 
