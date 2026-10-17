@@ -30,6 +30,7 @@
 #include "net/icmp.h"
 #include "drivers/net/rtl8139.h"
 #include "drivers/sound/sound.h"
+#include "version.h"
 
 extern lufirafs_t lufirafs;
 
@@ -1753,6 +1754,58 @@ static uint64_t sys_ping(uint64_t dst_ip, uint64_t id, uint64_t seq, uint64_t ti
     return (uint64_t)rtt_ms;
 }
 
+// SYS_OS_VERSION (74) — см. syscall.h.
+static uint64_t sys_os_version(uint64_t buf_ptr, uint64_t unused1, uint64_t unused2,
+                               uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+
+    if (!current_process ||
+        !is_user_range_valid(current_process->page_table, buf_ptr, sizeof(lufira_os_version_t), 1))
+        return (uint64_t)-EFAULT;
+
+    lufira_os_version_t out;
+    out.major = LUFIRA_VERSION_MAJOR;
+    out.minor = LUFIRA_VERSION_MINOR;
+    out.patch = LUFIRA_VERSION_PATCH;
+    memcpy(out.build_date, __DATE__, sizeof(__DATE__)); // sizeof включает NUL, помещается в [12]
+    memcpy(out.build_time, __TIME__, sizeof(__TIME__)); // то же, в [9]
+
+    memcpy((void *)buf_ptr, &out, sizeof(out));
+    return 0;
+}
+
+// SYS_NET_CONFIG_GET (75) — см. syscall.h.
+static uint64_t sys_net_config_get(uint64_t buf_ptr, uint64_t unused1, uint64_t unused2,
+                                   uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+
+    if (!current_process ||
+        !is_user_range_valid(current_process->page_table, buf_ptr, sizeof(lufira_net_config_t), 1))
+        return (uint64_t)-EFAULT;
+
+    lufira_net_config_t out;
+    memset(&out, 0, sizeof(out));
+    out.link_up = (uint8_t)rtl8139_found();
+    if (out.link_up) memcpy(out.mac, rtl8139_get_mac(), 6);
+
+    const net_config_t *cfg = net_get_config();
+    out.our_ip = cfg->our_ip;
+    out.netmask = cfg->netmask;
+    out.gateway = cfg->gateway;
+    out.dns_server = cfg->dns_server;
+
+    memcpy((void *)buf_ptr, &out, sizeof(out));
+    return 0;
+}
+
+// SYS_NET_CONFIG_SET (76) — см. syscall.h.
+static uint64_t sys_net_config_set(uint64_t ip, uint64_t netmask, uint64_t gateway,
+                                   uint64_t unused3, uint64_t unused4) {
+    (void)unused3; (void)unused4;
+    net_set_config((uint32_t)ip, (uint32_t)netmask, (uint32_t)gateway, net_get_config()->dns_server);
+    return 0;
+}
+
 // SYS_FB_INFO (60) — см. syscall.h.
 static uint64_t sys_fb_info(uint64_t out_ptr, uint64_t unused1, uint64_t unused2,
                             uint64_t unused3, uint64_t unused4) {
@@ -1986,6 +2039,9 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_WM_UNREGISTER] = sys_wm_unregister,
     [SYS_SOUND_STOP] = sys_sound_stop,
     [SYS_PING] = sys_ping,
+    [SYS_OS_VERSION] = sys_os_version,
+    [SYS_NET_CONFIG_GET] = sys_net_config_get,
+    [SYS_NET_CONFIG_SET] = sys_net_config_set,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========

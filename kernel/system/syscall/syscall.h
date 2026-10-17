@@ -334,6 +334,32 @@
 // на одно соединение разом").
 #define SYS_PING 73
 
+// SYS_OS_VERSION (74): buf_ptr -> lufira_os_version_t. Версия — из
+// kernel/version.h (единственный источник, см. его комментарий), дата/
+// время сборки — __DATE__/__TIME__ ядра (захвачены здесь же, в syscall.c,
+// на момент его компиляции). Нужен lufira-packages/apps/settings.c
+// ("О системе") и, в перспективе, любому другому коду, которому нужна
+// версия ядра именно ЖИВОГО запущенного ядра (а не той, что была у
+// пакета/сборщика на момент сборки — см. LPG_KERNEL_VERSION_MAJOR и
+// совместимость в dlpg.c/lpg_pack.c). 0 — всегда успех (структура
+// статическая, ничего не может пойти не так, кроме плохого указателя).
+#define SYS_OS_VERSION 74
+
+// SYS_NET_CONFIG_GET (75): buf_ptr -> lufira_net_config_t. Обёртка над
+// net_get_config()/rtl8139_found()/rtl8139_get_mac() — нужен userspace
+// "ifconfig" (lufira-packages/user/ifconfig.c), у которого нет доступа к
+// драйверу напрямую (kernel-native command_ifconfig(), kernel/shell/
+// commands/net.c, теперь мёртвый код — тот был частью ядра, звал эти
+// функции прямо). Всегда 0 — "карты нет" валидный ответ (link_up=0), а не
+// повод вернуть -EIO (тот же стиль, что у SYS_SOUND_INFO).
+#define SYS_NET_CONFIG_GET 75
+
+// SYS_NET_CONFIG_SET (76): (ip, netmask, gateway) — обёртка над
+// net_set_config(), dns_server сохраняется прежним (как и у kernel-native
+// command_ifconfig() — он тоже передавал net_get_config()->dns_server
+// третьим неизменным параметром). Всегда 0.
+#define SYS_NET_CONFIG_SET 76
+
 // Флаги для sys_open
 #define O_RDONLY    0
 #define O_WRONLY    1
@@ -429,6 +455,25 @@ typedef struct {
     // структуры (apps/settings.c), не знающие о нём, не ломаются.
     uint32_t sample_rate; // Гц, значим только если available=1
 } lufira_sound_info_t;
+
+// Для SYS_OS_VERSION — см. его комментарий.
+typedef struct {
+    uint16_t major;
+    uint16_t minor;
+    uint16_t patch;
+    char     build_date[12]; // __DATE__, напр. "Jan  1 2026", с NUL
+    char     build_time[9];  // __TIME__, напр. "12:34:56", с NUL
+} lufira_os_version_t;
+
+// Для SYS_NET_CONFIG_GET — см. его комментарий.
+typedef struct {
+    uint8_t  link_up;    // 1 — rtl8139_found(), 0 — карты нет (остальное 0)
+    uint8_t  mac[6];
+    uint32_t our_ip;
+    uint32_t netmask;
+    uint32_t gateway;
+    uint32_t dns_server;
+} lufira_net_config_t;
 
 // Одна запись снимка SYS_PSLIST (30) — то же, что process_ps() печатает
 // построчно, плюс ppid/uid/cpu_ticks (для per-process разбивки в

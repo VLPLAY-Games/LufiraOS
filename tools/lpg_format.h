@@ -78,6 +78,19 @@ typedef struct __attribute__((packed)) {
     uint8_t reserved[1];
     uint32_t dep_count;
     uint32_t file_count;
+    // Минимальная версия ЯДРА (kernel/version.h в LufiraOS), под которую
+    // собран пакет — build.py всегда пишет туда текущую KERNEL_VERSION
+    // (см. его комментарий), не версию из manifest-а пакета: это не
+    // "зависимость", которую выбирает автор пакета, а факт — "с каким
+    // ABI/набором syscall'ов этот .lpg реально слинкован". dlpg install/
+    // update (lufira-packages/base/dlpg.c) сверяет её с версией РЕАЛЬНО
+    // запущенного ядра (SYS_OS_VERSION) — та же lpg_version_gte(), что и
+    // для dep_count выше, просто обязательная и для одного-единственного
+    // "пакета" — ядра. Добавлено В КОНЕЦ — то же обратно совместимое
+    // расширение, что и sample_rate у lufira_sound_info_t (syscall.h):
+    // старый lpg_pack/dlpg, ничего не знающий об этом поле, просто не
+    // читает/не пишет его (там, где структура обнуляется перед записью).
+    lpg_version_t min_kernel_version;
 } lpg_header_t;
 
 typedef struct __attribute__((packed)) {

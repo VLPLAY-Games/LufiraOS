@@ -134,11 +134,13 @@ void gui_listbox_init(gui_listbox_t *l, int x, int y, int w, int h) {
     l->x = x; l->y = y; l->w = w; l->h = h;
     l->item_count = 0;
     l->selected = -1;
+    l->scroll_offset = 0;
 }
 
 void gui_listbox_clear(gui_listbox_t *l) {
     l->item_count = 0;
     l->selected = -1;
+    l->scroll_offset = 0;
 }
 
 int gui_listbox_add_item(gui_listbox_t *l, const char *text) {
@@ -155,21 +157,59 @@ void gui_listbox_draw(int win, const gui_listbox_t *l) {
     sys_win_draw_rect(win, l->x + 1, l->y + 1, (unsigned)(l->w - 2), (unsigned)(l->h - 2), LB_BG);
 
     int visible_rows = (l->h - 2) / GUI_LISTBOX_ROW_H;
-    int count = l->item_count < visible_rows ? l->item_count : visible_rows;
+    int remaining = l->item_count - l->scroll_offset;
+    int count = remaining < visible_rows ? remaining : visible_rows;
+    if (count < 0) count = 0;
+
+    // Текст рисуем в полосу УЖЕ без места под скроллбар — иначе длинные
+    // имена пакетов перекрывали бы индикатор справа.
+    int text_w = l->w - 2 - GUI_LISTBOX_SCROLLBAR_W;
+
     for (int i = 0; i < count; i++) {
+        int abs_idx = l->scroll_offset + i;
         int row_y = l->y + 1 + i * GUI_LISTBOX_ROW_H;
-        if (i == l->selected)
-            sys_win_draw_rect(win, l->x + 1, row_y, (unsigned)(l->w - 2), GUI_LISTBOX_ROW_H, LB_ROW_SEL);
-        sys_win_draw_text(win, l->x + 4, row_y + (GUI_LISTBOX_ROW_H - 8) / 2, l->items[i], LB_FG);
+        if (abs_idx == l->selected)
+            sys_win_draw_rect(win, l->x + 1, row_y, (unsigned)text_w, GUI_LISTBOX_ROW_H, LB_ROW_SEL);
+        sys_win_draw_text(win, l->x + 4, row_y + (GUI_LISTBOX_ROW_H - 8) / 2, l->items[abs_idx], LB_FG);
+    }
+
+    // Индикатор позиции — только когда реально есть что прокручивать
+    // (иначе лишняя полоса на весь список сбивает с толку).
+    if (l->item_count > visible_rows) {
+        int bar_x = l->x + l->w - 1 - GUI_LISTBOX_SCROLLBAR_W;
+        int bar_h = l->h - 2;
+        sys_win_draw_rect(win, bar_x, l->y + 1, (unsigned)GUI_LISTBOX_SCROLLBAR_W, (unsigned)bar_h, LB_BG);
+
+        int thumb_h = bar_h * visible_rows / l->item_count;
+        if (thumb_h < 4) thumb_h = 4;
+        int max_offset = l->item_count - visible_rows;
+        int thumb_y = (bar_h - thumb_h) * l->scroll_offset / (max_offset > 0 ? max_offset : 1);
+        sys_win_draw_rect(win, bar_x, l->y + 1 + thumb_y, (unsigned)GUI_LISTBOX_SCROLLBAR_W, (unsigned)thumb_h, LB_BORDER);
     }
 }
 
 int gui_listbox_click(gui_listbox_t *l, int x, int y) {
     if (x < l->x || x >= l->x + l->w || y < l->y + 1 || y >= l->y + l->h - 1) return -1;
     int row = (y - (l->y + 1)) / GUI_LISTBOX_ROW_H;
-    if (row < 0 || row >= l->item_count) return -1;
+    if (row < 0) return -1;
     int visible_rows = (l->h - 2) / GUI_LISTBOX_ROW_H;
     if (row >= visible_rows) return -1;
-    l->selected = row;
-    return row;
+    int abs_idx = l->scroll_offset + row;
+    if (abs_idx >= l->item_count) return -1;
+    l->selected = abs_idx;
+    return abs_idx;
+}
+
+int gui_listbox_scroll(gui_listbox_t *l, int delta) {
+    int visible_rows = (l->h - 2) / GUI_LISTBOX_ROW_H;
+    int max_offset = l->item_count - visible_rows;
+    if (max_offset < 0) max_offset = 0;
+
+    int new_offset = l->scroll_offset + delta;
+    if (new_offset < 0) new_offset = 0;
+    if (new_offset > max_offset) new_offset = max_offset;
+
+    if (new_offset == l->scroll_offset) return 0;
+    l->scroll_offset = new_offset;
+    return 1;
 }

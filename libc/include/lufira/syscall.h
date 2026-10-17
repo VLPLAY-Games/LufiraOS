@@ -89,6 +89,9 @@
 #define SYS_WM_UNREGISTER 71
 #define SYS_SOUND_STOP 72
 #define SYS_PING 73
+#define SYS_OS_VERSION 74
+#define SYS_NET_CONFIG_GET 75
+#define SYS_NET_CONFIG_SET 76
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -327,6 +330,39 @@ static inline long sys_sound_stop(void) {
 static inline long sys_ping(unsigned int dst_ip, unsigned int id, unsigned int seq,
                              unsigned int timeout_ms) {
     return __syscall5(SYS_PING, dst_ip, id, seq, timeout_ms, 0);
+}
+
+// Мирроит lufira_os_version_t (syscall.h) байт-в-байт — для SYS_OS_VERSION
+// (apps/settings.c, раздел "О системе").
+struct lufira_os_version {
+    unsigned short major;
+    unsigned short minor;
+    unsigned short patch;
+    char build_date[12];
+    char build_time[9];
+};
+
+static inline long sys_os_version(struct lufira_os_version *out) {
+    return __syscall5(SYS_OS_VERSION, (long)out, 0, 0, 0, 0);
+}
+
+// Мирроит lufira_net_config_t (syscall.h) байт-в-байт — для SYS_NET_CONFIG_GET
+// (apps/settings.c не использует, но user/ifconfig.c — да).
+struct lufira_net_config {
+    unsigned char link_up;
+    unsigned char mac[6];
+    unsigned int our_ip;
+    unsigned int netmask;
+    unsigned int gateway;
+    unsigned int dns_server;
+};
+
+static inline long sys_net_config_get(struct lufira_net_config *out) {
+    return __syscall5(SYS_NET_CONFIG_GET, (long)out, 0, 0, 0, 0);
+}
+
+static inline long sys_net_config_set(unsigned int ip, unsigned int netmask, unsigned int gateway) {
+    return __syscall5(SYS_NET_CONFIG_SET, ip, netmask, gateway, 0, 0);
 }
 
 // Мирроит lufira_ps_entry_t (kernel/system/syscall/syscall.h) байт-в-байт —

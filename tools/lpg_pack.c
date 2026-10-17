@@ -92,6 +92,7 @@ int main(int argc, char **argv) {
     uint8_t category = LPG_CATEGORY_USER;
     lpg_dependency_t deps[LPG_MAX_DEPS];
     uint32_t dep_count = 0;
+    lpg_version_t kernel_version = {0, 0, 0}; // 0.0.0, если manifest не указал — см. die() ниже
 
     char src_paths[LPG_MAX_FILES][512];
     lpg_file_entry_t files[LPG_MAX_FILES];
@@ -122,6 +123,8 @@ int main(int argc, char **argv) {
                            LPG_CATEGORY_USER;
             } else if (strcmp(key, "depends") == 0) {
                 dep_count = parse_depends(value, deps);
+            } else if (strcmp(key, "kernel_version") == 0) {
+                kernel_version = parse_version(value);
             }
         } else {
             if (file_count >= LPG_MAX_FILES) die("too many files (LPG_MAX_FILES)");
@@ -142,6 +145,8 @@ int main(int argc, char **argv) {
 
     if (name[0] == '\0') die("manifest missing 'name='");
     if (file_count == 0) die("manifest has no [files]");
+    if (kernel_version.major == 0 && kernel_version.minor == 0 && kernel_version.patch == 0)
+        die("manifest missing 'kernel_version=' (должна быть текущая KERNEL_VERSION из kernel/version.h)");
 
     // Читаем каждый исходный файл целиком, считаем итоговое смещение в
     // .lpg (после заголовка + всех записей о зависимостях/файлах).
@@ -176,6 +181,7 @@ int main(int argc, char **argv) {
     hdr.category = category;
     hdr.dep_count = dep_count;
     hdr.file_count = file_count;
+    hdr.min_kernel_version = kernel_version;
 
     FILE *out = fopen(argv[2], "wb");
     if (!out) die("cannot open output file");
@@ -190,8 +196,9 @@ int main(int argc, char **argv) {
 
     const char *category_name = category == LPG_CATEGORY_BASE ? "base" :
                                  category == LPG_CATEGORY_GAMES ? "games" : "user";
-    printf("lpg_pack: wrote %s (%s v%u.%u.%u, %s, %u dep(s), %u file(s))\n",
+    printf("lpg_pack: wrote %s (%s v%u.%u.%u, %s, kernel>=%u.%u.%u, %u dep(s), %u file(s))\n",
            argv[2], name, version.major, version.minor, version.patch,
-           category_name, dep_count, file_count);
+           category_name, kernel_version.major, kernel_version.minor, kernel_version.patch,
+           dep_count, file_count);
     return 0;
 }

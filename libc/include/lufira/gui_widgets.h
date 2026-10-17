@@ -65,19 +65,24 @@ int gui_checkbox_contains(const gui_checkbox_t *c, int x, int y);
 // звать ли это (обычно — после gui_checkbox_contains() на MOUSE_DOWN).
 int gui_checkbox_toggle(gui_checkbox_t *c);
 
-// Список строк с выделением по клику. БЕЗ прокрутки в этой версии —
-// показывает первые (h / GUI_LISTBOX_ROW_H) элементов из item_count;
-// элементов, не поместившихся по высоте, просто не видно (нет события
-// колеса мыши в этой GUI, прокручивать пока нечем — см. gui.c/wm.c).
+// Список строк с выделением по клику и вертикальной прокруткой —
+// scroll_offset — индекс первого видимого элемента. Своей кнопки/колеса
+// мыши у виджета нет (нет события колеса мыши в этой GUI вообще, см. gui.c/
+// wm.c) — прокрутку водит вызывающий (gui_listbox_scroll()), обычно от
+// пары кнопок "▲"/"▼" рядом со списком, тот же приём, что уже у громкости
+// в apps/settings.c (g_vol_down_btn/g_vol_up_btn). Справа — тонкая полоса-
+// индикатор позиции (не перетаскиваемая — просто "где я в списке").
 #define GUI_LISTBOX_MAX_ITEMS 64
 #define GUI_LISTBOX_ITEM_MAX  48
 #define GUI_LISTBOX_ROW_H     16
+#define GUI_LISTBOX_SCROLLBAR_W 6
 
 typedef struct {
     int x, y, w, h;
     char items[GUI_LISTBOX_MAX_ITEMS][GUI_LISTBOX_ITEM_MAX];
     int item_count;
-    int selected; // -1 - нет выделения
+    int selected;      // -1 - нет выделения (абсолютный индекс, не видимая строка)
+    int scroll_offset; // индекс первого показанного элемента
 } gui_listbox_t;
 
 void gui_listbox_init(gui_listbox_t *l, int x, int y, int w, int h);
@@ -87,7 +92,12 @@ void gui_listbox_clear(gui_listbox_t *l);
 int gui_listbox_add_item(gui_listbox_t *l, const char *text);
 void gui_listbox_draw(int win, const gui_listbox_t *l);
 // (x,y) — клиентские координаты клика. Если попали в видимый элемент —
-// выделяет его и возвращает индекс; иначе возвращает -1 и selected не
-// трогает (клик мимо списка не снимает выделение — как и у gui_textbox_t,
-// виджет сам не решает это за приложение).
+// выделяет его и возвращает АБСОЛЮТНЫЙ индекс; иначе возвращает -1 и
+// selected не трогает (клик мимо списка не снимает выделение — как и у
+// gui_textbox_t, виджет сам не решает это за приложение).
 int gui_listbox_click(gui_listbox_t *l, int x, int y);
+// Сдвигает scroll_offset на delta строк (отрицательное — вверх), зажимая
+// в [0, max(0, item_count - видимых_строк)]. Возвращает 1, если позиция
+// реально изменилась (вызывающему решать, перерисовывать ли) — 0 иначе
+// (уже у края).
+int gui_listbox_scroll(gui_listbox_t *l, int delta);
