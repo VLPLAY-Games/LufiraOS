@@ -879,10 +879,17 @@ int ac97_stream_write(const int16_t *samples, uint32_t frames) {
         uint32_t page = ac97_stream_next_page;
 
         if (ac97_stream_running) {
-            // Не трогаем страницу, которую DMA читает ПРЯМО СЕЙЧАС.
+            // Два условия ожидания: (1) не трогаем страницу, которую DMA
+            // читает ПРЯМО СЕЙЧАС (civ == page — порча данных); (2) не даём
+            // этой же записи продолжаться, пока CIV не нагонит страницу
+            // записи до разрыва не больше AC97_STREAM_MAX_LOOKAHEAD_PAGES
+            // страниц вперёд — см. разбор в ac97.h, иначе задержка
+            // воспроизведения может "застыть" на любом случайно набранном
+            // значении вплоть до целого круга (~682мс).
             for (;;) {
                 uint8_t civ = ac97_in8((uint16_t)(ac97_nabm_base + AC97_PO_CIV));
-                if (civ != (uint8_t)page) {
+                uint32_t ahead = ((uint32_t)page - civ + AC97_BDL_ENTRIES) % AC97_BDL_ENTRIES;
+                if (ahead != 0 && ahead <= AC97_STREAM_MAX_LOOKAHEAD_PAGES) {
                     break;
                 }
                 __asm__ volatile ("pause");
