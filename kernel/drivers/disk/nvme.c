@@ -282,24 +282,54 @@ int nvme_init(void) {
     // ровно 512 байт без metadata; иначе наш disk.c-совместимый API (как и
     // AHCI) просто не подойдёт, откатываемся без попытки дальше.
     uint8_t *ident = (uint8_t *)phys_to_virt(ident_phys);
-    memset(ident, 0, PAGE_SIZE);
     nvme_cmd_t cmd;
-    memset(&cmd, 0, sizeof(cmd));
-    cmd.opcode = 0x06; // Identify
-    cmd.cid = 1;
-    cmd.nsid = g_nsid;
-    cmd.prp1 = ident_phys;
-    cmd.cdw10 = 0x00; // CNS=0 — Identify Namespace
+    uint8_t flbas = 0, lbads = 0;
+    uint32_t lbaf_off = 0;
+    uint16_t ms = 0;
+    int ident_rc = -1;
 
-    if (admin_command(&cmd) != 0) {
+    // НАЙДЕННЫЙ БАГ (живым тестом: "nlbaf=7 ... lbads=0" — nlbaf реально
+    // прочитан, а конкретно LBA-формат под ним нулевой) — admin_command()
+    // честно вернул успех (ответ в completion queue пришёл), но реальные
+    // 4КБ данных Identify, похоже, ещё не до конца долетели по DMA в
+    // ident_phys в момент, когда мы их читаем — nlbaf (offset 25) уже
+    // настоящий, а запись таблицы LBA-форматов (offset 128+) — ещё старые
+    // нули из memset(). lbads==0 физически невозможен НИ ДЛЯ ОДНОГО
+    // реального namespace вообще (2^0=1 байт — это даже не минимальный
+    // LBA-формат спецификации), независимо от значения nlbaf — живым
+    // тестом пойман и вариант "nlbaf тоже 0" (видимо, DMA вообще не успел
+    // долететь целиком, не только таблица форматов) — надёжный признак
+    // именно "подвернувшейся" гонки эмуляции, а не настоящего
+    // несовместимого формата, в обоих случаях. Перепосылаем Identify (до
+    // NVME_IDENT_RETRIES раз, с паузой pit_wait_ms() между попытками —
+    // даёт DMA время долететь), прежде чем окончательно отказывать.
+#define NVME_IDENT_RETRIES 8
+    for (int attempt = 0; attempt < NVME_IDENT_RETRIES; attempt++) {
+        memset(ident, 0, PAGE_SIZE);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = 0x06; // Identify
+        cmd.cid = 1;
+        cmd.nsid = g_nsid;
+        cmd.prp1 = ident_phys;
+        cmd.cdw10 = 0x00; // CNS=0 — Identify Namespace
+
+        ident_rc = admin_command(&cmd);
+        if (ident_rc != 0) break;
+
+        flbas = ident[26] & 0x0F;
+        lbaf_off = 128 + (uint32_t)flbas * 4;
+        ms = *(uint16_t *)(ident + lbaf_off);
+        lbads = ident[lbaf_off + 2];
+
+        if (lbads != 0) break; // данные выглядят цельными — либо успех, либо настоящий другой формат
+        pit_wait_ms(10);
+    }
+
+    if (ident_rc != 0) {
         printf("[NVMe] Identify Namespace failed (no namespace 1?)\n");
         return -1;
     }
 
-    uint8_t flbas = ident[26] & 0x0F;
-    uint32_t lbaf_off = 128 + (uint32_t)flbas * 4;
-    uint16_t ms = *(uint16_t *)(ident + lbaf_off);
-    uint8_t lbads = ident[lbaf_off + 2];
     if (ms != 0 || lbads != 9) { // 2^9 = 512
         // Печатаем реально прочитанные значения, а не только "unsupported" —
         // живым тестом разобраны оба возможных источника сбоя этой проверки
