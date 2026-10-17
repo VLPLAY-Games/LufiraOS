@@ -839,7 +839,38 @@ void itoa(int64_t value, char* buffer, int base) {
     utoa((uint64_t)value, buffer, base);
 }
 
+// НАЙДЕННЫЙ БАГ (пользователь, Debug-режим — devmode): строки лога
+// инициализации изредка слипались в одну на экране. Причина — настоящая
+// гонка, не опечатка с '\n': таймерный IRQ (100Гц, timer_irq_handler() в
+// pit.c) безусловно каждый тик зовёт usb_poll() -> xhci_poll_hotplug(),
+// который при обнаружении устройства печатает через DLOG()/printf() —
+// то есть put_char() дёргается и из foreground-кода (обычный printf() в
+// kernel.c при инициализации подсистем), и асинхронно из IRQ-обработчика,
+// без какой-либо синхронизации между ними. current_x/current_y/
+// pending_line_open — обычные глобальные переменные (см. их объявления
+// выше), и если таймерный IRQ срабатывает ПОСЕРЕДИНЕ ещё не завершённого
+// printf() (например между символами "Initializing syscalls..."), два
+// логически разных сообщения перемешиваются посимвольно на одной строке.
+// Тот же класс бага уже чинили для userspace-записи в /dev/console (см.
+// console_write_lock()/console_write_unlock() в vfs.c, тот же приём —
+// сохраняем РЕАЛЬНОЕ состояние EFLAGS.IF, а не безусловный cli/sti, чтобы
+// корректно работать и при вызове уже из отключённых прерываний, например
+// из того же IRQ-обработчика) — здесь то же самое, но для ядерного
+// printf(), который vfs.c не защищает (это два разных пути вызова).
+static inline uint64_t console_printf_lock(void) {
+    uint64_t flags;
+    asm volatile("pushfq; popq %0" : "=r"(flags) :: "memory");
+    asm volatile("cli");
+    return flags;
+}
+
+static inline void console_printf_unlock(uint64_t flags) {
+    asm volatile("push %0; popfq" : : "r"(flags) : "memory", "cc");
+}
+
 void printf(const char* format, ...) {
+    uint64_t irq_flags = console_printf_lock();
+
     va_list args;
     va_start(args, format);
     
@@ -932,6 +963,8 @@ void printf(const char* format, ...) {
         format++;
     }
     va_end(args);
+
+    console_printf_unlock(irq_flags);
 }
 
 // ==================== ФУНКЦИИ ДЛЯ РАБОТЫ С ЦВЕТАМИ ====================
