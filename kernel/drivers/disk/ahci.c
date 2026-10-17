@@ -3,6 +3,7 @@
 #include "system/mm/pmm.h"
 #include "system/mm/paging.h"
 #include "drivers/console/console.h"
+#include "system/timer/pit.h"
 #include "lib/string.h"
 #include "lib/stddef.h"
 
@@ -163,8 +164,20 @@ static int port_stop(void *port) {
     cmd &= ~(PXCMD_ST | PXCMD_FRE);
     reg_write32(port, PX_CMD, cmd);
 
-    for (volatile int i = 0; i < 1000000; i++) {
+    // НАЙДЕННЫЙ БАГ (пользователь: заметно медленная загрузка с AHCI/NVMe,
+    // особенно под TCG) — раньше здесь был голый спин на фиксированное
+    // число итераций MMIO-чтения, тот же антипаттерн, что уже чинили для
+    // hda_init()/xhci_init() (см. разбор у HDA_VERB_TIMEOUT_MS в hda.c):
+    // число итераций, откалиброванное под реальное железо, становится то
+    // ощутимой паузой, то ложным таймаутом под медленной/загруженной
+    // эмуляцией, где каждый MMIO-доступ на порядки дороже. disk_init()
+    // теперь вызывается ПОСЛЕ sti (см. kernel.c) — pit_wait_ms() доступен
+    // и даёт откалиброванное по реальным тикам PIT время, не зависящее от
+    // скорости хоста. 1000 итераций по 1мс = секунда максимум, с огромным
+    // запасом над тем, что реально нужно контроллеру на остановку порта.
+    for (int i = 0; i < 1000; i++) {
         if (!(reg_read32(port, PX_CMD) & (PXCMD_CR | PXCMD_FR))) return 0;
+        pit_wait_ms(1);
     }
     return -1;
 }
@@ -280,12 +293,34 @@ int ahci_init(void) {
 // снимает бит, когда команда отработала) — тот же стиль busy-wait с
 // лимитом итераций, что уже использует disk.c для легаси ATA PIO (ata_wait_*()),
 // просто с другим количеством итераций под DMA, которое обычно быстрее PIO.
-static int ahci_issue_command(uint32_t lba, uint16_t count, int is_write) {
-    for (volatile int i = 0; i < 10000000; i++) {
-        uint32_t tfd = reg_read32(g_port_base, PX_TFD);
-        if (!(tfd & (PXTFD_BSY | PXTFD_DRQ))) break;
-        if (i == 9999999) return -1; // контроллер завис на предыдущей команде
+// НАЙДЕННЫЙ БАГ (пользователь: AHCI заметно медленнее IDE, особенно под
+// TCG) — ahci_issue_command() вызывается на КАЖДОЕ чтение/запись сектора
+// за всю сессию (через ahci_read/write_sectors(), оба под g_ready — то
+// есть уже строго после успешного disk_init()/sti, pit_wait_ms() здесь
+// всегда безопасен), не только при инициализации, так что заменить голый
+// спин на pit_wait_ms(1) целиком нельзя — это добавило бы ~1мс на каждую
+// команду (реальное/эмулированное завершение обычно укладывается в
+// десятки-сотни микросекунд). Гибрид: короткий чистый спин ловит обычное
+// быстрое завершение без добавленной задержки (как раньше), а если
+// контроллер не ответил за это время — переходим на pit_wait_ms(),
+// откалиброванный по реальным тикам PIT и не зависящий от скорости
+// хоста/эмуляции, вместо того чтобы либо ложно таймаутить на загруженном
+// хосте, либо реально подвешивать загрузку на миллионы дорогих MMIO-итераций.
+#define AHCI_WAIT_FAST_SPIN_ITERS 200000
+#define AHCI_WAIT_SLOW_TIMEOUT_MS 2000
+static int ahci_wait_tfd_free(void) {
+    for (volatile int i = 0; i < AHCI_WAIT_FAST_SPIN_ITERS; i++) {
+        if (!(reg_read32(g_port_base, PX_TFD) & (PXTFD_BSY | PXTFD_DRQ))) return 0;
     }
+    for (int i = 0; i < AHCI_WAIT_SLOW_TIMEOUT_MS; i++) {
+        pit_wait_ms(1);
+        if (!(reg_read32(g_port_base, PX_TFD) & (PXTFD_BSY | PXTFD_DRQ))) return 0;
+    }
+    return -1; // контроллер завис на предыдущей команде
+}
+
+static int ahci_issue_command(uint32_t lba, uint16_t count, int is_write) {
+    if (ahci_wait_tfd_free() != 0) return -1;
 
     g_cmd_list[0].flags = (uint16_t)(5 | (is_write ? (1u << 6) : 0)); // CFL=5 (dwords в FIS), W=бит6
     g_cmd_list[0].prdtl = 1;
@@ -314,14 +349,22 @@ static int ahci_issue_command(uint32_t lba, uint16_t count, int is_write) {
     reg_write32(g_port_base, PX_IS, 0xFFFFFFFF);
     reg_write32(g_port_base, PX_CI, 1u);
 
-    for (volatile int i = 0; i < 20000000; i++) {
+    for (volatile int i = 0; i < AHCI_WAIT_FAST_SPIN_ITERS; i++) {
         if (!(reg_read32(g_port_base, PX_CI) & 1u)) {
             if (reg_read32(g_port_base, PX_IS) & PXIS_TFES) return -1;
             if (reg_read32(g_port_base, PX_TFD) & PXTFD_ERR) return -1;
             return 0;
         }
     }
-    return -1; // таймаут — команда не завершилась
+    for (int i = 0; i < AHCI_WAIT_SLOW_TIMEOUT_MS; i++) {
+        pit_wait_ms(1);
+        if (!(reg_read32(g_port_base, PX_CI) & 1u)) {
+            if (reg_read32(g_port_base, PX_IS) & PXIS_TFES) return -1;
+            if (reg_read32(g_port_base, PX_TFD) & PXTFD_ERR) return -1;
+            return 0;
+        }
+    }
+    return -1; // настоящий таймаут — команда не завершилась
 }
 
 int ahci_read_sectors(uint32_t lba, uint8_t sector_count, void *buffer) {

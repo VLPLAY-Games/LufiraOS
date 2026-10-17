@@ -3,6 +3,7 @@
 #include "system/mm/pmm.h"
 #include "system/mm/paging.h"
 #include "drivers/console/console.h"
+#include "system/timer/pit.h"
 #include "lib/string.h"
 #include "lib/stddef.h"
 
@@ -115,8 +116,27 @@ static void submit_cmd(nvme_cmd_t *sq, uint16_t *tail, uint16_t depth, uint32_t 
 // же busy-wait стиль, что ahci_issue_command()'овское ожидание PxCI), затем
 // продвигает head/phase и отдаёт её обратно контроллеру через doorbell.
 // 0 — успешное завершение (status field == 0), -1 — ошибка или таймаут.
+//
+// НАЙДЕННЫЙ БАГ (пользователь: AHCI/NVMe заметно медленнее IDE при загрузке,
+// NVMe иногда вообще не поднимается) — эта функция обслуживает КАЖДУЮ
+// admin- и I/O-команду за всю сессию (admin_command()/io_command() обе
+// через неё — первая уже безопасна для pit_wait_ms(), т.к. nvme_init()
+// теперь вызывается после sti, см. kernel.c; вторая — под nvme_available(),
+// то есть тоже строго после успешного init), не только инициализацию,
+// поэтому просто заменить голый спин на pit_wait_ms(1) нельзя — это
+// добавило бы ~1мс задержки на КАЖДОЕ чтение/запись сектора (реальное/
+// эмулированное завершение обычно укладывается в микросекунды). Вместо
+// этого — гибрид: короткий чистый спин ловит типичное быстрое завершение
+// без единой добавленной миллисекунды (как и раньше), а если контроллер
+// не ответил за это время (что на загруженном TCG-хосте с дорогими MMIO-
+// доступами раньше могло ложно считаться "зависанием" уже через несколько
+// миллионов итераций) — переходим на pit_wait_ms(), откалиброванный по
+// реальным тикам PIT и не зависящий от скорости хоста, с большим запасом
+// по времени на действительно медленный, но живой контроллер.
+#define NVME_WAIT_FAST_SPIN_ITERS 200000
+#define NVME_WAIT_SLOW_TIMEOUT_MS 2000
 static int wait_completion(nvme_cqe_t *cq, uint16_t *head, uint8_t *phase, uint16_t depth, uint32_t cq_db_off_val) {
-    for (volatile int i = 0; i < 20000000; i++) {
+    for (volatile int i = 0; i < NVME_WAIT_FAST_SPIN_ITERS; i++) {
         uint16_t sp = cq[*head].status_phase;
         if ((uint16_t)(sp & 1u) == (uint16_t)*phase) {
             uint16_t status = (uint16_t)(sp >> 1);
@@ -126,7 +146,18 @@ static int wait_completion(nvme_cqe_t *cq, uint16_t *head, uint8_t *phase, uint1
             return status == 0 ? 0 : -1;
         }
     }
-    return -1; // таймаут — контроллер не ответил
+    for (int i = 0; i < NVME_WAIT_SLOW_TIMEOUT_MS; i++) {
+        pit_wait_ms(1);
+        uint16_t sp = cq[*head].status_phase;
+        if ((uint16_t)(sp & 1u) == (uint16_t)*phase) {
+            uint16_t status = (uint16_t)(sp >> 1);
+            *head = (uint16_t)(*head + 1);
+            if (*head == depth) { *head = 0; *phase = (uint8_t)(*phase ^ 1); }
+            reg_write32(g_bar, cq_db_off_val, *head);
+            return status == 0 ? 0 : -1;
+        }
+    }
+    return -1; // настоящий таймаут — контроллер не ответил
 }
 
 static int admin_command(const nvme_cmd_t *cmd) {
@@ -183,9 +214,14 @@ int nvme_init(void) {
     // переписывать admin-очереди, иначе можно гонка с уже идущим DMA.
     if (reg_read32(g_bar, NVME_REG_CSTS) & NVME_CSTS_RDY) {
         reg_write32(g_bar, NVME_REG_CC, 0);
+        // Чистый init-путь (не на каждый I/O, в отличие от wait_completion()
+        // выше) — pit_wait_ms() без гибрида, откалиброван по реальным тикам
+        // PIT вместо голого спина на фиксированное число итераций (см.
+        // разбор у disk_init() в kernel.c).
         int ok = 0;
-        for (volatile int i = 0; i < 2000000; i++) {
+        for (int i = 0; i < 1000; i++) {
             if (!(reg_read32(g_bar, NVME_REG_CSTS) & NVME_CSTS_RDY)) { ok = 1; break; }
+            pit_wait_ms(1);
         }
         if (!ok) { printf("[NVMe] Controller did not disable in time\n"); return -1; }
     }
@@ -233,8 +269,9 @@ int nvme_init(void) {
     reg_write32(g_bar, NVME_REG_CC, cc);
 
     int ready = 0;
-    for (volatile int i = 0; i < 2000000; i++) {
+    for (int i = 0; i < 1000; i++) {
         if (reg_read32(g_bar, NVME_REG_CSTS) & NVME_CSTS_RDY) { ready = 1; break; }
+        pit_wait_ms(1);
     }
     if (!ready) {
         printf("[NVMe] Controller did not become ready\n");
@@ -264,7 +301,17 @@ int nvme_init(void) {
     uint16_t ms = *(uint16_t *)(ident + lbaf_off);
     uint8_t lbads = ident[lbaf_off + 2];
     if (ms != 0 || lbads != 9) { // 2^9 = 512
-        printf("[NVMe] Namespace LBA size unsupported (need 512B, no metadata)\n");
+        // Печатаем реально прочитанные значения, а не только "unsupported" —
+        // живым тестом разобраны оба возможных источника сбоя этой проверки
+        // (см. длинный разбор у disk_init() в kernel.c): (1) неготовый/
+        // слишком медленный под эмуляцией ответ контроллера на Identify —
+        // тот случай возвращается раньше отдельным сообщением выше и сюда
+        // не доходит; (2) namespace реально отдаёт другой LBA-формат —
+        // этот принт теперь показывает, какой именно, вместо того чтобы
+        // заставлять гадать по одному только "need 512B, no metadata".
+        printf("[NVMe] Namespace LBA size unsupported (need 512B, no metadata) — "
+               "flbas=%u nlbaf=%u ms=%u lbads=%u (2^lbads bytes)\n",
+               flbas, ident[25], ms, lbads);
         return -1;
     }
 
