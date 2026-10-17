@@ -484,7 +484,15 @@ do_vesa:
     mov [cs:best_xres], ax
     mov ax, [es:di+0x14]
     mov [cs:best_yres], ax
-    mov al, [es:di+0x1F]                  ; RedFieldPosition
+    ; НАЙДЕННЫЙ БАГ: тут читался байт +0x1F — по спецификации VBE
+    ; ModeInfoBlock это RedMaskSize (у 32bpp direct-color почти всегда 8),
+    ; а не RedFieldPosition — тот лежит на +0x20, байтом дальше. Из-за
+    ; этого сравнение "== 16" в legacy_main.c (BootInfo.PixelFormat)
+    ; почти никогда не срабатывало, и BIOS-загрузка всегда выставляла
+    ; pixel_format=0 независимо от реального порядка байт framebuffer'а —
+    ; отсюда инверсия R/B в консоли/Doom только при BIOS-загрузке (UEFI
+    ; этим не страдает — там формат читается из настоящего GOP).
+    mov al, [es:di+0x20]                  ; RedFieldPosition
     mov [cs:best_redpos], al
 
 .mode_skip:
