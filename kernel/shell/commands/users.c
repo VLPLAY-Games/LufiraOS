@@ -1,9 +1,8 @@
 // Команды пользователей/групп: whoami, chmod, chown, useradd, groupadd, su.
 //
-// su/useradd/chown берут username/password/groupname из СЫРОГО
-// input_buffer (а не из лоуеркейснутого args), как cat/write уже делают
-// для имён файлов — execute_command() лоуеркейсит всю строку целиком
-// (shell.c), а пароли/имена пользователей регистрозависимы.
+// su/useradd/chown берут username/password/groupname из сырого input_buffer,
+// а не из лоуеркейснутого args (как cat/write для имён файлов) — пароли и
+// имена пользователей регистрозависимы.
 #include "../commands.h"
 #include "drivers/console/console.h"
 #include "../shell.h"
@@ -14,10 +13,9 @@
 
 extern lufirafs_t lufirafs;
 
-// Копирует один пробельно-разделённый токен, начиная с p, в dest (ёмкость
-// dest_size), возвращает указатель на остаток строки ПОСЛЕ токена (уже
-// пропустив разделяющие пробелы) — тот же паттерн разбора, что и в
-// command_cp()/command_mv() (filesystem.c), только оформленный как хелпер.
+// Копирует один пробельно-разделённый токен из p в dest (ёмкость dest_size),
+// возвращает остаток строки после токена и пробелов — тот же паттерн
+// разбора, что в command_cp()/command_mv(), оформленный как хелпер.
 static const char *take_token(const char *p, char *dest, int dest_size) {
     p = skip_spaces(p);
     int len = token_length(p);
@@ -160,13 +158,10 @@ void command_chown(const char *args) {
     printf("\nchown: updated %s\n", path);
 }
 
-// Создаёт /home (если его ещё нет — общий родитель для всех домашних
-// каталогов) и /home/<username> внутри него, владелец — сам новый
-// пользователь (perm 0700 — приватный каталог, как в большинстве
-// дистрибутивов по умолчанию). При любой неудаче тихо откатывается на "/"
-// (совместимо со старым поведением — обычным ограниченным на 0755-корне
-// новый пользователь просто ничего не сможет создавать, но хотя бы
-// залогинится, а не останется вовсе без домашнего каталога).
+// Создаёт /home (если его ещё нет) и /home/<username> внутри, владелец —
+// новый пользователь (perm 0700, как обычно в дистрибутивах). При неудаче
+// тихо откатывается на "/" — на 0755-корне новый пользователь ничего не
+// создаст, но хотя бы залогинится.
 static void ensure_home_dir(uint32_t uid, uint32_t gid, const char *username,
                              char *out_home, int out_home_size)
 {
@@ -282,12 +277,11 @@ void command_groupadd(const char *args) {
     printf("\ngroupadd: created group '%s' (gid=%u)\n", groupname, gid);
 }
 
-// passwd <new-password> — меняет пароль ВЫЗЫВАЮЩЕГО, без повторного ввода
-// старого (тот же довод, что уже принят для su: current_process САМ И ЕСТЬ
-// уже аутентифицированная сессия). passwd -u <user> <new-password> — сброс
-// пароля ЛЮБОГО пользователя, только root (root может это и себе — просто
-// не обязан указывать -u). Видимый ввод пароля — то же сознательное
-// упрощение, что и у su (нет мид-командного маскированного ввода в шелле).
+// passwd <new-password> — меняет пароль вызывающего, без повторного ввода
+// старого (current_process уже аутентифицированная сессия, как и у su).
+// passwd -u <user> <new-password> — сброс пароля любого пользователя,
+// только root. Видимый ввод пароля — сознательное упрощение (нет
+// маскированного ввода в шелле).
 void command_passwd(const char *args) {
     if (!args || !*args) {
         printf("\nUsage: passwd <new-password>\n");
@@ -337,11 +331,10 @@ void command_passwd(const char *args) {
     printf("\npasswd: password updated\n");
 }
 
-// su <username> [password] — как cd мутирует cwd_inode напрямую, su мутирует
-// current_process->uid/gid напрямую (никакого отдельного syscall/сессии —
-// шелл САМ И ЕСТЬ current_process). root может su в кого угодно без пароля;
-// иначе пароль обязателен и проверяется против ЦЕЛЕВОГО пользователя.
-// Видимый ввод пароля (не маскируется) — сознательное упрощение, см. план.
+// su <username> [password] — как cd мутирует cwd_inode, su мутирует
+// current_process->uid/gid напрямую (шелл сам и есть current_process).
+// root может su в кого угодно без пароля; иначе пароль обязателен и
+// проверяется против целевого пользователя.
 void command_su(const char *args) {
     if (!args || !*args) {
         printf("\nUsage: su <username> [password]\n");

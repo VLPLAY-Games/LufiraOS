@@ -5,26 +5,20 @@
 /*
  * Драйвер USB 3.0-класса xHCI (eXtensible Host Controller Interface) —
  * PCI-класс 0x0C (Serial Bus Controller), подкласс 0x03 (USB), prog-if 0x30.
- * Заменяет прежний UHCI-драйвер (uhci.c/uhci.h, удалены).
  *
- * Область действия этой версии (см. план): контроллер + boot-протокол HID
- * (клавиатура/мышь), БЕЗ настоящей SuperSpeed-логики (нет U1/U2 link power
- * management, нет BOS-дескрипторов) — устройства энумерируются и работают
- * на той скорости, которую сами сообщают через PORTSC, как и большинство
- * full/high-speed USB2-устройств. USB Mass Storage — отдельная будущая фаза.
+ * Область действия: контроллер + boot-протокол HID (клавиатура/мышь) +
+ * USB Mass Storage, без настоящей SuperSpeed-логики (нет U1/U2 link power
+ * management, нет BOS-дескрипторов) — устройства работают на скорости,
+ * которую сами сообщают через PORTSC.
  *
- * Прерывания контроллера НЕ используются (как и раньше у UHCI) — Event Ring
- * опрашивается из usb_poll(), вызываемого раз в тик PIT (100 Гц) из
- * timer_irq_handler(). См. подробное обоснование в xhci.c.
+ * Прерывания контроллера не используются — Event Ring опрашивается из
+ * usb_poll(), вызываемого раз в тик PIT (100 Гц) из timer_irq_handler().
+ * См. подробности в xhci.c.
  */
 
 // Найденное HID-устройство boot-протокола (клавиатура или мышь).
-// В отличие от uhci_hid_device_t (индексировался по НОМЕРУ ПОРТА root
-// hub'а — у UHCI их было фиксированно 2), xhci_get_hid_device(index)
-// индексирует МАССИВ НАЙДЕННЫХ УСТРОЙСТВ В ПОРЯДКЕ ОБНАРУЖЕНИЯ — у xHCI
-// портов обычно 4+, и с этим API сегодня в дереве никто не работает
-// (uhci_get_hid_device() тоже нигде не вызывался), так что это осознанная,
-// а не случайная смена контракта.
+// xhci_get_hid_device(index) индексирует массив найденных устройств в
+// порядке обнаружения (не по номеру порта root hub'а).
 typedef struct {
     int      valid;
     uint8_t  address;     // USB-адрес, назначенный контроллером (для справки)
@@ -50,19 +44,16 @@ void usb_poll(void);
 const xhci_hid_device_t *xhci_get_hid_device(int index);
 
 // USB Mass Storage (Bulk-Only Transport + SCSI READ10/WRITE10) — только
-// блочное чтение/запись, без монтирования файловой системы (см. план:
-// VFS сегодня не поддерживает второй ФС вообще). block_size — настоящий
-// размер блока устройства (обычно 512), см. xhci_msd_get_info().
+// блочное чтение/запись, без монтирования файловой системы. block_size —
+// настоящий размер блока устройства (обычно 512), см. xhci_msd_get_info().
 int xhci_msd_device_count(void);
 int xhci_msd_get_info(int index, uint32_t *out_max_lba, uint32_t *out_block_size);
 int xhci_msd_read_block(int index, uint32_t lba, void *buf, uint32_t block_size);
 int xhci_msd_write_block(int index, uint32_t lba, const void *buf, uint32_t block_size);
 
 // count блоков (до XHCI_MSD_MAX_BATCH_BLOCKS = 64KB) за одну SCSI-команду/
-// bulk-передачу — на порядок быстрее count отдельных xhci_msd_read_block()/
-// write_block() при больших последовательных операциях (см.
-// kernel/shell/commands/mount.c, которое батчит свои собственные циклы по
-// тому же пределу).
+// bulk-передачу — на порядок быстрее count отдельных read_block()/
+// write_block() при больших последовательных операциях.
 #define XHCI_MSD_MAX_BATCH_BLOCKS 128 // 128 * 512 = 65536
 int xhci_msd_read_blocks(int index, uint32_t lba, uint32_t count, void *buf, uint32_t block_size);
 int xhci_msd_write_blocks(int index, uint32_t lba, uint32_t count, const void *buf, uint32_t block_size);

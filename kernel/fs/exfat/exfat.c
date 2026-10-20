@@ -14,9 +14,9 @@ static inline void wr16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uin
 static inline void wr32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
 static inline void wr64(uint8_t *p, uint64_t v) { wr32(p, (uint32_t)v); wr32(p + 4, (uint32_t)(v >> 32)); }
 
-/* ======== Метаданные (reserved-регион + таблица FAT) — резидентны в
- * fs->image целиком. dirty_map покрывает ТОЛЬКО эту область (image_sectors),
- * не весь диск — см. разбор в exfat.h. ======== */
+/* ======== Метаданные (reserved-регион + FAT) резидентны в fs->image целиком;
+ * dirty_map покрывает только эту область (image_sectors), не весь диск —
+ * см. exfat.h. ======== */
 static void mark_dirty(exfat_fs_t *fs, uint32_t byte_off, uint32_t len) {
     if (!fs->dirty_map || len == 0) return;
     uint64_t meta_bytes = (uint64_t)fs->image_sectors * 512;
@@ -37,9 +37,8 @@ static void set_fat(exfat_fs_t *fs, uint32_t cluster, uint32_t val) {
     mark_dirty(fs, (uint32_t)(fat_entry_ptr(fs, cluster) - fs->image), 4);
 }
 
-/* ======== Доступ к кластерам ДАННЫХ (содержимое файлов) — НАПРЯМУЮ на
- * устройство, без постоянного кеширования. Это и есть "не грузить флешку
- * целиком в ОЗУ", см. разбор в exfat.h. ======== */
+/* ======== Кластеры данных (содержимое файлов) — напрямую на устройство,
+ * без постоянного кеширования: не грузим флешку целиком в ОЗУ (exfat.h). ======== */
 static inline uint64_t cluster_byte_offset(exfat_fs_t *fs, uint32_t cluster) {
     return (uint64_t)fs->cluster_heap_offset_bytes + (uint64_t)(cluster - 2) * fs->cluster_size;
 }
@@ -76,9 +75,8 @@ static void free_cluster(exfat_fs_t *fs, uint32_t cluster) {
     fs->bitmap[i >> 3] &= ~(1 << (i & 7));
 }
 
-// Номер кластера по индексу внутри цепочки (0-based) — для NoFatChain это
-// просто арифметика (кластеры подряд), иначе обычный проход по FAT. 0, если
-// цепочка короче (конец достигнут раньше index).
+// Номер кластера по индексу в цепочке (0-based) — для NoFatChain просто
+// арифметика (кластеры подряд), иначе проход по FAT. 0, если цепочка короче.
 static uint32_t cluster_for_index(exfat_fs_t *fs, uint32_t first_cluster, int no_fat_chain, uint32_t index) {
     if (first_cluster < 2) return 0;
     if (no_fat_chain) return first_cluster + index;
@@ -90,10 +88,9 @@ static uint32_t cluster_for_index(exfat_fs_t *fs, uint32_t first_cluster, int no
     return c;
 }
 
-// То же самое, но выделяет/подключает недостающие кластеры по требованию —
-// ТОЛЬКО для цепочек в режиме FAT-chain (вызывающий обязан был убедиться,
-// что NoFatChain не стоит — см. exfat_write_file()). *first_cluster_io
-// обновляется, если цепочка была пуста (первое выделение).
+// То же, но выделяет недостающие кластеры по требованию — только для
+// FAT-chain цепочек (вызывающий обязан проверить, что NoFatChain не стоит —
+// см. exfat_write_file()). *first_cluster_io обновляется при первом выделении.
 static uint32_t cluster_for_index_alloc(exfat_fs_t *fs, uint32_t *first_cluster_io, uint32_t index) {
     if (*first_cluster_io < 2) {
         uint32_t c = alloc_cluster(fs);
@@ -130,10 +127,9 @@ static uint32_t extend_chain(exfat_fs_t *fs, uint32_t first_cluster) {
     return nc;
 }
 
-/* ======== Реестр кэшей каталогов — см. подробный разбор архитектуры в
- * exfat.h. Ключ — first_cluster; "открытый" handle никогда не хранит сырой
- * указатель, только (ключ, смещение), так что вытеснение слота безопасно —
- * следующий доступ просто перезагрузит его заново. ======== */
+/* ======== Реестр кэшей каталогов (см. exfat.h). Ключ — first_cluster;
+ * handle хранит не сырой указатель, а (ключ, смещение) — вытеснение слота
+ * безопасно, следующий доступ просто перезагрузит его. ======== */
 
 static void dir_cache_flush_slot(exfat_fs_t *fs, exfat_dir_cache_t *c) {
     if (!c->in_use || !c->dirty) return;
@@ -150,9 +146,8 @@ static void dir_cache_evict_slot(exfat_fs_t *fs, exfat_dir_cache_t *c) {
     c->chain_len = 0;
 }
 
-// Освобождает слот БЕЗ сброса на диск — для случая, когда цепочка каталога
-// только что выросла (extend_chain()) и кэш просто устарел, а не "грязный"
-// (мы его не мутировали, значит на диске он уже совпадает с тем, что было).
+// Освобождает слот без сброса на диск — для случая, когда цепочка каталога
+// только что выросла (extend_chain()) и кэш просто устарел, не "грязный".
 static void dir_cache_invalidate(exfat_fs_t *fs, uint32_t first_cluster) {
     (void)fs;
     for (int i = 0; i < EXFAT_DIR_CACHE_SLOTS; i++) {
@@ -168,10 +163,9 @@ static void dir_cache_invalidate(exfat_fs_t *fs, uint32_t first_cluster) {
 }
 
 // Находит (или загружает заново) кэш каталога с заданным first_cluster.
-// dir_size нужен ТОЛЬКО для NoFatChain-случая (там нет явного конца цепочки
-// в FAT — границу задаёт размер каталога, известный из его Stream Extension
-// в РОДИТЕЛЬСКОМ каталоге, см. вызывающих). NULL при нехватке памяти/ошибке
-// чтения, либо если цепочка длиннее EXFAT_DIR_CACHE_MAX_CLUSTERS.
+// dir_size нужен только для NoFatChain (там нет конца цепочки в FAT — границу
+// задаёт размер из Stream Extension в родительском каталоге, см. вызывающих).
+// NULL при нехватке памяти/ошибке чтения или цепочке длиннее лимита.
 static exfat_dir_cache_t *dir_cache_get(exfat_fs_t *fs, uint32_t first_cluster, int no_fat_chain, uint64_t dir_size) {
     if (first_cluster < 2) return NULL;
 
@@ -233,9 +227,8 @@ static exfat_dir_cache_t *dir_cache_get(exfat_fs_t *fs, uint32_t first_cluster, 
     return c;
 }
 
-// Указатель на данные конкретного кластера ВНУТРИ уже загруженного кэша —
-// линейный поиск по chain[] (короткий, EXFAT_DIR_CACHE_MAX_CLUSTERS с
-// запасом мал).
+// Указатель на данные кластера внутри уже загруженного кэша — линейный
+// поиск по chain[] (короткий, EXFAT_DIR_CACHE_MAX_CLUSTERS мал).
 static uint8_t *dir_cache_cluster_ptr(exfat_dir_cache_t *c, uint32_t cluster_size, uint32_t cluster) {
     for (uint32_t i = 0; i < c->chain_len; i++)
         if (c->chain[i] == cluster) return c->image + (uint64_t)i * cluster_size;
@@ -253,11 +246,9 @@ static void get_meta(exfat_fs_t *fs, exfat_handle_t h, uint32_t *first_cluster, 
     uint32_t dir_cluster = (uint32_t)(h >> 32);
     uint32_t se_off = (uint32_t)h;
 
-    // См. разбор границы в exfat.h: каталог-держатель этой записи почти
-    // всегда ещё/уже в кэше (только что был тронут walk_dir()/find_cb()) —
-    // dir_size=0 здесь корректен для обычного FAT-chain случая (подавляющее
-    // большинство) и неточен только для НЕ-созданных-этим-драйвером
-    // NoFatChain-каталогов, случайно вытесненных из кэша между вызовами.
+    // dir_size=0 корректен для обычного FAT-chain случая (подавляющее
+    // большинство) и неточен только для чужих NoFatChain-каталогов,
+    // случайно вытесненных из кэша между вызовами (см. exfat.h).
     exfat_dir_cache_t *c = dir_cache_get(fs, dir_cluster, 0, 0);
     if (!c) { *first_cluster = 0; *size = 0; *no_fat_chain = 0; *is_dir = 0; return; }
 
@@ -284,11 +275,10 @@ static void recompute_checksum(uint8_t *fe) {
 
 typedef int (*dir_visit_cb_t)(void *ctx, exfat_handle_t h, const char *name, int name_len, int is_dir);
 
-// Обходит набор (File 0x85 + Stream 0xC0 + Name 0xC1 ×N) по уже загруженному
-// кэшу каталога (dir_cache_get()); cb вызывается один раз на КАЖДЫЙ набор
-// InUse (0x85 с битом 0x80) — EntryType==0x00 означает конец каталога
-// (гарантия спеки: неиспользуемый хвост всегда занулён), набор со снятым
-// 0x80 (удалённый) — просто пропускается, не вызывая cb.
+// Обходит набор (File 0x85 + Stream 0xC0 + Name 0xC1 ×N) по кэшу каталога;
+// cb вызывается на каждый InUse-набор (0x85 с битом 0x80). EntryType==0x00 —
+// конец каталога (хвост всегда занулён по спеке); удалённый набор (снят 0x80)
+// пропускается без вызова cb.
 static int walk_dir(exfat_fs_t *fs, uint32_t first_cluster, int no_fat_chain, uint64_t dir_size, dir_visit_cb_t cb, void *ctx) {
     exfat_dir_cache_t *c = dir_cache_get(fs, first_cluster, no_fat_chain, dir_size);
     if (!c) return 0;
@@ -391,14 +381,11 @@ void exfat_deinit(exfat_fs_t *fs) {
     }
 }
 
-// v0.9, фаза 2 — РЕДИЗАЙН: раньше exfat_init() требовал образ ФС целиком в
-// ОЗУ одним kmalloc()'ом (image, image_size) — отсюда жёсткий потолок у
-// вызывающих ("устройство не больше 8MB", половина кучи ядра). Теперь
-// exfat_init() сам читает устройство через fs->dev блоками: в ОЗУ остаются
-// только метаданные (boot-регион + таблица FAT, EXFAT_META_MAX_BYTES) и
-// резидентный кэш Allocation Bitmap (EXFAT_BITMAP_MAX_BYTES) — см. их
-// разбор в exfat.h. Содержимое файлов и обычные каталоги (кроме как через
-// ограниченный LRU-реестр dir_cache) никогда не копируются в ОЗУ целиком.
+// exfat_init() читает устройство через fs->dev блоками, не грузит образ ФС
+// целиком в RAM: в ОЗУ остаются только метаданные (boot-регион + FAT,
+// EXFAT_META_MAX_BYTES) и резидентный кэш Allocation Bitmap
+// (EXFAT_BITMAP_MAX_BYTES, см. exfat.h). Содержимое файлов и обычные
+// каталоги копируются в ОЗУ только через ограниченный LRU dir_cache.
 int exfat_init(exfat_fs_t *fs, const exfat_blockdev_t *dev, uint32_t total_sectors) {
     if (!fs || !dev || !dev->read_blocks || !dev->write_blocks) return -1;
     if (total_sectors == 0) return -1;
@@ -414,9 +401,8 @@ int exfat_init(exfat_fs_t *fs, const exfat_blockdev_t *dev, uint32_t total_secto
 
     uint8_t bps_shift = boot[108];
     uint8_t spc_shift = boot[109];
-    // bps_shift < 9 означало бы сектор меньше 512 байт — спека exFAT и
-    // реальные устройства такого не допускают, а наша блочная абстракция
-    // (512-байтные LBA, см. exfat.h) этого не переживёт.
+    // bps_shift < 9 означало бы сектор меньше 512 байт — спека это не
+    // допускает, а наша блочная абстракция (512-байтные LBA) не переживёт.
     if (bps_shift < 9 || bps_shift > 16 || spc_shift > 16) return -1;
     fs->bytes_per_sector = 1u << bps_shift;
     fs->sectors_per_cluster = 1u << spc_shift;
@@ -432,10 +418,9 @@ int exfat_init(exfat_fs_t *fs, const exfat_blockdev_t *dev, uint32_t total_secto
 
     uint64_t total_bytes = (uint64_t)total_sectors * 512;
     if ((uint64_t)fs->cluster_heap_offset_bytes + (uint64_t)fs->cluster_count * fs->cluster_size > total_bytes) return -2;
-    // Таблица FAT обязана целиком лежать ДО кучи кластеров — иначе
-    // fat_entry_ptr() читал/писал бы за пределами fs->image (который теперь
-    // выделен РОВНО под cluster_heap_offset_bytes, не под весь диск, как
-    // раньше) — см. разбор в exfat.h про то, что это и есть смысл редизайна.
+    // Таблица FAT обязана целиком лежать до кучи кластеров — иначе
+    // fat_entry_ptr() читал/писал бы за пределами fs->image (выделен ровно
+    // под cluster_heap_offset_bytes, не под весь диск, см. exfat.h).
     if ((uint64_t)fs->fat_offset_bytes + (uint64_t)fs->fat_length_bytes > fs->cluster_heap_offset_bytes) return -2;
     if (fs->cluster_heap_offset_bytes % 512 != 0) return -2; // не укладывается в 512-байтные LBA устройства
 
@@ -460,9 +445,8 @@ int exfat_init(exfat_fs_t *fs, const exfat_blockdev_t *dev, uint32_t total_secto
     if (!fs->scratch_cluster) { exfat_deinit(fs); return -4; }
 
     // Ищем Allocation Bitmap (0x81) среди записей корня — единственный
-    // источник истины о занятости кластеров (см. разбор в exfat.h). Корень
-    // у exFAT всегда обычная FAT-цепочка (no_fat_chain=0), размер роли не
-    // играет в этой ветке dir_cache_get().
+    // источник истины о занятости кластеров (см. exfat.h). Корень у exFAT
+    // всегда обычная FAT-цепочка (no_fat_chain=0), размер здесь не важен.
     exfat_dir_cache_t *rc = dir_cache_get(fs, fs->root_cluster, 0, 0);
     if (!rc) { exfat_deinit(fs); return -5; }
 
@@ -514,12 +498,10 @@ int exfat_init(exfat_fs_t *fs, const exfat_blockdev_t *dev, uint32_t total_secto
 }
 
 /* ======== Синхронизация с устройством ========
- * Метаданные (fs->image) — отложенная dirty-bitmap синхронизация, только по
+ * Метаданные (fs->image) — отложенная dirty-bitmap синхронизация по
  * image_sectors. Allocation Bitmap — целиком и безусловно (маленький, см.
- * EXFAT_BITMAP_MAX_BYTES). Кэш каталогов — мутаторы (exfat_create()/
- * exfat_unlink()/exfat_truncate()/exfat_write_file()) уже сбрасывают
- * затронутый слот сразу сами (REAL-TIME запись, см. exfat.h) — цикл ниже
- * просто подстраховка на случай, если что-то осталось "грязным". */
+ * EXFAT_BITMAP_MAX_BYTES). Кэш каталогов мутаторы уже сбрасывают сами
+ * сразу (real-time запись, exfat.h) — цикл ниже лишь подстраховка. */
 void exfat_sync(exfat_fs_t *fs) {
     if (!fs) return;
 
@@ -689,10 +671,9 @@ int exfat_write_file(exfat_fs_t *fs, exfat_handle_t h, uint64_t offset, const vo
     const uint8_t *in = (const uint8_t *)buf;
     uint32_t done = 0;
 
-    // cluster_for_index_alloc()/read_cluster_raw()/write_cluster_raw() ниже
-    // трогают только таблицу FAT (резидентная, отдельно от dir_cache) и
-    // устройство напрямую — ни разу не вызывают dir_cache_get(), так что
-    // c/se гарантированно остаются валидными всю дальнейшую функцию.
+    // Функции ниже трогают только FAT (резидентна, отдельно от dir_cache) и
+    // устройство напрямую, не вызывают dir_cache_get() — c/se остаются
+    // валидны всю дальнейшую функцию.
     while (done < count) {
         uint64_t file_off = offset + done;
         uint32_t idx = (uint32_t)(file_off / fs->cluster_size);
@@ -873,10 +854,8 @@ int exfat_unlink(exfat_fs_t *fs, exfat_handle_t parent, const char *name) {
 
     if (is_dir && first_cluster >= 2) {
         any_ctx_t actx = { 0 };
-        // Обходит ДРУГОЙ каталог (удаляемый, не родителя) — может вытеснить
-        // слот родителя из кэша, если все EXFAT_DIR_CACHE_SLOTS заняты
-        // чем-то ещё более свежим; перечитываем pc/se/fe ниже заново на
-        // случай именно этого.
+        // Обходит другой (удаляемый) каталог — может вытеснить слот родителя
+        // из кэша, если все слоты заняты; перечитываем pc/se/fe ниже на этот случай.
         walk_dir(fs, first_cluster, no_fat_chain, target_size, any_cb, &actx);
         if (actx.found) return -1; // не пусто
     }

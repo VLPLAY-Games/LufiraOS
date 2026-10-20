@@ -13,9 +13,8 @@ int hex_to_int(const char* hex);
 // команд шелла (см. commands.h), в т.ч. будущих пакетных (v0.7).
 int is_help_flag(const char* args);
 
-// Базовые функции работы с памятью/строками (freestanding-ядро без libc:
-// это единственные их реализации во всём kernel/, всё остальное должно
-// подключать этот заголовок вместо своих локальных копий memset/memcpy/...).
+// Базовые функции памяти/строк (freestanding-ядро без libc) — единственные
+// их реализации в kernel/, остальной код должен подключать этот заголовок.
 void* memset(void* s, int c, size_t n);
 void* memcpy(void* dest, const void* src, size_t n);
 void* memmove(void* dest, const void* src, size_t n);

@@ -124,8 +124,7 @@ inode_t* vfs_lookup_at(uint32_t base_inode, const char *path);
 
 // Заполняет table стандартными stdin/stdout/stderr (консоль). Используется
 // для инициализации fd-таблицы КАЖДОГО процесса (см. process_create()),
-// а не только самого первого — раньше в системе была только ОДНА реальная
-// fd-таблица на всех.
+// не только самого первого.
 void vfs_init_fd_table(fd_table_t *table);
 
 // Анонимный pipe: fds[0] = конец на чтение, fds[1] = конец на запись

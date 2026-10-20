@@ -22,9 +22,10 @@ This document describes the system call interface of LufiraOS. System calls prov
    - [Privileged System Control (31–40)](#privileged-system-control-3140)
    - [USB Mass Storage (41–44)](#usb-mass-storage-4144)
    - [Polling, Signals, Alarms (45–49)](#polling-signals-alarms-4549)
-   - [GUI / Window Manager (50–62)](#gui--window-manager-5062)
+   - [GUI / Window Manager (50–62, 71)](#gui--window-manager-5062-71)
    - [Generic IPC (57–59)](#generic-ipc-5759)
    - [Miscellaneous (65–66)](#miscellaneous-6566)
+   - [Hardware / Sound / Network (67–76)](#hardware--sound--network-6776)
 6. [Calling Convention](#calling-convention)
 7. [Error Handling](#error-handling)
 8. [Dependencies](#dependencies)
@@ -34,18 +35,19 @@ This document describes the system call interface of LufiraOS. System calls prov
 
 ## Overview
 
-System calls provide the interface between user-mode programs and the kernel. As of v0.8.0 there are **65 implemented syscalls** (numbers 0–62, 65–66; 63 and 64 are explicitly retired and unused — see [System Call Table](#system-call-table)), up from 27 at v0.6.0. They let user programs:
+System calls provide the interface between user-mode programs and the kernel. As of v0.9.0 there are **75 implemented syscalls** (numbers 0–76; 63 and 64 are explicitly retired and unused — see [System Call Table](#system-call-table)), up from 65 at v0.8.0 and 27 at v0.6.0. They let user programs:
 
 - Perform file and directory operations (open, close, read, write, seek, pipe, mkdir, rmdir, unlink, readdir, dup2).
 - Manage memory (`mmap`/`munmap`, anonymous only).
 - Manage processes (fork, exec with real `argv`/`envp`, wait, kill/signals, sleep, foreground tracking for Ctrl+C).
 - Query and change identity/permissions (getuid, getgid, chmod, chown, su, useradd, groupadd, passwd) and the working directory (getcwd, chdir).
 - Query system information (PID, timer ticks, memory/CPU/process stats).
-- Drive privileged system control (mount/unmount, reboot, shutdown, developer mode).
+- Drive privileged system control (mount/unmount — now auto-detecting FAT/ext2/exFAT, reboot, shutdown, developer mode).
 - Talk to USB Mass Storage devices directly (count/info/read/write).
-- Build and drive a GUI: create/manipulate windows, poll input events, register as the window manager, and present framebuffer contents (syscalls 50–62).
+- Build and drive a GUI: create/manipulate windows, poll input events, register (and, since v0.9.0, unregister) as the window manager, and present framebuffer contents (syscalls 50–62, 71).
 - Exchange small messages between arbitrary (not just related) processes via a generic per-process mailbox (`SYS_IPC_SEND`/`SYS_IPC_RECV`).
-- Fetch a URL over the network in one blocking call, including DNS, TCP/TLS, and HTTP response parsing (`SYS_NET_FETCH`).
+- Fetch a URL over the network in one blocking call, including DNS, TCP/TLS, and HTTP response parsing (`SYS_NET_FETCH`), send a single ICMP echo (`SYS_PING`), and read/write the network interface's static configuration (`SYS_NET_CONFIG_GET`/`SYS_NET_CONFIG_SET`).
+- Read the CMOS real-time clock (`SYS_RTC_GETTIME`), query/drive the sound driver (`SYS_SOUND_INFO`/`SYS_SOUND_SET_VOLUME`/`SYS_SOUND_PLAY_PCM`/`SYS_SOUND_STOP`), and read back the live kernel's own version/build info (`SYS_OS_VERSION`) — all v0.9.0 additions.
 - Control system behaviour (yield CPU, exit).
 
 **Design Philosophy:**
@@ -177,8 +179,20 @@ The system call table is an array of function pointers indexed by system call nu
 | 64 | *(retired)* | `SYS_CONSOLE_REDRAW` — removed in v0.8 stage 4; number intentionally left unused, not reassigned. |
 | 65 | `SYS_DUP2` | Duplicate a file descriptor onto a specific slot |
 | 66 | `SYS_NET_FETCH` | Fetch a URL (http/https) in one blocking call |
+| 67 | `SYS_RTC_GETTIME` | Read the CMOS real-time clock |
+| 68 | `SYS_SOUND_INFO` | Query sound availability, volume, and driver name |
+| 69 | `SYS_SOUND_SET_VOLUME` | Set the sound output volume (0–100) |
+| 70 | `SYS_SOUND_PLAY_PCM` | Play one blocking slice of interleaved stereo PCM |
+| 71 | `SYS_WM_UNREGISTER` | Give up the caller's registration as window manager |
+| 72 | `SYS_SOUND_STOP` | Immediately stop the active sound channel |
+| 73 | `SYS_PING` | Send one ICMP Echo Request and wait (up to a timeout) for the reply |
+| 74 | `SYS_OS_VERSION` | Query the running kernel's version and build date/time |
+| 75 | `SYS_NET_CONFIG_GET` | Read the network interface's current IP/netmask/gateway/MAC/link state |
+| 76 | `SYS_NET_CONFIG_SET` | Set the network interface's static IP/netmask/gateway |
 
-All 65 are implemented — there are no remaining stubs. 63 and 64 are not stubs either; they are permanently retired (see their description under [Miscellaneous](#miscellaneous-6566)).
+All 75 are implemented — there are no remaining stubs. 63 and 64 are not stubs either; they are permanently retired (see their description under [Miscellaneous](#miscellaneous-6566)).
+
+**On the syscall count itself:** `syscall_init()` (`kernel/system/syscall/syscall.c`) still prints a single hand-maintained number via `DLOG("[SYSCALL] %d system calls registered\n", ...)` rather than deriving it from `syscall.h` — there is no `SYS_COUNT`/`NUM_SYSCALLS` constant, just a comment next to the registration code noting that it has to be bumped by hand whenever a syscall is added. This is exactly the class of bug the v0.9.0 changelog's "Debug mode printed a stale syscall count" fix addressed (it had drifted to `27`, then `45`, while `65+` were actually registered) — and, true to the "no single source of truth" diagnosis in that same fix, the number has since drifted again: as of this writing the source prints `67`, while the table above shows the real total is **75** (numbers 0–76, minus retired 63/64). Treat the table in this document, not the boot-log line, as authoritative.
 
 ---
 
@@ -375,9 +389,9 @@ These exist specifically to let functionality that used to be kernel-native shel
 
 **SYS_MOUNT (33) / SYS_UNMOUNT (34)**
 - **Signature:** `long sys_mount(const char *prefix, long usb_index)` / `long sys_unmount(const char *prefix)`
-- **Description:** Mounts the given USB Mass Storage device's FAT filesystem under a VFS path prefix (e.g. `/mnt/usb0`) — ordinary `open`/`read`/`write`/`mkdir`/`unlink`/`readdir` start seeing that device's root directory directly under the prefix, with no separate mount-specific read/write syscalls (see [`08_filesystem.md`](08_filesystem.md#fat-and-usb-mass-storage-mounting)). Writes sync back to the USB device in real time, after every write — not just on unmount. Only the mount's root level is supported (no FAT subdirectory traversal within the mounted device).
-- **Returns:** `SYS_MOUNT`: `>=0` (mount slot) on success; negative error codes for bad prefix (`-1`), prefix already mounted (`-2`), no free mount slots — max 2 (`-3`), no such USB device (`-4`), unsupported block size (`-5`), device too large (`-6`), out of memory (`-7`), read failure (`-8`), not FAT (`-9`). `SYS_UNMOUNT`: `0` on success, `-1` if no such mount.
-- **Implementation:** `vfs_fat_mount()`/`vfs_fat_unmount()` (`fs/fat/fat_mount.c`).
+- **Description:** Mounts the given USB Mass Storage device's filesystem under a VFS path prefix (e.g. `/mnt/usb0`) — ordinary `open`/`read`/`write`/`mkdir`/`unlink`/`readdir` start seeing that device's root directory directly under the prefix, with no separate mount-specific read/write syscalls (see [`08_filesystem.md`](08_filesystem.md#fat-and-usb-mass-storage-mounting)). **As of v0.9.0, the format is auto-detected rather than assumed to be FAT:** `sys_mount()` tries `vfs_fat_mount()`, then `vfs_ext2_mount()`, then `vfs_exfat_mount()`, in that fixed order — each driver rejects an image that isn't its own format (bad magic/signature), so exactly one is expected to succeed; `sys_unmount()` probes the same three drivers in the same order to find whichever one actually holds the prefix (see [Additional Filesystem Drivers](08_filesystem.md#additional-filesystem-drivers-ext2ext4-exfat-ramfs)). Writes sync back to the USB device in real time, after every write — not just on unmount, for all three formats. FAT mounts remain root-level only (no FAT subdirectory traversal); ext2 and exFAT mounts support full nested-directory traversal, since both drivers work from a real inode/directory-entry tree rather than FAT's flat root.
+- **Returns:** `SYS_MOUNT`: `>=0` (mount slot) on success; negative error codes for bad prefix (`-1`), prefix already mounted (`-2`), no free mount slots — max 2 per filesystem (`-3`), no such USB device (`-4`), unsupported block size (`-5`), device too large (`-6`), out of memory (`-7`), read failure (`-8`), unrecognized format — none of FAT/ext2/exFAT matched (`-9`). `SYS_UNMOUNT`: `0` on success, `-1` if no such mount.
+- **Implementation:** `vfs_fat_mount()`/`vfs_fat_unmount()` (`fs/fat/fat_mount.c`), `vfs_ext2_mount()`/`vfs_ext2_unmount()` (`fs/ext2/ext2_mount.c`), `vfs_exfat_mount()`/`vfs_exfat_unmount()` (`fs/exfat/exfat_mount.c`), tried in that order.
 
 **SYS_REBOOT (35) / SYS_SHUTDOWN (36)**
 - **Signature:** `long sys_reboot(void)` / `long sys_shutdown(void)`
@@ -455,7 +469,7 @@ Added in the "v0.8 bridge" stage specifically so the window manager (and any ord
 
 ---
 
-### GUI / Window Manager (50–62)
+### GUI / Window Manager (50–62, 71)
 
 Full architectural detail — the mailbox IPC primitive underneath, the client/WM RPC protocol, and a pointer to the actual window-manager implementation — is in [`18_gui_wm.md`](18_gui_wm.md). This section only documents each syscall's own contract. As of v0.8, the window manager is an ordinary userspace process (`lufira-packages/apps/wm.c`), not kernel code — every `SYS_WIN_*` call here is a thin RPC wrapper: pack a request, `mailbox_send()` it to the registered WM's PID, block for the reply. The syscall *signatures* are unchanged from the WM's original (now-removed) kernel-resident implementation, so no client code (`libc`'s `gui_widgets.c`, any GUI app) had to change across that move.
 
@@ -488,6 +502,11 @@ Full architectural detail — the mailbox IPC primitive underneath, the client/W
 - **Signature:** `long sys_wm_register(void)`
 - **Description:** Makes the caller the system's **one** window server. Every subsequent `SYS_WIN_*` call and all raw keyboard/mouse input get routed to this PID's mailbox from then on, and only this PID gets access to `SYS_FB_PRESENT`.
 - **Returns:** `0` on success, `-1` if someone else is already registered.
+
+**SYS_WM_UNREGISTER (71)**
+- **Signature:** `long sys_wm_unregister(void)`
+- **Description:** Added in v0.9.0: the explicit counterpart to `SYS_WM_REGISTER`, letting the current WM voluntarily give up its registration. Needed so the WM (`lufira-packages/apps/wm.c`) can hand full-screen ownership of the screen/input to a child process — specifically the `doomgeneric` port — through an honest `fork()`+`wait()`, instead of the previous trick of having the WM `exec()` itself into the game (which permanently lost the original WM process: exiting the game dropped back to a bare text console rather than back into the WM). Only the current registered WM may call this successfully — `process_wm_unregister()` checks the caller's PID against the stored registration.
+- **Returns:** `0` on success, `-1` if the caller isn't the currently registered WM (nothing changes).
 
 **SYS_FB_INFO (60)**
 - **Signature:** `long sys_fb_info(struct lufira_fb_info *out)`
@@ -545,6 +564,52 @@ These existed only in the GUI subsystem's first (kernel-resident) cut, when the 
 
 ---
 
+### Hardware / Sound / Network (67–76)
+
+All ten added in v0.9.0, following the same pattern as the rest of the post-v0.6.0 syscall surface: each exists so a userspace package that has no business touching a driver directly (`date`, the "Settings" app, `ifconfig`, `ping`, `doomgeneric`) gets a narrow, checked entry point instead. `SYS_WM_UNREGISTER` (71) is also part of this numeric range but is documented under [GUI / Window Manager](#gui--window-manager-5062-71) above, since it's conceptually a WM call, not a hardware one.
+
+**SYS_RTC_GETTIME (67)**
+- **Signature:** `long sys_rtc_gettime(void *buf_ptr)`
+- **Description:** Thin wrapper over `rtc_get_time()` (`kernel/system/timer/rtc.c`, CMOS RTC) — `buf_ptr` receives a `lufira_rtc_time_t`, byte-for-byte the same layout as the kernel's own `rtc_time_t`. Needed by the userspace `date` package, which has no way to poke I/O ports 0x70/0x71 itself.
+- **Returns:** `0` on success, `-EIO` if two consecutive RTC register reads never agreed (see `rtc.c` on `UPDATE_IN_PROGRESS`).
+
+**SYS_SOUND_INFO (68)**
+- **Signature:** `long sys_sound_info(void *buf_ptr)`
+- **Description:** Wrapper over `sound_is_available()`/`sound_get_volume()`/`sound_driver_name()` (`drivers/sound/sound.h`) — `buf_ptr` receives a `lufira_sound_info_t`. Needed by the userspace "Settings" app (`lufira-packages/apps/settings.c`), which, unlike the kernel-native `command_mixer()` (now dead code), has no direct driver access.
+- **Returns:** Always `0` — "no sound hardware present" is a valid answer (`available=0`, `driver="none"`), not an error condition.
+
+**SYS_SOUND_SET_VOLUME (69)**
+- **Signature:** `long sys_sound_set_volume(unsigned long volume)`
+- **Description:** Sets output volume. `volume` above 100 is silently clamped to 100 — the same behaviour `sound_set_volume()` already has internally.
+- **Returns:** `0` on success, `-1` if no sound driver (HDA/AC'97) is active (see `sound_is_available()`).
+
+**SYS_SOUND_PLAY_PCM (70)**
+- **Signature:** `long sys_sound_play_pcm(const void *buf_ptr, unsigned long frames)`
+- **Description:** Wraps `sound_play_pcm_stereo()` (`drivers/sound/sound.h`). `buf_ptr` points to `frames` interleaved L/R `int16_t` stereo frames (`frames * 4` bytes) — one blocking DMA pass, the same blocking contract as `sound_play_tone()`/`ac97_play_tone()`/`hda_play_tone()`. Its only consumer is the `doomgeneric` port (`lufira-packages/games/doom/platform/`), which sends one already-mixed slice per game frame (~`snd_maxslicetime_ms`, 28 ms); the blocking time roughly matches the game's own frame interval, so it doesn't visibly desynchronize anything — the same tradeoff `SYS_NET_FETCH` already accepts, since this kernel has no threads to hand the blocking work off to.
+- **Returns:** `0` on success, `-1` if no sound driver is active.
+
+**SYS_SOUND_STOP (72)**
+- **Signature:** `long sys_sound_stop(void)`
+- **Description:** Wrapper over `sound_stop()` — immediately halts the active channel, including AC'97's ring buffer (`ac97_stream_write()`), which would otherwise keep looping its last-played pages forever. `doomgeneric` calls this from `I_ShutdownSound()` on exit.
+- **Returns:** Always `0` — "no sound" is not an error here either, matching `SYS_SOUND_INFO`.
+
+**SYS_PING (73)**
+- **Signature:** `long sys_ping(unsigned long dst_ip, unsigned long id, unsigned long seq, unsigned long timeout_ms)`
+- **Description:** Sends one ICMP Echo Request and blocks (up to `timeout_ms`) for the matching Echo Reply — `icmp_ping_send()`+`icmp_ping_wait()` (`kernel/net/icmp.c`), called once per syscall rather than looped; the per-packet loop and `"icmp_seq=N: time=Xms"` printing are the caller's job (`lufira-packages/user/ping.c`), the same division of labor the now-dead kernel-native `command_ping()` used internally.
+- **Returns:** RTT in milliseconds (`>=0`) on success; `-1` timeout; `-2` no network device; `-3` send failure (including an ARP timeout on the route); `-4` the network is busy with another `SYS_NET_FETCH`/`SYS_PING` for more than 5 seconds (`net_lock_acquire()` — the same single-connection restriction `SYS_NET_FETCH` has).
+
+**SYS_OS_VERSION (74)**
+- **Signature:** `long sys_os_version(void *buf_ptr)`
+- **Description:** `buf_ptr` receives a `lufira_os_version_t`. Version comes from `kernel/version.h` (the sole source of truth); build date/time are the kernel's own `__DATE__`/`__TIME__`, captured at the point `syscall.c` was compiled. Backs `lufira-packages/apps/settings.c`'s "About" tab, and is meant generally for any code that needs the version of the actual *running* kernel, as opposed to whatever version a package/builder assumed at build time (see `LPG_KERNEL_VERSION_MAJOR` compatibility checks in `dlpg.c`/`lpg_pack.c`).
+- **Returns:** Always `0` — the struct is static, nothing can fail except a bad pointer.
+
+**SYS_NET_CONFIG_GET (75) / SYS_NET_CONFIG_SET (76)**
+- **Signature:** `long sys_net_config_get(void *buf_ptr)` / `long sys_net_config_set(unsigned long ip, unsigned long netmask, unsigned long gateway)`
+- **Description:** `SYS_NET_CONFIG_GET` wraps `net_get_config()`/`rtl8139_found()`/`rtl8139_get_mac()`, filling a `lufira_net_config_t`; `SYS_NET_CONFIG_SET` wraps `net_set_config()`, leaving `dns_server` untouched (the same convention the now-dead kernel-native `command_ifconfig()` used — it also always passed the existing `net_get_config()->dns_server` through unchanged as its third argument). Both back the userspace `ifconfig` package, which has no direct driver access (unlike the old kernel-native `command_ifconfig()`, `kernel/shell/commands/net.c`, now dead code).
+- **Returns:** Always `0` for both — "no NIC present" (`link_up=0`) is a valid `SYS_NET_CONFIG_GET` answer, not an error, the same style as `SYS_SOUND_INFO`.
+
+---
+
 ## Calling Convention
 
 User-mode programs must follow the x86-64 ABI for system calls:
@@ -594,18 +659,23 @@ Not every syscall failure carries one of these — some VFS-level failures (bad 
 | System Calls | VFS / LufiraFS | File, directory, and permission operations. |
 | System Calls | PIT | Timer-related operations, and the tick-granularity poll loops behind `SYS_POLL`/`SYS_IPC_RECV`. |
 | System Calls | `users.c` | `SYS_SU`/`SYS_USERADD`/`SYS_GROUPADD`/`SYS_PASSWD`. |
-| System Calls | `fs/fat/fat_mount.c` | `SYS_MOUNT`/`SYS_UNMOUNT`. |
+| System Calls | `fs/fat/fat_mount.c`, `fs/ext2/ext2_mount.c`, `fs/exfat/exfat_mount.c` | `SYS_MOUNT`/`SYS_UNMOUNT` (auto-detected format, see above). |
 | System Calls | `drivers/usb/xhci.c` | `SYS_USB_*`. |
-| System Calls | `system/ipc/mailbox.c` | `SYS_IPC_SEND`/`RECV` directly, and every `SYS_WIN_*`/`SYS_WM_REGISTER`/`SYS_FB_*` RPC indirectly (see [`18_gui_wm.md`](18_gui_wm.md)). |
+| System Calls | `system/ipc/mailbox.c` | `SYS_IPC_SEND`/`RECV` directly, and every `SYS_WIN_*`/`SYS_WM_REGISTER`/`SYS_WM_UNREGISTER`/`SYS_FB_*` RPC indirectly (see [`18_gui_wm.md`](18_gui_wm.md)). |
 | System Calls | `drivers/console/console.c` | `SYS_FB_*`'s framebuffer geometry/font/present path. |
 | System Calls | `kernel/net/http_client.c` | `SYS_NET_FETCH`. |
+| System Calls | `kernel/net/icmp.c` | `SYS_PING`. |
+| System Calls | `kernel/net/net.c` (config)/`drivers/net/rtl8139.c` | `SYS_NET_CONFIG_GET`/`SYS_NET_CONFIG_SET`. |
+| System Calls | `kernel/system/timer/rtc.c` | `SYS_RTC_GETTIME`. |
+| System Calls | `drivers/sound/sound.c` | `SYS_SOUND_INFO`/`SYS_SOUND_SET_VOLUME`/`SYS_SOUND_PLAY_PCM`/`SYS_SOUND_STOP`. |
+| System Calls | `kernel/version.h` | `SYS_OS_VERSION`. |
 | System Calls | Console | (For debugging only). |
 
 ---
 
 ## Conclusion
 
-All 65 defined system calls are implemented, with user-pointer validation and errno-style error codes covering process control (`fork`/`exec` with real `argv`/`envp`/`wait`/signals/pipes), anonymous memory mapping, file and directory I/O, identity/permission management, privileged system control, USB Mass Storage access, GUI/window-manager RPC, generic inter-process messaging, and a one-call network fetch over DNS/TCP/TLS/HTTP. Most of the growth since v0.6.0's 27 syscalls exists for one reason: moving functionality (the shell, `su`/`mount`/`reboot`, the window manager) out of the kernel binary and into ordinary userspace processes needed a controlled interface to replace the direct kernel-internal function calls those features used to make. The use of the `syscall` instruction ensures fast transitions, and the calling convention follows the x86-64 ABI for compatibility.
+All 75 defined system calls (numbers 0–76, minus retired 63/64) are implemented, with user-pointer validation and errno-style error codes covering process control (`fork`/`exec` with real `argv`/`envp`/`wait`/signals/pipes), anonymous memory mapping, file and directory I/O, identity/permission management, privileged system control (including auto-detecting `mount`/`unmount` across FAT/ext2/exFAT since v0.9.0), USB Mass Storage access, GUI/window-manager RPC (now with an explicit unregister), generic inter-process messaging, a one-call network fetch over DNS/TCP/TLS/HTTP, and — new in v0.9.0 — RTC time, sound playback/control, a single blocking ICMP ping, live OS version info, and network interface configuration. Most of the growth since v0.6.0's 27 syscalls exists for one reason: moving functionality (the shell, `su`/`mount`/`reboot`, the window manager, and now the sound mixer/`ifconfig`/`ping`/`date`) out of the kernel binary and into ordinary userspace processes needed a controlled interface to replace the direct kernel-internal function calls those features used to make. The use of the `syscall` instruction ensures fast transitions, and the calling convention follows the x86-64 ABI for compatibility.
 
 For more details, refer to the source code in `kernel/system/syscall/`.
 

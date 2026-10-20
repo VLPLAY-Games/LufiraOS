@@ -1,6 +1,6 @@
 # Networking
 
-This document describes the network stack of LufiraOS: a from-scratch, fully polled Ethernet/ARP/IPv4/ICMP/TCP/UDP/DNS/TLS 1.2/HTTP(S) implementation living in `kernel/net/`, built on top of the RTL8139 Ethernet driver (`kernel/drivers/net/rtl8139.c`, documented in [`07_drivers.md`](07_drivers.md)). The shell commands built on the lower layers (`ifconfig`/`ping`/`wget`) are documented in [`14_shell_commands.md`](14_shell_commands.md); the package manager's use of the HTTP(S) client is documented in [`17_package_manager.md`](17_package_manager.md). This document covers the stack itself.
+This document describes the network stack of LufiraOS: a from-scratch, fully polled Ethernet/ARP/IPv4/ICMP/TCP/UDP/DNS/TLS 1.2/HTTP(S) implementation living in `kernel/net/`, built on top of one of three interchangeable Ethernet NIC drivers — RTL8139 (`kernel/drivers/net/rtl8139.c`) and the Intel e1000/e1000e family (`kernel/drivers/net/e1000.c`, `e1000e.c`), all documented in [`07_drivers.md`](07_drivers.md). IP configuration can come from a DHCP lease (`kernel/net/dhcp.c`) or fall back to a static default — see [DHCP](#dhcp). The shell commands built on the lower layers (`ifconfig`/`ping`/`wget`) are documented in [`14_shell_commands.md`](14_shell_commands.md); the package manager's use of the HTTP(S) client is documented in [`17_package_manager.md`](17_package_manager.md). This document covers the stack itself.
 
 ---
 
@@ -9,18 +9,19 @@ This document describes the network stack of LufiraOS: a from-scratch, fully pol
 1. [Overview](#overview)
 2. [Network Configuration](#network-configuration)
 3. [Ethernet Layer](#ethernet-layer)
-4. [Address Resolution Protocol (ARP)](#address-resolution-protocol-arp)
-5. [IPv4](#ipv4)
-6. [ICMP](#icmp)
-7. [TCP](#tcp)
-8. [UDP](#udp)
-9. [DNS](#dns)
-10. [TLS 1.2](#tls-12)
-11. [HTTP(S) Client and `SYS_NET_FETCH`](#https-client-and-sys_net_fetch)
-12. [Byte Order and Checksum Helpers](#byte-order-and-checksum-helpers)
-13. [Dependencies](#dependencies)
-14. [Known Limitations](#known-limitations)
-15. [Conclusion](#conclusion)
+4. [DHCP](#dhcp)
+5. [Address Resolution Protocol (ARP)](#address-resolution-protocol-arp)
+6. [IPv4](#ipv4)
+7. [ICMP](#icmp)
+8. [TCP](#tcp)
+9. [UDP](#udp)
+10. [DNS](#dns)
+11. [TLS 1.2](#tls-12)
+12. [HTTP(S) Client and `SYS_NET_FETCH`](#https-client-and-sys_net_fetch)
+13. [Byte Order and Checksum Helpers](#byte-order-and-checksum-helpers)
+14. [Dependencies](#dependencies)
+15. [Known Limitations](#known-limitations)
+16. [Conclusion](#conclusion)
 
 ---
 
@@ -28,7 +29,8 @@ This document describes the network stack of LufiraOS: a from-scratch, fully pol
 
 `kernel/net/` is a full, if deliberately narrow, stack: Ethernet up through a real HTTPS client, with DNS in between.
 
-- **Ethernet** (`eth.c`/`.h`) – frame construction and ethertype dispatch.
+- **Ethernet** (`eth.c`/`.h`) – frame construction and ethertype dispatch, sitting on top of whichever NIC driver was found at boot: RTL8139, or one of the two Intel families, e1000 (`drivers/net/e1000.c`) and e1000e (`drivers/net/e1000e.c`) — see [Ethernet Layer](#ethernet-layer).
+- **DHCP** (`dhcp.c`/`.h`) – an optional DHCPv4 client tried once at boot to replace the static IP default with a real lease; see [DHCP](#dhcp).
 - **ARP** (`arp.c`/`.h`) – address resolution with a small round-robin cache and a blocking-poll resolve call.
 - **IPv4** (`ip.c`/`.h`) – header handling, checksum, next-hop routing, protocol dispatch.
 - **ICMP** (`icmp.c`/`.h`) – echo request/reply, driving the `ping` command.
@@ -39,7 +41,7 @@ This document describes the network stack of LufiraOS: a from-scratch, fully pol
 - **HTTP(S) client** (`http_client.c`/`.h`) – `http_fetch()`, a one-call "download this URL" helper over TCP or TLS, exposed to userspace as `SYS_NET_FETCH` (see [`13_syscalls.md`](13_syscalls.md#miscellaneous-65-66)).
 
 **Explicitly still not implemented:**
-- **No DHCP** – the IP configuration is a static compile-time default, changeable only by the `ifconfig` shell command.
+- **DHCP is one-shot, not a full client** – `dhcp_start()` is tried once at boot (see [DHCP](#dhcp)); there is no background lease renewal/rebinding timer and no `DHCPDECLINE`/`DHCPRELEASE` support. If no DHCP server answers within its boot-time budget, the stack falls back to the static compile-time default, same as before — still changeable at any time via the `ifconfig` shell command.
 - **No IP fragmentation/reassembly** – `ip_receive()` drops any packet with the More-Fragments flag set or a nonzero fragment offset; `ip_send()` never fragments outgoing payloads either.
 - **No TCP congestion control** – the receive side now has a real flow-control window (see [TCP](#tcp)), but there's still no slow-start/congestion-avoidance on the send side.
 - **No TLS certificate chain validation** – see [TLS 1.2](#tls-12). This is the most important limitation in the whole stack to understand before relying on it for anything beyond fetching public files.
@@ -54,7 +56,7 @@ This document describes the network stack of LufiraOS: a from-scratch, fully pol
 
 ## Network Configuration
 
-The stack ships with a static default matching QEMU's user-mode networking (SLIRP) subnet, defined in `kernel/net/net.c`:
+The stack ships with a static default matching QEMU's user-mode networking (SLIRP) subnet, defined in `kernel/net/net.c`. This default is what's active if no DHCP server answers at boot (see [DHCP](#dhcp)) — a real lease, when one is obtained, overwrites all four fields below via the same `net_set_config()`-equivalent path `ifconfig` uses:
 
 | Setting | Default Value |
 |---------|----------------|
@@ -78,12 +80,12 @@ All fields are stored as `uint32_t` in **host byte order** (`a.b.c.d == (a<<24)|
 
 | Function | Description |
 |----------|-------------|
-| `void net_init(void)` | Brings up the RTL8139 (`rtl8139_init()`) and logs readiness via `klog()` if found; safe to call even with no card present. |
-| `void net_poll(void)` | Polls the NIC for received frames and runs them through the whole stack (`eth_receive()` → `arp`/`ip` → `icmp`/`tcp`/`udp`). Called once per PIT tick. |
-| `void net_set_config(uint32_t ip, uint32_t netmask, uint32_t gateway)` | Overwrites `our_ip`/`netmask`/`gateway` in the single global `net_config_t` (`dns_server` is untouched — `ifconfig` has no option to change it). |
+| `void net_init(void)` | Tries each driver in `g_nic_drivers[]` in turn — RTL8139, then e1000, then e1000e — and keeps the first one whose `found()` reports a card present (see [Ethernet Layer](#ethernet-layer)); logs readiness via `klog()`. Safe to call with no card present. |
+| `void net_poll(void)` | Polls the active NIC for received frames and runs them through the whole stack (`eth_receive()` → `arp`/`ip` → `icmp`/`tcp`/`udp`). Called once per PIT tick. |
+| `void net_set_config(uint32_t ip, uint32_t netmask, uint32_t gateway, uint32_t dns_server)` | Overwrites all four fields of the single global `net_config_t`. `dhcp_start()` (see [DHCP](#dhcp)) is the only caller that ever changes `dns_server`; `ifconfig` always passes `net_get_config()->dns_server` straight back through, so in practice it still only changes `our_ip`/`netmask`/`gateway`. |
 | `const net_config_t *net_get_config(void)` | Returns a pointer to the current configuration. |
 
-`net_set_config()`/`net_get_config()` back the `ifconfig` shell command — no persistence across reboots, no validation beyond `ip_str_to_addr()` parsing successfully.
+`net_set_config()`/`net_get_config()` back both the `ifconfig` shell command and `dhcp_start()` — no persistence across reboots, no validation beyond `ip_str_to_addr()` parsing successfully (`ifconfig`) or the DHCP option parser (`dhcp_start()`).
 
 ---
 
@@ -99,12 +101,47 @@ All fields are stored as `uint32_t` in **host byte order** (`a.b.c.d == (a<<24)|
 #define ETH_MTU_PAYLOAD  1500
 ```
 
+**NIC drivers:** `eth.c` never calls a specific card's driver directly — `eth_send()` goes through `net_send_frame()`/`net_get_mac()` in `net.c`, which forward to whichever driver `net_init()` picked. Three are available, tried in this order (`g_nic_drivers[]` in `net.c`), the first one found winning:
+
+| Driver | File | PCI vendor:device(s) | Notes |
+|--------|------|----------------------|-------|
+| RTL8139 | `drivers/net/rtl8139.c` | Realtek | I/O-port BAR0, the original driver (see [`07_drivers.md`](07_drivers.md)). |
+| e1000 | `drivers/net/e1000.c` | `0x8086`, classic 8254x family (82540EM/82544/82545/82546) | MMIO BAR0, legacy 16-byte TX/RX descriptor rings. QEMU's `-device e1000` emulates the 82540EM (`0x100E`), the primary target this driver was checked against. |
+| e1000e | `drivers/net/e1000e.c` | `0x8086`, PCIe 8257x/8258x family (82571–82583/ICH8-10) | Structurally near-identical to `e1000.c` — same register map, same descriptor format, different PCI device-id table. QEMU's `-device e1000e` emulates the 82574L (`0x10D3`). |
+
+All three expose the same `nic_driver_t` shape (`init`/`found`/`get_mac`/`send`/`poll`) and, like RTL8139, are polled rather than interrupt-driven — `e1000_poll()`/`e1000e_poll()` check each descriptor's own Descriptor-Done bit directly, the same pattern as every other driver in this kernel (see [`07_drivers.md`](07_drivers.md)).
+
 **API:**
 
 | Function | Description |
 |----------|-------------|
-| `int eth_send(const uint8_t dst_mac[6], uint16_t ethertype, const void *payload, uint16_t len)` | Builds a 14-byte header and sends the whole frame via `rtl8139_send()`. Returns `-1` if no card was found or `len` exceeds `ETH_MTU_PAYLOAD` (1500). |
-| `void eth_receive(const uint8_t *frame, uint16_t len)` | Called from `rtl8139_poll()` for every received frame; dispatches on `ethertype`: `0x0806` → `arp_receive()`, `0x0800` → `ip_receive()`. Anything else is silently discarded. |
+| `int eth_send(const uint8_t dst_mac[6], uint16_t ethertype, const void *payload, uint16_t len)` | Builds a 14-byte header and sends the whole frame via the active NIC driver. Returns `-1` if no card was found or `len` exceeds `ETH_MTU_PAYLOAD` (1500). |
+| `void eth_receive(const uint8_t *frame, uint16_t len)` | Called from the active NIC's `poll()` for every received frame; dispatches on `ethertype`: `0x0806` → `arp_receive()`, `0x0800` → `ip_receive()`. Anything else is silently discarded. |
+
+---
+
+## DHCP
+
+`dhcp.c`/`.h` implement a minimal DHCPv4 client (RFC 2131/2132): DISCOVER → OFFER → REQUEST → ACK, broadcast over `udp.c`/`ip.c` exactly like everything else in this stack — one blocking call with a budget, no background renew/rebind timer, no `DHCPDECLINE`/`DHCPRELEASE`. It's tried once from `kernel.c`, right after `net_init()`:
+
+```c
+if (net_found()) {
+    if (dhcp_start(4000) == 0) { /* lease applied */ }
+    else { /* stays on the static default from net.c */ }
+}
+```
+
+**Exchange:** each phase (DISCOVER→OFFER, then REQUEST→ACK) gets up to 3 broadcast attempts at ~3000 ms apiece, all bounded by the same overall deadline passed to `dhcp_start()`. Replies are matched back to this client by transaction ID (`xid`, seeded from the PIT tick count — not cryptographically random, but it doesn't need to be) and MAC address (`chaddr`), not by anything the server is trusted to get right. A `DHCPNAK` aborts immediately rather than retrying.
+
+**What it requests/accepts:** the parameter request list asks for options 1 (subnet mask), 3 (router), and 6 (DNS server); only those three plus message type (53) and server identifier (54) are parsed out of the reply. Any field the server's `ACK` doesn't supply falls back to whatever `net_get_config()` already held — a lease is never allowed to blank out a working value.
+
+**API:**
+
+| Function | Description |
+|----------|-------------|
+| `int dhcp_start(uint32_t timeout_ms)` | Runs the full DISCOVER/OFFER/REQUEST/ACK exchange within `timeout_ms` (`kernel.c` uses 4000, deliberately shorter than `http_client.c`'s own total budget so a missing DHCP server doesn't noticeably extend boot time). On success, applies `yiaddr`/subnet-mask/router/DNS-server via `net_set_config()` and returns `0`. Returns `-1` on no card, no `OFFER`, a `NAK`, or a timeout — `net_get_config()` is left exactly as it was. |
+
+This is what moved networking in this kernel from "edit a compile-time constant or run `ifconfig` by hand" to "just works," matching QEMU's SLIRP DHCP server (and any real DHCP server on real hardware) — `ifconfig` remains available afterward for manual overrides, same as before.
 
 ---
 
@@ -252,9 +289,10 @@ Because x86-64 is little-endian and all network wire formats are big-endian, `ne
 
 | Component | Depends On | Purpose |
 |-----------|------------|---------|
-| Networking (`kernel/net/`) | RTL8139 driver (`drivers/net/rtl8139.c`) | Actual frame transmit/receive. |
-| RTL8139 driver | PCI, PMM | Card/BAR discovery; contiguous pages for the RX ring. |
-| Networking | PIT (`system/timer/pit.c`) | `net_poll()` is driven from the timer tick; every blocking call (ARP/ping/TCP/DNS/TLS/HTTP) measures its bounded timeout in real PIT ticks. |
+| Networking (`kernel/net/`) | One of RTL8139/e1000/e1000e (`drivers/net/rtl8139.c`, `e1000.c`, `e1000e.c`) | Actual frame transmit/receive, whichever driver `net_init()` found first. |
+| RTL8139/e1000/e1000e drivers | PCI, PMM | Card/BAR discovery; contiguous pages for the RX/TX descriptor rings. |
+| Networking | PIT (`system/timer/pit.c`) | `net_poll()` is driven from the timer tick; every blocking call (ARP/DHCP/ping/TCP/DNS/TLS/HTTP) measures its bounded timeout in real PIT ticks. |
+| DHCP (`dhcp.c`) | UDP (`udp.c`), Networking | One blocking `dhcp_start()` call at boot (`kernel.c`, right after `net_init()`), broadcasting over the same UDP layer DNS uses. |
 | TLS/crypto (`kernel/net/crypto/`) | Networking only | No external crypto library — SHA-256/HMAC/AES-GCM/X25519/bignum-RSA are all implemented from scratch in this kernel. |
 | `SYS_NET_FETCH` | `http_client.c`, user-pointer validation (`syscall.c`) | Validates the URL string and output buffer, then calls `http_fetch()` directly, writing the result into the caller's buffer under its own page table. |
 | `wget`/`ping`/`ifconfig` (userspace, `lufira-packages`) | `13_syscalls.md`'s file/process syscalls | These commands are ordinary userspace packages now, not kernel-native — they reach the kernel's networking only indirectly, through whatever plain file/process syscalls their implementation uses; the lower network stack itself has no direct syscall surface of its own except `SYS_NET_FETCH`. |
@@ -264,7 +302,7 @@ Because x86-64 is little-endian and all network wire formats are big-endian, `ne
 ## Known Limitations
 
 - **TLS has no certificate chain/root-CA validation and no hardware entropy source** — see [TLS 1.2](#tls-12). The single most important caveat in this document.
-- **No DHCP** — static IP configuration, changed only by `ifconfig`, never persisted.
+- **DHCP is a one-shot boot-time attempt, not a managed client** — see [DHCP](#dhcp): no lease renewal/rebinding, no `DHCPDECLINE`/`DHCPRELEASE`; a lease that would need renewing just keeps being used until the next reboot. Falls back to the static default (still changeable by `ifconfig`, never persisted) if no server answers.
 - **No IP fragmentation or reassembly.**
 - **No TCP congestion control** — flow control (the receive window) exists; congestion avoidance does not.
 - **Single connection/resolve/ping/DNS-query/TLS-session at a time** — no socket table, no concurrency.
@@ -277,9 +315,9 @@ Because x86-64 is little-endian and all network wire formats are big-endian, `ne
 
 ## Conclusion
 
-LufiraOS's network stack now runs the full path from Ethernet frames to an HTTPS GET: Ethernet/ARP/IPv4/ICMP/TCP/UDP/DNS, a from-scratch TLS 1.2 client, and an HTTP(S) client exposed to userspace as one syscall. It is still narrow by design — one connection at a time, blocking calls throughout, no congestion control, and, most importantly, no certificate chain validation — but it is no longer limited to literal IP addresses and plain HTTP, and the package manager's `dlpg sync`/`upgrade` now depend on it reaching a real server on the real internet, not just a local QEMU link.
+LufiraOS's network stack now runs the full path from Ethernet frames to an HTTPS GET: Ethernet/ARP/IPv4/ICMP/TCP/UDP/DNS, a from-scratch TLS 1.2 client, and an HTTP(S) client exposed to userspace as one syscall. It is still narrow by design — one connection at a time, blocking calls throughout, no congestion control, and, most importantly, no certificate chain validation — but it is no longer limited to literal IP addresses and plain HTTP, and the package manager's `dlpg sync`/`upgrade` now depend on it reaching a real server on the real internet, not just a local QEMU link. It also no longer requires a single specific NIC or a hand-set static IP: RTL8139, e1000, and e1000e are all interchangeable at the `eth.c` layer, and `dhcp_start()` tries to get a real lease before falling back to the old static default.
 
-For more details, refer to the source code in `kernel/net/` (including `kernel/net/crypto/`) and `kernel/drivers/net/rtl8139.c`.
+For more details, refer to the source code in `kernel/net/` (including `kernel/net/crypto/` and `kernel/net/dhcp.c`) and `kernel/drivers/net/` (`rtl8139.c`, `e1000.c`, `e1000e.c`).
 
 ---
 

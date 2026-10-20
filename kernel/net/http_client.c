@@ -9,14 +9,13 @@
 #include "lib/string.h"
 
 /*
- * См. http_client.h — что сознательно НЕ поддерживается (редиректы,
+ * См. http_client.h — что сознательно не поддерживается (редиректы,
  * keep-alive, сжатие, userinfo/IPv6 в URL).
  *
- * Чтение — тот же приём, что везде в стеке (tcp.c/dns.c/tls.c):
- * блокирующий цикл "опросить -> проверить -> process_sleep(1)" (см.
- * net_lock_acquire() в net.h) с бюджетом в тиках PIT. Два бюджета: на одну
- * порцию (ловит "сервер замолчал") и на весь ответ (не даёт бесконечно
- * тянуть ответ, капающий по байту).
+ * Чтение — тот же приём, что везде в стеке: блокирующий цикл "опросить ->
+ * проверить -> process_sleep(1)" с бюджетом в тиках PIT. Два бюджета: на
+ * одну порцию ("сервер замолчал") и на весь ответ (не ждать бесконечно
+ * ответ, капающий по байту).
  */
 
 #define HTTP_PORT_DEFAULT       80
@@ -86,7 +85,7 @@ static int conn_read(uint8_t *buf, uint16_t cap) {
         }
         if (tcp_is_remote_closed()) return 0;
         if (pit_get_ticks() >= deadline) return -1;
-        process_sleep(1); // НАЙДЕННЫЙ БАГ — см. net_lock_acquire() в net.h
+        process_sleep(1); // уступаем CPU — см. net_lock_acquire() в net.h
     }
 }
 

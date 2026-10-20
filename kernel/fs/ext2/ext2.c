@@ -15,13 +15,9 @@ static void mark_dirty(ext2_fs_t *fs, uint32_t byte_off, uint32_t len) {
         fs->dirty_map[lba >> 3] |= (1 << (lba & 7));
 }
 
-// Group descriptor по индексу группы — ШАГ не sizeof(ext2_group_desc_t)
-// (32 байта), а fs->desc_size: с фичей 64BIT дескрипторы настоящие
-// 64-байтные (старшие 32 байта — bg_*_hi поля и чексуммы, которые нам не
-// нужны, у наших образов размер заведомо укладывается в 32-битные счётчики
-// блоков/инодов). Первые 32 байта у 64- и 32-байтного дескриптора совпадают
-// побайтово — ext2_group_desc_t как раз их описывает, так что приведение
-// типов ниже корректно независимо от desc_size.
+// Группа по индексу — шаг fs->desc_size, не sizeof(ext2_group_desc_t): при
+// 64BIT дескриптор 64-байтный (лишние поля нам не нужны), но первые 32 байта
+// совпадают с 32-битным форматом — приведение типа ниже корректно всегда.
 static inline ext2_group_desc_t *group_ptr(ext2_fs_t *fs, uint32_t g) {
     return (ext2_group_desc_t *)((uint8_t *)fs->groups + (uint64_t)g * fs->desc_size);
 }
@@ -44,27 +40,23 @@ int ext2_init(ext2_fs_t *fs, uint8_t *image, uint32_t image_size) {
 
     if (fs->sb->s_magic != EXT2_MAGIC) return -1;
     if (fs->sb->s_rev_level >= 1) {
-        // Любой incompat-бит ВНЕ этого набора (journal_dev, meta_bg,
-        // recover-после-грязного-выключения, inline_data, encrypt, ...) —
-        // отказываемся монтировать, а не читаем по неподходящему формату
-        // (см. разбор поддержанного подмножества в ext2.h).
+        // Неизвестный incompat-бит (journal_dev/meta_bg/recover/inline_data/
+        // encrypt/...) — отказ монтировать, а не чтение в неподдерживаемом
+        // формате (см. подмножество в ext2.h).
         if (fs->sb->s_feature_incompat & ~(uint32_t)EXT2_SUPPORTED_INCOMPAT) return -1;
         // RO_COMPAT-чексуммы (uninit_bg/gdt_csum, metadata_csum) требуют
-        // пересчёта crc16/crc32c на КАЖДУЮ запись бит­мапов/инодов/extent'ов —
-        // не реализовано; отказ монтировать безопаснее устаревших чек-сумм
-        // (e2fsck сразу бы на это пожаловался). Это же исключает группы с
-        // EXT4_BG_*_UNINIT (эти флаги только и существуют под этими RO_COMPAT
-        // фичами) — бит­мап такой группы на диске не нужно доверять буквально.
+        // пересчёта crc16/crc32c на каждую запись метаданных — не реализовано,
+        // отказ монтировать (заодно исключает EXT4_BG_*_UNINIT группы, чьим
+        // битмапам нельзя доверять буквально).
         if (fs->sb->s_feature_ro_compat & EXT2_UNSUPPORTED_RO_COMPAT) return -1;
     }
 
     fs->block_size = 1024u << fs->sb->s_log_block_size;
     if (fs->block_size == 0 || (uint64_t)fs->block_size * 2 > image_size) return -1;
-    // s_blocks_per_group/s_inodes_per_group — знаменатели ниже и в
-    // inode_ptr()/alloc_block()/alloc_inode() — ноль у "магически
-    // совпавшего" не-ext2 образа (например, auto-detect sys_mount()
-    // пробующего ext2 на FAT/exFAT-флешке) привёл бы к #DE, тем же классом
-    // бага, что был найден и исправлен в fat_init() (см. его комментарий).
+    // s_blocks_per_group/s_inodes_per_group — знаменатели в inode_ptr()/
+    // alloc_block()/alloc_inode(); ноль у "магически совпавшего" не-ext2
+    // образа (например, auto-detect sys_mount() на FAT/exFAT-флешке) привёл
+    // бы к делению на ноль (#DE).
     if (fs->sb->s_blocks_per_group == 0 || fs->sb->s_inodes_per_group == 0) return -1;
 
     fs->inode_size = (fs->sb->s_rev_level >= 1 && fs->sb->s_inode_size) ? fs->sb->s_inode_size : 128;
@@ -73,8 +65,8 @@ int ext2_init(ext2_fs_t *fs, uint8_t *image, uint32_t image_size) {
 
     fs->desc_size = 32;
     if (fs->sb->s_rev_level >= 1 && (fs->sb->s_feature_incompat & EXT2_FEATURE_INCOMPAT_64BIT)) {
-        // s_desc_size — __le16 по смещению 0xFE суперблока (попадает в наш
-        // s_unused[820], отдельного поля в ext2_superblock_t для него нет).
+        // s_desc_size — __le16 на смещении 0xFE (внутри s_unused[], отдельного
+        // поля в ext2_superblock_t для него нет).
         uint16_t ds = *(const uint16_t *)((const uint8_t *)fs->sb + 0xFE);
         if (ds >= 32) fs->desc_size = ds;
     }
@@ -186,23 +178,17 @@ static void free_inode(ext2_fs_t *fs, uint32_t ino, int is_dir) {
 
 /* ====================== Отображение блоков файла ====================== */
 
-// i_blocks считает 512-байтные СЕКТОРА (не ext2-блоки), занятые и данными,
-// И самими косвенными таблицами-указателями — классическое поле ext2,
-// которое проверяет e2fsck (найдено живым тестом: fsck ругался "i_blocks
-// is 0, should be 2" на свежесозданных файлах, пока этого хелпера не было).
+// i_blocks считает 512-байтные секторы (не ext2-блоки), занятые данными И
+// косвенными таблицами-указателями — классическое поле, которое проверяет e2fsck.
 static inline void account_block(ext2_fs_t *fs, ext2_inode_t *inode) {
     inode->i_blocks += fs->block_size / 512;
     mark_dirty(fs, (uint32_t)((uint8_t *)&inode->i_blocks - fs->image), 4);
 }
 
 /* ===================== ext4 extent tree (чтение+lookup) ===================== */
-// Классический индекс по 60 байтам i_block[] — либо массив прямых/косвенных
-// номеров блоков (ветка ниже), либо (если инод помечен EXT4_EXTENTS_FL)
-// заголовок extent-дерева + до 4 записей прямо в иноде; при depth>0 записи —
-// индексы, указывающие на ОТДЕЛЬНЫЕ блоки на диске с ТЕМ ЖЕ заголовком +
-// до (block_size-12)/12 записей каждый. См. разбор поддержанного
-// подмножества в ext2.h — читаем дерево любой глубины, но НЕ растим его
-// (allocate для extent-инода — всегда отказ, не повреждение).
+// i_block[] — classic-массив номеров блоков, либо, при EXT4_EXTENTS_FL,
+// заголовок extent-дерева (+ до 4 записей в иноде, у depth>0 — индексы на
+// такие же блоки). Дерево читаем любой глубины, но не растим (см. ext2.h).
 
 #define EXT4_EXTENT_MAGIC 0xF30A
 #define EXT4_EXTENTS_FL   0x00080000u
@@ -229,11 +215,9 @@ typedef struct __attribute__((packed)) {
     uint16_t ei_unused;
 } ext4_extent_idx_t;
 
-// Ищет физический блок под логический индекс index, обходя дерево от узла
-// node (у корня — это inode->i_block, у внутренних узлов — целый блок на
-// диске с тем же форматом заголовка). 0 — не замаплено (дырка на чтении;
-// на записи вызывающий трактует это как "нужна новая аллокация", которую
-// extent-путь не делает — см. ext2.h).
+// Ищет физический блок под логический index по дереву от node (у корня —
+// inode->i_block, у внутренних узлов — блок на диске с тем же заголовком).
+// 0 — дырка на чтении либо "нужна аллокация" на записи (не делаем, см. ext2.h).
 static uint32_t extent_lookup(ext2_fs_t *fs, const uint8_t *node, uint32_t index, int depth_guard) {
     const ext4_extent_header_t *eh = (const ext4_extent_header_t *)node;
     if (eh->eh_magic != EXT4_EXTENT_MAGIC || depth_guard > 8) return 0;
@@ -264,10 +248,9 @@ static uint32_t extent_lookup(ext2_fs_t *fs, const uint8_t *node, uint32_t index
     return 0;
 }
 
-// Освобождает все блоки данных extent-дерева (листовые extent'ы) и все
-// блоки-носители внутренних узлов (но НЕ node самого верхнего уровня, если
-// это i_block инода — тот принадлежит иноду, не является отдельным блоком
-// на диске; from_disk_block=1 для рекурсивных вызовов в блоки-носители).
+// Освобождает блоки данных extent-дерева и блоки-носители внутренних узлов,
+// но не верхний node, если это i_block инода (from_disk_block=1 — для
+// рекурсивных вызовов на блоки-носители).
 static void free_extent_tree(ext2_fs_t *fs, const uint8_t *node, int from_disk_block) {
     const ext4_extent_header_t *eh = (const ext4_extent_header_t *)node;
     if (eh->eh_magic != EXT4_EXTENT_MAGIC) return;
@@ -295,17 +278,14 @@ static void free_extent_tree(ext2_fs_t *fs, const uint8_t *node, int from_disk_b
     }
 }
 
-// Номер блока файла по индексу (0-based), с опциональным выделением по
-// требованию (write-путь) недостающих прямых/косвенных блоков. Тройная
-// косвенность не поддержана (см. ext2.h) — такой индекс возвращает 0 без
-// выделения, вызывающий (ext2_read_file()/ext2_write_file()) это как ошибку.
+// Номер блока файла по индексу (0-based), опционально выделяя недостающие
+// прямые/косвенные блоки (write-путь). Тройная косвенность не поддержана
+// (см. ext2.h) — возвращает 0, вызывающий трактует как ошибку.
 static uint32_t block_for_index(ext2_fs_t *fs, ext2_inode_t *inode, uint32_t index, int allocate) {
     if (inode->i_flags & EXT4_EXTENTS_FL) {
-        // allocate здесь игнорируется осознанно: extent_lookup() никогда не
-        // расширяет дерево, только читает существующий маппинг (включая
-        // "перезапись на месте" уже выделенного блока) — рост extent-файла
-        // новым блоком возвращает 0 и трактуется как ошибка выше по стеку,
-        // а не портит дерево. См. разбор в ext2.h.
+        // allocate игнорируется осознанно: extent_lookup() только читает
+        // существующий маппинг, не растит дерево — рост extent-файла даёт 0
+        // (ошибка выше по стеку), а не портит дерево (см. ext2.h).
         (void)allocate;
         return extent_lookup(fs, (const uint8_t *)inode->i_block, index, 0);
     }
@@ -426,10 +406,8 @@ static int dirent_min_len(int name_len) {
     return (8 + name_len + 3) & ~3; // заголовок (8) + имя, выровнено до 4 байт
 }
 
-// Обходит ВСЕ data-блоки каталога, зовя cb(ctx, dirent_ptr, block, byte_off_in_block)
-// для каждой записи с inode != 0; cb возвращает 1, чтобы остановить обход
-// (нашли то, что искали) — тогда walk тоже возвращает 1. 0 — дошли до
-// конца без находки, -1 — структурная ошибка.
+// Обходит все data-блоки каталога, зовя cb() на каждую запись с inode != 0;
+// cb возвращает 1, чтобы остановить обход (walk вернёт 1). 0 — конец без находки.
 typedef int (*dirent_cb_t)(void *ctx, ext2_dirent_t *de, uint32_t block, uint32_t off_in_block);
 
 static int walk_dirents(ext2_fs_t *fs, ext2_inode_t *dir, dirent_cb_t cb, void *ctx) {
@@ -549,10 +527,8 @@ int ext2_readdir(ext2_fs_t *fs, uint32_t dir_ino, int index, char *name_out, uin
     return ctx.found ? 1 : 0;
 }
 
-// Ищет место под новую запись (name_len байт имени) среди уже существующих
-// dirent'ов каталога, расщепляя первый подходящий по свободному "хвосту"
-// rec_len; если такого места нет — выделяет НОВЫЙ блок данных каталога
-// (целиком свободная запись на весь блок) и пишет в его начало. 0 при успехе.
+// Ищет место под новую запись среди dirent'ов, расщепляя первый подходящий
+// по свободному "хвосту" rec_len; иначе выделяет новый блок каталога. 0 при успехе.
 static int insert_dirent(ext2_fs_t *fs, uint32_t dir_ino, ext2_inode_t *dir, uint32_t new_ino,
                           const char *name, int name_len, int file_type) {
     int need = dirent_min_len(name_len);
@@ -681,9 +657,8 @@ int ext2_mkdir(ext2_fs_t *fs, uint32_t parent_ino, const char *name, uint32_t *o
 // true, если каталог содержит только "."/".." (т.е. безопасно удалять).
 static int dir_is_empty(ext2_fs_t *fs, ext2_inode_t *dir) {
     readdir_ctx_t ctx = { 0, 0, NULL, NULL, NULL, 0 };
-    // Переиспользуем readdir_cb логику без записи вывода: если найдётся
-    // хоть одна НЕ "."/".."-запись, walk_dirents остановится (cb вернёт 1
-    // через readdir_ctx с index=0, cur=0 → found сразу), иначе дойдёт до конца.
+    // Переиспользуем readdir_cb: index=0,cur=0 — первая же не-"."/".."-запись
+    // остановит обход (found=1), иначе walk_dirents дойдёт до конца.
     char dummy_name[EXT2_NAME_LEN + 1];
     uint32_t dummy_ino; int dummy_is_dir;
     ctx.name_out = dummy_name; ctx.ino_out = &dummy_ino; ctx.is_dir_out = &dummy_is_dir;
@@ -693,10 +668,8 @@ static int dir_is_empty(ext2_fs_t *fs, ext2_inode_t *dir) {
 
 static void free_all_blocks(ext2_fs_t *fs, ext2_inode_t *inode) {
     if (inode->i_flags & EXT4_EXTENTS_FL) {
-        // i_block здесь — extent-дерево, не массив номеров блоков; попытка
-        // трактовать его как classic-разметку ниже раздала бы free_block()
-        // мусорные "номера блоков" из байт заголовка/extent'ов и испортила
-        // бы битовую карту. Отдельный, настоящий обход дерева.
+        // i_block здесь — extent-дерево, не массив номеров: classic-обход
+        // ниже отдал бы free_block() мусорные "номера" из байт заголовка.
         free_extent_tree(fs, (const uint8_t *)inode->i_block, 0);
         return;
     }
@@ -726,12 +699,10 @@ void ext2_truncate(ext2_fs_t *fs, uint32_t ino) {
     free_all_blocks(fs, inode);
     memset(inode->i_block, 0, sizeof(inode->i_block));
     if (inode->i_flags & EXT4_EXTENTS_FL) {
-        // Файл теперь пуст — безопасно конвертировать в classic-разметку
-        // (extent-дерево уже полностью свободно, терять нечего), чтобы
-        // последующие ext2_write_file() на этот же инод шли через полностью
-        // поддержанный allocate-путь block_for_index() — extents умеют
-        // только читать/перезаписывать существующий маппинг, не растить
-        // дерево (см. ext2.h).
+        // Файл пуст — конвертируем в classic-разметку (терять нечего), чтобы
+        // ext2_write_file() дальше шёл через полный allocate-путь
+        // block_for_index(): extent-ветка умеет только читать/перезаписывать,
+        // не растить дерево (см. ext2.h).
         inode->i_flags &= ~EXT4_EXTENTS_FL;
     }
     inode->i_size = 0;

@@ -782,9 +782,8 @@ int pci_get_bar(
             mask == 0xFFFFFFFFU) {
 
             /*
-             * Some virtual devices can still expose
-             * an I/O BAR without a useful probe mask.
-             * Keep address, but report size 0.
+             * Some virtual devices expose an I/O BAR
+             * without a useful probe mask — size 0.
              */
             bar->address = (uint64_t)base;
             bar->size = 0;

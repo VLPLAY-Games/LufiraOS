@@ -23,13 +23,10 @@ typedef struct {
     exfat_handle_t h;
 } exfat_file_private_t;
 
-// exfat_blockdev_t — связывает общий (протокольный, не знающий про USB)
-// exfat.c с конкретным транспортом (xHCI/MSD) этого монтирования, тот же
-// приём, что fat_dev_read/write в fs/fat/fat_mount.c. ctx — usb_index,
-// упакованный в void* (устройства — малые целые, не указатели). Батчинг по
-// XHCI_MSD_MAX_BATCH_BLOCKS и ретраи — здесь, в ОДНОМ месте, вместо того
-// чтобы дублироваться в каждом месте, что раньше гоняло xhci_msd_*_blocks()
-// напрямую.
+// exfat_blockdev_t связывает протокольный exfat.c с конкретным транспортом
+// (xHCI/MSD) этого монтирования — тот же приём, что fat_dev_read/write в
+// fat_mount.c. ctx — usb_index, упакованный в void*. Батчинг по
+// XHCI_MSD_MAX_BATCH_BLOCKS и ретраи — здесь, в одном месте.
 static int exfat_dev_read(void *ctx, uint32_t lba, uint32_t count, void *buf) {
     int usb_index = (int)(uint64_t)ctx;
     uint8_t *p = (uint8_t *)buf;
@@ -62,9 +59,9 @@ static int exfat_dev_write(void *ctx, uint32_t lba, uint32_t count, const void *
     return 0;
 }
 
-// Транслирует код ошибки exfat_init() (см. его контракт в exfat.h) в код
-// vfs_exfat_mount() — тот же sys_mount()/mount.elf (lufira-packages), что и
-// у FAT (map_fat_init_error(), fs/fat/fat_mount.c).
+// Транслирует код ошибки exfat_init() (контракт см. в exfat.h) в код
+// vfs_exfat_mount() — тот же sys_mount()/mount.elf, что и у FAT
+// (map_fat_init_error(), fat_mount.c).
 static int map_exfat_init_error(int err) {
     switch (err) {
         case -3: return -6; // метаданные/bitmap не влезают в RAM-потолок
@@ -74,9 +71,8 @@ static int map_exfat_init_error(int err) {
     }
 }
 
-// v0.9: раньше здесь был свой цикл по dirty_map, пишущий напрямую через
-// xhci_msd_write_blocks() — теперь это просто exfat_sync() в exfat.c,
-// которая работает через m->fs.dev (exfat_dev_read/write выше).
+// Тонкая обёртка: вся работа — в exfat_sync() (exfat.c), которая пишет
+// через m->fs.dev (exfat_dev_read/write выше).
 static void sync_mount_to_usb(vfs_exfat_mount_t *m) {
     exfat_sync(&m->fs);
 }
@@ -120,8 +116,8 @@ int vfs_exfat_mount(int usb_index, const char *prefix) {
     if (xhci_msd_get_info(usb_index, &max_lba, &block_size) != 0) return -4;
     if (block_size != 512) return -5;
 
-    // v0.9: exfat_init() больше не грузит устройство целиком в RAM (см.
-    // разбор в exfat.h) — читает метаданные сам через этот blockdev.
+    // exfat_init() не грузит устройство целиком в RAM (см. exfat.h) —
+    // читает метаданные сам через этот blockdev.
     exfat_blockdev_t dev = {
         .ctx = (void *)(uint64_t)usb_index,
         .read_blocks = exfat_dev_read,

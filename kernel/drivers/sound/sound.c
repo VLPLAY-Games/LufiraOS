@@ -72,9 +72,8 @@ int sound_play_tone(uint32_t frequency, uint32_t duration_ms) {
 
 int sound_play_pcm_stereo(const int16_t *samples, uint32_t frames) {
     if (g_backend == SOUND_BACKEND_HDA) return hda_play_pcm_stereo(samples, frames) ? 0 : -1;
-    // ac97_stream_write() (НЕ ac97_play_pcm_stereo() — тот одноразовый,
-    // полный stop/reset на каждый вызов, слышимые щелчки между слайсами,
-    // см. его большой комментарий в ac97.c) — развёрнут так же, ненулевой
+    // ac97_stream_write() (не ac97_play_pcm_stereo() — тот одноразовый, со
+    // слышимыми щелчками между слайсами) — развёрнут так же, ненулевой
     // результат есть успех.
     if (g_backend == SOUND_BACKEND_AC97) return ac97_stream_write(samples, frames) ? 0 : -1;
     return -1;

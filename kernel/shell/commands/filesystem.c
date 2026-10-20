@@ -90,9 +90,6 @@ void command_ls(const char* flags) {
         return;
     }
 
-    // Раньше в конце цвет жёстко сбрасывался на LOG_COLOR_INFO, затирая то,
-    // что пользователь выставил командой fg. Запоминаем реальный текущий
-    // цвет и возвращаемся именно к нему.
     ConsoleColor saved_fg = current_colors.fg_index;
 
     printf("\n");
@@ -105,11 +102,9 @@ void command_ls(const char* flags) {
         set_foreground_color(is_dir ? LS_COLOR_DIR : (is_exec ? LS_COLOR_EXEC : LS_COLOR_FILE));
 
         if (long_fmt) {
-            // vfs_dirent_t не несёт perm/uid/gid/size — их всё ещё нужно
-            // читать напрямую из lufirafs_inode_t (нет vfs-уровневого
-            // stat()-примитива, см. план фундамента v0.7 — это осознанно
-            // оставленный остаток прямого обращения к LufiraFS, не то же
-            // самое, что миграция самой команды на VFS-слой).
+            // vfs_dirent_t не несёт perm/uid/gid/size — читаем их напрямую
+            // из lufirafs_inode_t (нет vfs-уровневого stat()-примитива,
+            // см. план фундамента v0.7).
             lufirafs_inode_t inode;
             lufirafs_read_inode(&lufirafs, entry.ino, &inode);
 
@@ -168,11 +163,9 @@ void command_cd(const char* path) {
         return;
     }
 
-    // cwd_path раньше достраивался вручную (конкатенацией/обрезкой строки),
-    // что ломалось на "..", абсолютных и составных путях. Проще и надёжнее
-    // каждый раз пересчитать его с нуля из нового inode, поднимаясь по
-    // реальным записям ".." в файловой системе — так же, как это делает
-    // lufirafs_lookup для самого перехода.
+    // Пересчитываем cwd_path с нуля из нового inode, поднимаясь по записям
+    // ".." в файловой системе — так же, как lufirafs_lookup для перехода,
+    // а не ручной конкатенацией/обрезкой строки.
     if (lufirafs_get_path(&lufirafs, new_inode, cwd_path, sizeof(cwd_path)) != 0) {
         cwd_path[0] = '/';
         cwd_path[1] = '\0';
@@ -185,10 +178,8 @@ void command_mkdir(const char* name) {
     if (!name || !*name) return;
     if (!check_perm(cwd_inode, 0, 1, 1, "mkdir", name)) return;
 
-    // vfs_mkdir_at() (vfs.h/lufirafs_vfs.c) — тот же код, что теперь
-    // использует и SYS_MKDIR (syscall.c); возвращает сырой код
-    // lufirafs_create() без искажений (0/-1/-2/-3), как и раньше, и сам же
-    // синхронизирует диск на успехе.
+    // vfs_mkdir_at() — тот же код, что и SYS_MKDIR (syscall.c); отдаёт
+    // сырой код lufirafs_create() (0/-1/-2/-3) и сама синхронизирует диск.
     int res = vfs_mkdir_at(cwd_inode, name);
     switch (res) {
         case 0:
@@ -209,18 +200,12 @@ void command_mkdir(const char* name) {
     }
 }
 
-// Отдельная функция, а НЕ ветка внутри command_rm() — этот массив (~15KB)
-// иначе резервировался бы в СОБСТВЕННОМ прологе command_rm() безусловно,
-// на КАЖДЫЙ вызов, даже для обычного "rm <file>": этот проект собирается
-// без -O (см. вывод make), а без оптимизации компилятор считает размер
-// кадра функции по максимуму среди всех веток разом, а не переиспользует
-// стек по факту исполнения конкретной ветки. Именно это и обнаружилось
-// живьём: "rm foo" (однофайловый путь, эта гигантская ветка вообще не
-// исполняется) triple-fault'ил на переполнении 16KB ring0-стека шелла —
-// собственный кадр command_rm() с этим массивом внутри уже был на самой
-// грани, и добавленная миграцией на vfs_unlink_at()/lufirafs_resolve_parent()
-// (лишние ~400 байт кадров) её и переполнила. Вынос в отдельную функцию
-// означает, что этот кадр существует только пока реально исполняется "rm *".
+// Отдельная функция, а не ветка внутри command_rm(): проект собирается без
+// -O, а без оптимизации компилятор считает размер кадра функции по
+// максимуму среди всех её веток разом, а не по факту исполняемой. Этот
+// массив (~15KB) в общем кадре command_rm() легко переполнил бы 16KB
+// ring0-стек шелла даже для обычного "rm <file>", где эта ветка вообще не
+// исполняется. Вынос сюда держит такой кадр только на время "rm *".
 static void command_rm_all(void) {
     lufirafs_dir_t dir;
     if (lufirafs_opendir(&lufirafs, cwd_inode, &dir) != 0) {
@@ -228,13 +213,10 @@ static void command_rm_all(void) {
         return;
     }
 
-    // kmalloc, а не локальный массив на стеке — даже выделенная в СВОЮ
-    // функцию (см. комментарий у command_rm_all() в объявлении), эта
-    // таблица (256*60=15360 байт) всё ещё triple-fault'ила по факту
-    // РЕАЛЬНОГО вызова "rm *": её же собственный кадр (весь размер сразу,
-    // компиляция без -O) плюс глубина цепочки вызовов до
-    // lufirafs_resolve_parent() внутри цикла ниже вплотную подходят к
-    // 16KB ring0-стека шелла. В куче этого ограничения просто нет.
+    // kmalloc, а не стековый массив: даже в своей функции эта таблица
+    // (256*60=15360 байт) плюс глубина вызовов до lufirafs_resolve_parent()
+    // в цикле ниже вплотную подходят к 16KB ring0-стека шелла. В куче
+    // этого ограничения нет.
     char (*names_to_delete)[LUFIRAFS_MAX_NAME + 1] =
         (char (*)[LUFIRAFS_MAX_NAME + 1])kmalloc(256 * (LUFIRAFS_MAX_NAME + 1));
     if (!names_to_delete) {
@@ -256,10 +238,9 @@ static void command_rm_all(void) {
 
     int removed_count = 0, error_count = 0;
     for (int i = 0; i < name_count; i++) {
-        // vfs_unlink_at() синхронизирует диск на каждый успешный вызов сама
-        // (vfs_lufirafs_unlink_at(), lufirafs_vfs.c) — чуть больше отдельных
-        // sync'ов, чем раньше (один пакетный в конце), но функционально то
-        // же самое.
+        // vfs_unlink_at() сама синхронизирует диск на каждый успешный вызов
+        // (vfs_lufirafs_unlink_at()) — больше sync'ов, чем один пакетный
+        // в конце, но функционально то же самое.
         int res = vfs_unlink_at(cwd_inode, names_to_delete[i]);
         switch (res) {
             case 0:
@@ -326,9 +307,8 @@ void command_touch(const char* name) {
     }
     if (!check_perm(cwd_inode, 0, 1, 1, "touch", name)) return;
 
-    // vfs_create_at() теперь тоже отдаёт сырой код lufirafs_create() (см.
-    // комментарий у vfs_lufirafs_create_at() в lufirafs_vfs.c — раньше
-    // схлопывал всё в -2, что ломало бы switch ниже).
+    // vfs_create_at() отдаёт сырой код lufirafs_create() (см.
+    // vfs_lufirafs_create_at() в lufirafs_vfs.c) — это важно для switch ниже.
     int res = vfs_create_at(cwd_inode, name);
     switch (res) {
         case 0:
@@ -428,9 +408,8 @@ void command_run(const char *raw_args) {
         printf("\nFile not found: %s\n", filename);
         return;
     }
-    // Проверка прав — как и раньше, отдельно от самого открытия: vfs_open_at()
-    // (как и sys_open() в syscall.c) прав не проверяет вообще, это всегда
-    // забота вызывающего (см. комментарий у vfs_open() в vfs.c).
+    // Проверка прав отдельно от открытия: vfs_open_at() (как и sys_open())
+    // прав вообще не проверяет — это всегда забота вызывающего.
     if (!check_perm(ino, 0, 0, 1, "run", filename)) return;
 
     int fd = vfs_open_at(cwd_inode, filename, O_RDONLY);
@@ -477,17 +456,14 @@ void command_exec(const char *filename) {
         return;
     }
 
-    // do_exec() идёт через VFS, а там пути ВСЕГДА разрешаются от корня (см.
-    // комментарий вверху lufirafs_vfs.c) — в отличие от run(), который бьёт
-    // напрямую в lufirafs_lookup(cwd_inode, ...) и потому понимает путь
-    // относительно текущей папки шелла. Поэтому сами резолвим filename через
-    // cwd_inode и собираем готовый абсолютный путь для do_exec().
+    // do_exec() идёт через VFS, где пути всегда разрешаются от корня — в
+    // отличие от run(), который бьёт напрямую в lufirafs_lookup(cwd_inode)
+    // и понимает путь относительно cwd шелла. Поэтому сами резолвим
+    // filename через cwd_inode и собираем абсолютный путь для do_exec().
     //
-    // filename указывает на ФАЙЛ, а не на директорию, поэтому у него самого
-    // нет записи ".." (она есть только у директорий) — lufirafs_get_path()
-    // нельзя вызвать прямо на нём. Сначала берём родительскую директорию
-    // через lufirafs_resolve_parent() (она точно директория, get_path для
-    // неё работает), затем приклеиваем к её абсолютному пути имя файла.
+    // У файла (в отличие от директории) нет записи ".." — lufirafs_get_path()
+    // на нём не вызвать. Поэтому берём родительскую директорию через
+    // lufirafs_resolve_parent() и приклеиваем к её пути имя файла.
     uint32_t parent_ino;
     char leaf[LUFIRAFS_MAX_NAME + 1];
     if (lufirafs_resolve_parent(&lufirafs, cwd_inode, filename, &parent_ino, leaf) != 0) {
@@ -513,13 +489,11 @@ void command_exec(const char *filename) {
     for (int i = 0; i < leaf_len; i++) abs_path[pos++] = leaf[i];
     abs_path[pos] = '\0';
 
-    // do_exec()/elf_exec_replace() всегда забирают владение argv/envp и
-    // освобождают их сами (см. free_argv_envp() в elf.h) — синтезируем
-    // крошечный argv={имя программы, NULL}/envp={NULL} той же формы
-    // (kmalloc на массив + kmalloc на каждую строку), какую строит
-    // copy_user_string_array() (syscall.c) для настоящего SYS_EXEC. Без
-    // этого exec'нутая программа получила бы argc=0 — расходится с
-    // POSIX-соглашением, что argv[0] есть всегда (имя самой программы).
+    // do_exec()/elf_exec_replace() забирают владение argv/envp и сами их
+    // освобождают (см. free_argv_envp() в elf.h) — синтезируем крошечный
+    // argv={имя программы, NULL}/envp={NULL} в той же форме, что строит
+    // copy_user_string_array() для SYS_EXEC. Иначе argc был бы 0, что
+    // расходится с POSIX (argv[0] — всегда имя программы).
     char **argv = (char **)kmalloc(sizeof(char *) * 2);
     if (argv) {
         size_t flen = strlen(filename) + 1;
@@ -652,11 +626,10 @@ void command_cp(const char *args) {
     }
 
     // dst_name может содержать путь к каталогу (например "system/copy.txt") —
-    // resolve_parent разбивает его на родителя и простое имя ТОЛЬКО ради
-    // проверки прав ниже (какую именно — "создать новую запись" или
-    // "переписать существующую" — решает то, нашёлся ли dst_leaf); сам
-    // открывающий вызов дальше передаёт dst_name целиком, vfs_open_at()
-    // резолвит путь заново сам.
+    // resolve_parent разбивает его на родителя и имя только ради проверки
+    // прав ниже (создание новой записи или перезапись существующей, в
+    // зависимости от того, нашёлся ли dst_leaf); open ниже резолвит
+    // dst_name целиком сам.
     uint32_t dst_parent;
     char dst_leaf[LUFIRAFS_MAX_NAME + 1];
     if (lufirafs_resolve_parent(&lufirafs, cwd_inode, dst_name, &dst_parent, dst_leaf) != 0) {
@@ -732,11 +705,10 @@ void command_mv(const char *args) {
         return;
     }
 
-    // Как и в cp: src_name/dst_name могут содержать путь к каталогу, а не
-    // просто имя файла в cwd_inode — резолвим родителя для каждого из них
-    // отдельно, чтобы unlink() снял запись из настоящего родительского
-    // каталога источника, а create()/lookup() для назначения работали в его
-    // собственном каталоге, а не всегда в cwd_inode.
+    // Как и в cp: src_name/dst_name могут быть путём к каталогу, а не
+    // просто именем в cwd_inode — резолвим родителя каждого отдельно,
+    // чтобы unlink/create/lookup работали в их собственных каталогах,
+    // а не всегда в cwd_inode.
     uint32_t src_parent;
     char src_leaf[LUFIRAFS_MAX_NAME + 1];
     if (lufirafs_resolve_parent(&lufirafs, cwd_inode, src_name, &src_parent, src_leaf) != 0) {

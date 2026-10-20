@@ -9,15 +9,16 @@ This document describes the device drivers included in the LufiraOS kernel. The 
 1. [Overview](#overview)
 2. [Common Infrastructure](#common-infrastructure)
 3. [Console Driver](#console-driver)
-4. [Disk Driver (ATA PIO)](#disk-driver-ata-pio)
-5. [Keyboard Driver (PS/2)](#keyboard-driver-ps2)
-6. [Mouse Driver (PS/2)](#mouse-driver-ps2)
-7. [USB (xHCI + HID + Mass Storage)](#usb-xhci--hid--mass-storage)
-8. [Input Dispatcher](#input-dispatcher)
-9. [RTL8139 Network Driver](#rtl8139-network-driver)
-10. [PCI Bus Driver](#pci-bus-driver)
-11. [AC’97 Audio Driver](#ac97-audio-driver)
-12. [Driver Initialisation Sequence](#driver-initialisation-sequence)
+4. [Serial UART Driver (16550)](#serial-uart-driver-16550)
+5. [Disk Drivers (ATA PIO / AHCI / NVMe)](#disk-drivers-ata-pio--ahci--nvme)
+6. [Keyboard Driver (PS/2)](#keyboard-driver-ps2)
+7. [Mouse Driver (PS/2)](#mouse-driver-ps2)
+8. [USB (xHCI + HID + Mass Storage)](#usb-xhci--hid--mass-storage)
+9. [Input Dispatcher](#input-dispatcher)
+10. [Network Drivers (RTL8139 / e1000 / e1000e)](#network-drivers-rtl8139--e1000--e1000e)
+11. [PCI Bus Driver](#pci-bus-driver)
+12. [Audio Drivers (AC’97 / Intel HDA)](#audio-drivers-ac97--intel-hda)
+13. [Driver Initialisation Sequence](#driver-initialisation-sequence)
 
 ---
 
@@ -26,13 +27,14 @@ This document describes the device drivers included in the LufiraOS kernel. The 
 The driver subsystem provides hardware abstraction for essential peripherals:
 
 - **Console** – graphical text output with a custom 8×8 font, 256‑color palette, cursor and scrollback.
-- **Disk** – ATA PIO read/write for raw sector access (primary IDE channel).
+- **Serial** – a polled 16550 UART driver (COM1) that mirrors every console line out over the serial port, for logging/debugging without a graphical display.
+- **Disk** – ATA PIO read/write for raw sector access (primary IDE channel), plus AHCI SATA and NVMe drivers for controllers that don't expose a legacy IDE interface at all, with automatic fallback (AHCI → NVMe → legacy ATA PIO).
 - **Keyboard** – PS/2 keyboard with scancode translation, modifier handling, and IRQ1 interrupt support.
 - **Mouse** – PS/2 mouse initialisation and packet decoding.
-- **USB** – an xHCI host‑controller driver providing boot‑protocol HID keyboard/mouse input and Bulk‑Only Transport USB Mass Storage (block read/write), unified with PS/2 through a shared input dispatcher.
-- **Network** – an RTL8139 Fast Ethernet driver providing raw frame TX/RX to the protocol stack in `kernel/net/` (see [`16_networking.md`](16_networking.md) for the full Ethernet/ARP/IP/ICMP/TCP/UDP/DNS/TLS/HTTP stack built on top). There is no interactive `ifconfig`/`ping`/`wget` anymore — the only userspace consumer today is `dlpg sync`/`dlpg upgrade` via `SYS_NET_FETCH`.
+- **USB** – an xHCI host‑controller driver providing boot‑protocol HID keyboard/mouse input, Bulk‑Only Transport USB Mass Storage (block read/write), and post-boot hotplug attach/detach, unified with PS/2 through a shared input dispatcher.
+- **Network** – an RTL8139 Fast Ethernet driver, plus Intel e1000/e1000e drivers for a second NIC family, all providing raw frame TX/RX to the protocol stack in `kernel/net/` (see [`16_networking.md`](16_networking.md) for the full Ethernet/ARP/IP/ICMP/TCP/UDP/DNS/TLS/HTTP stack built on top, and its DHCP client). `ifconfig`/`ping`/`wget` (`lufira-packages`) are userspace consumers of this stack, alongside `dlpg sync`/`dlpg upgrade` via `SYS_NET_FETCH`.
 - **PCI** – bus enumeration, configuration space access, and BAR (Base Address Register) management.
-- **AC’97** – audio controller (Intel ICH‑compatible) with DMA‑based playback and tone generation.
+- **Audio** – AC’97 (Intel ICH‑compatible) and Intel HDA controllers, both with DMA‑based playback and tone generation; `sound.c` tries HDA first, then AC’97.
 
 Drivers are designed to be initialised early in the kernel boot process, after the physical memory manager (PMM) and interrupt descriptor table (IDT) are set up. All drivers are polled or interrupt‑driven; the console is used for debugging and user interaction. Most drivers' verbose status output is gated by **developer mode** (see [`04_logging.md`](04_logging.md)) — by default only errors and a handful of high-level "ready/not ready" lines are shown; enable it with the `devmode` shell command or `make debug` to see per‑device/per‑register detail.
 
@@ -86,7 +88,27 @@ The console is used by all other drivers for logging and user feedback.
 
 ---
 
-## Disk Driver (ATA PIO)
+## Serial UART Driver (16550)
+
+`drivers/serial/serial.c`/`.h` drives a 16550 UART on COM1 (I/O port `0x3F8`) — entirely polled, no interrupts, same discipline as every other driver in this chapter. Its purpose is debug output independent of the graphical console: `put_char()` (`console.c`) mirrors every character written to the screen out over this port, so `qemu ... -serial stdio` shows full kernel output even with no video, and `serial_init()` is deliberately the very first thing `_start()` calls in `kernel.c` — before the console, before the GDT — so the mirror catches boot output from the first line onward.
+
+### Initialisation and presence detection
+
+`serial_init()` programs the port for 115200 baud / 8N1 (divisor `1`), enables the FIFO (`FCR_ENABLE_FIFO`), then runs the standard way to detect a real 16550 without ever seeing it: an internal **loopback test** (`MCR_LOOPBACK`) — write a known byte, read it back, confirm it matches — before normal mode (`MCR_NORMAL`) is restored. Without this check, a system with no serial port at all would make `serial_putc()` spin forever waiting for a Line Status Register "THR empty" bit that would never appear.
+
+### Public API (`drivers/serial/serial.h`)
+
+| Function | Description |
+|----------|--------------|
+| `void serial_init(void)` | Programs the UART and runs the loopback presence test. Safe to call even if there is no port at all. |
+| `int serial_available(void)` | Returns 1 if the loopback test passed. |
+| `void serial_putc(char c)` | Blocking (bounded-retry) single-character write; no-op if `serial_available()` is false. |
+| `void serial_puts(const char *s)` | Writes a whole string via repeated `serial_putc()`. |
+| `int serial_try_getc(void)` | Returns the next received byte if one is already buffered, or -1 — the same "never block the kernel" pattern used by `usb_poll()`/`net_poll()`. |
+
+---
+
+## Disk Drivers (ATA PIO / AHCI / NVMe)
 
 The disk driver provides low‑level sector access to an ATA hard disk or CD‑ROM using Programmed I/O (PIO) mode on the primary IDE channel (I/O ports `0x1F0–0x1F7`). It implements **LBA28** addressing and supports both read and write operations.
 
@@ -108,6 +130,28 @@ The disk driver provides low‑level sector access to an ATA hard disk or CD‑R
 - The driver assumes a single master drive on the primary channel.
 - No DMA or interrupt support – purely synchronous.
 - Used by higher‑level filesystem code (e.g., FAT32, LufiraFS) if present.
+
+### AHCI SATA Driver (`drivers/disk/ahci.c`)
+
+Added alongside legacy ATA PIO for machines whose SATA controller exposes no legacy IDE compatibility mode at all. Found via `pci_find_class_if()` (class `0x01`, subclass `0x06`, prog-if `0x01`); only the **first** controller and its **first** SATA port with a device attached (signature `SATA_SIG_ATA`, ATAPI/empty ports skipped) are brought up — one port, one in-flight command (slot 0), polled completion (`PxCI`/`PxIS.TFES`) instead of interrupts, same reasoning as every other driver here (no MSI/MSI-X capability parsing in this kernel).
+
+- **DMA model** – rather than scatter-gather over the caller's own buffer, one physically-contiguous 128 KiB **bounce buffer** (`AHCI_BOUNCE_PAGES` = 32 pages, enough for the 255-sector max of one command) is memcpy'd to/from on every read/write — simpler and safer than validating an arbitrary caller buffer's physical contiguity.
+- **Commands** – `READ DMA EXT`/`WRITE DMA EXT` (LBA48, `0x25`/`0x35`) via a Register FIS built into a single Command Table/PRDT pair in slot 0.
+- **Waiting for completion** – a hybrid wait (`ahci_wait_tfd_free()`): a short fast busy-spin first (catches the common case of a near-instant completion with no delay at all), falling back to `pit_wait_ms()`-based polling (real PIT ticks, not a fixed iteration count) if the command is still outstanding — replacing an earlier pure fixed-iteration busy-wait that was far too slow under QEMU/TCG emulation and could stall text rendering visibly during boot.
+
+Public API (`drivers/disk/ahci.h`): `ahci_init()`, `ahci_available()`, `ahci_read_sectors(uint32_t lba, uint8_t sector_count, void *buffer)`, `ahci_write_sectors(uint32_t lba, uint8_t sector_count, const void *buffer)` — same shape as the ATA PIO functions above, so `disk.c` can dispatch to whichever controller was actually found.
+
+### NVMe Driver (`drivers/disk/nvme.c`)
+
+A second fallback after AHCI, for drives with no AHCI compatibility either. One controller, one namespace (NSID 1, which must report a 512-byte LBA with no metadata — otherwise the controller is treated as unusable and `disk.c` falls through to the next driver), one admin queue pair and one I/O queue pair (`QID` 0/1), each only 2 entries deep (at most one command in flight). Like AHCI, it's fully polled: NVMe completion is a **phase-bit flip** written by the controller into an ordinary memory-resident completion queue entry — a built-in polling mechanism, not a replacement for an interrupt the kernel would otherwise take. Data transfer uses PRP (Physical Region Page) addressing into a 128 KiB physically-contiguous bounce buffer, with a pre-built PRP List page covering pages 2-32 (the buffer never moves, so the list is built once).
+
+Two reliability fixes landed alongside the driver's introduction: the same fixed-iteration-busy-wait problem AHCI had (replaced with the same fast-spin/PIT-wait hybrid, shared helper in `disk.c`), and an Identify-Namespace read that could occasionally observe a torn DMA payload (`lbads==0`, physically impossible) despite a successful completion status — now retried a few times instead of trusted on the first read.
+
+Public API (`drivers/disk/nvme.h`): `nvme_init()`, `nvme_available()`, `nvme_read_sectors(...)`, `nvme_write_sectors(...)` — identical shape to the AHCI/ATA PIO functions.
+
+### Driver Fallback Chain
+
+`disk_init()` (`drivers/disk/disk.c`) tries `ahci_init()`, then `nvme_init()`, then falls back to legacy ATA PIO if neither succeeds; `disk_read_sectors()`/`disk_write_sectors()` dispatch to whichever one is actually available (`ahci_available()` → `nvme_available()` → ATA PIO) — `LufiraOS-Builder`'s `--disk-mode ahci|nvme|ide` picks which of the three a QEMU run actually exercises (see [`05_build_system.md`](05_build_system.md)), but all three remain probed/available in every build.
 
 ---
 
@@ -209,6 +253,15 @@ Public API (`drivers/usb/xhci.h`):
 
 There is no filesystem mounted on top of these devices by the driver itself — callers (the `usbinfo`/`usbread`/`usbwrite`/`mount`/`unmount` shell commands; see [`14_shell_commands.md`](14_shell_commands.md)) work directly in raw blocks.
 
+### USB Hotplug
+
+Until v0.9.0, every USB device had to already be plugged in at `xhci_init()` time — nothing re-checked the root-hub ports afterwards. `xhci_poll_hotplug()` closes that gap: called once per PIT tick from `usb_poll()` (same 100 Hz cadence as everything else that's polled in this kernel), it reads each port's `PORTSC.CSC` (Connect Status Change) bit, clears only that bit (the other RW1C bits in `PORTSC` are preserved, same discipline as `xhci_port_reset()`), and re-reads `CCS` (Current Connect Status):
+
+- **Attach** – if the port now reports connected and has no live slot already, it runs the exact same `xhci_check_port()`/`xhci_enumerate_device()` path the boot-time scan uses.
+- **Detach** – if the port reports disconnected, the matching slot (tracked by `port_id`) is torn down via `xhci_teardown_slot()` — including releasing any Mass Storage device entry that slot owned.
+
+An `xhci_enum_busy` guard prevents `xhci_poll_hotplug()` from running concurrently with an enumeration already in progress (the boot-time scan, or another hotplug event still being serviced reentrantly through `pit_wait_ms()` inside `xhci_port_reset()`) — it simply returns immediately if one is already underway, rather than racing it.
+
 **Limitations:** no OHCI/EHCI fallback for non‑xHCI controllers; boot‑protocol HID only (no report descriptor parsing, so multimedia keys, N‑key rollover beyond 6 keys, and non‑boot devices are unsupported); no real SuperSpeed link‑power‑management or BOS descriptor handling — devices simply run at whatever speed they report via `PORTSC`; Mass Storage is single‑LUN, single‑block‑at‑a‑time, with no filesystem support built in.
 
 ---
@@ -222,7 +275,9 @@ Because QEMU (and potentially real hardware) can deliver the *same* physical key
 
 ---
 
-## RTL8139 Network Driver
+## Network Drivers (RTL8139 / e1000 / e1000e)
+
+### RTL8139 Network Driver
 
 `drivers/net/rtl8139.c`/`.h` drives a Realtek RTL8139 Fast Ethernet controller (PCI vendor `0x10EC`, device `0x8139`) — the NIC QEMU emulates by default (`-net nic,model=rtl8139`). This section covers the driver/hardware layer only; the Ethernet/ARP/IP/ICMP/TCP protocol stack built on top of it lives in `kernel/net/` and is documented in [`16_networking.md`](16_networking.md).
 
@@ -255,6 +310,16 @@ Like xHCI and AC’97, the RTL8139's interrupt line is never wired up — there 
 
 **Limitations:** single RX ring with no automatic recovery from a desynchronised ring header (the driver simply stops parsing until the next tick, a documented simplification rather than a full reset-and-recover path); no interrupt-driven wakeups; one NIC supported at a time.
 
+### Intel e1000 / e1000e Drivers (`drivers/net/e1000.c`, `e1000e.c`)
+
+A second NIC family alongside RTL8139, added for the much more common Intel chipsets: `e1000.c` targets the classic Intel 8254x family (82540EM and close relatives — PCI vendor `0x8086`; QEMU's `-device e1000` emulates the 82540EM, device id `0x100E`), `e1000e.c` targets the newer PCIe-generation 8257x/8258x family (QEMU's `-device e1000e` emulates the 82574L, device id `0x10D3`). Unlike RTL8139's I/O-port BAR0, both use an **MMIO** BAR0 and the same register layout (`CTRL`/`STATUS`/`EERD`/`RCTL`/`TCTL`/`RDBAL...`/`TDBAL...`) and the same 16-byte "legacy" TX/RX descriptor format — `e1000e.c` is structurally almost identical to `e1000.c`, differing mainly in its PCI device-id list and its own `e1000e_*`-prefixed static state. Like every other NIC/USB driver in this kernel, neither uses interrupts (`IMS` stays 0): `e1000_poll()`/`e1000e_poll()` check each descriptor's own `DD` (Descriptor Done) bit directly, called from `net_poll()` the same way `rtl8139_poll()` is.
+
+Public API (`drivers/net/e1000.h`/`e1000e.h`, identical shape for both): `e1000_init()`/`e1000e_init()`, `e1000_found()`/`e1000e_found()`, `e1000_get_mac()`/`e1000e_get_mac()`, `e1000_send(const void *frame, uint16_t len)`/`e1000e_send(...)`, `e1000_poll()`/`e1000e_poll()`.
+
+### Driver Selection
+
+`net.c` wraps whichever NIC is present behind one `nic_driver_t` interface, so the rest of the network stack (`eth.c` and up, see [`16_networking.md`](16_networking.md)) never has to know which of RTL8139/e1000/e1000e is actually active. `LufiraOS-Builder`'s `--net-device rtl8139|e1000|e1000e|none` picks which one a QEMU run presents (see [`05_build_system.md`](05_build_system.md)).
+
 ---
 
 ## PCI Bus Driver
@@ -283,11 +348,13 @@ The PCI driver enumerates all devices on the PCI bus using Configuration Mechani
 | `pci_enable_bus_master(dev)` | Enables bus mastering for DMA. |
 | `pci_disable_interrupts(dev)` | Sets the Interrupt Disable bit in the command register (used by xHCI/RTL8139 since their interrupt lines are never serviced — see their respective sections). |
 
-The PCI driver is used by the AC’97, xHCI, and RTL8139 drivers to locate their respective controllers.
+The PCI driver is used by the AC’97, HDA, xHCI, AHCI, NVMe, RTL8139, and e1000/e1000e drivers to locate their respective controllers.
 
 ---
 
-## AC’97 Audio Driver
+## Audio Drivers (AC’97 / Intel HDA)
+
+### AC’97 Audio Driver
 
 The AC’97 driver supports Intel ICH‑compatible audio controllers (PCI class 0x04, subclass 0x01). It provides:
 
@@ -326,21 +393,44 @@ The AC’97 driver supports Intel ICH‑compatible audio controllers (PCI class 
 - No interrupt support; playback is synchronous and blocks the caller.
 - Sample rate must be supported by the codec (VRA must be enabled).
 
+A ring-buffer producer-vs-hardware-`CIV` lookahead cap (`AC97_STREAM_MAX_LOOKAHEAD_PAGES`) bounds worst-case playback latency — previously the producer could race arbitrarily far ahead of the hardware's current-index register, adding noticeable playback delay.
+
+### Intel HDA Audio Driver (`drivers/sound/hda.c`)
+
+A second audio driver, added for chipsets with no AC’97 emulation at all (common on more modern hardware). Unlike AC’97's I/O-port BARs and simple 8-byte BDL, HDA is an **MMIO** controller with a separate command interface to the codec and a 16-byte BDL using 64-bit addresses. Entirely polled, like every other driver here — no controller interrupts are used, for DMA completion (`SDnSTS.BCIS`) or codec responses alike.
+
+- **CORB/RIRB** – commands ("verbs") are sent to the codec through the **CORB** (Command Output Ring Buffer) and responses come back through the **RIRB** (Response Input Ring Buffer) — two independent, separately-polled ring buffers rather than a single synchronous register interface.
+- **Codec topology discovery** – `hda_init()` walks the codec's node tree using `Get Parameter`/`Get Connection List Entry` verbs, supporting a direct Pin→DAC connection or up to two hops through a Mixer/Selector; more complex topologies are a clean failure rather than a guess.
+- **Sample rate** – quantized to a fixed supported set (8000/11025/16000/22050/32000/44100/48000/88200/96000/176400/192000 Hz, via the format register's BASE/MULT/DIV fields) and rounded to the nearest one — unlike AC’97's continuously adjustable VRA register.
+
+**Fixed bug:** `RIRBCTL`'s interrupt-enable bit (bit 0) was never set at init, so the controller never posted `RINTFL`/advanced its internal RIRB read count — every verb timed out (`[HDA] verb timed out`) regardless of whether PCI IRQs reached the CPU at all, since HDA is fully polled and was never waiting on one. Audio over HDA was effectively a ~1 FPS stutter until this was fixed.
+
+Public API (`drivers/sound/hda.h`): `hda_init()`, `hda_is_available()`, `hda_set_volume()`/`hda_get_volume()`, `hda_set_sample_rate()`/`hda_get_sample_rate()`, `hda_play_pcm_stereo(const int16_t *samples, uint32_t frames)`, `hda_play_tone(uint32_t frequency, uint32_t duration_ms)`, `hda_stop()` — same shape as the AC’97 API above.
+
+**Known issue:** Doom's audio over HDA is reduced to short beeps rather than continuous playback — a separate, not-yet-root-caused issue from the verb-timeout bug above.
+
+### Driver Selection
+
+`sound.c` is the dispatcher both drivers sit behind: `sound_init()` tries `hda_init()` first, then falls back to `ac97_init()`. `LufiraOS-Builder`'s `--audio ac97|hda|none` picks which controller a QEMU run presents (see [`05_build_system.md`](05_build_system.md)).
+
 ---
 
 ## Driver Initialisation Sequence
 
-Drivers are initialised in a specific order after the kernel sets up the physical memory manager and interrupt handling:
+Drivers are initialised in a specific order, driven by two hard constraints: some devices need PCI enumeration first, and AHCI/NVMe/xHCI/e1000(e)/HDA all need the PIT actually ticking (their resets are timed via `pit_wait_ms()`, not fixed busy-wait iteration counts):
 
-1. **Console** – `initialize_console()` uses the `BootInfo` from the bootloader (the very first step of all, before even the GDT).
-2. **Keyboard** – `keyboard_init()` (IRQ1 enabled later).
-3. **Mouse** – `mouse_init()` (IRQ12 enabled later).
-4. **PCI** – `pci_init()` enumerates all devices.
-5. **AC’97** – `ac97_init()` depends on PCI and PMM.
-6. **Interrupts enabled** – `sti` plus IRQ0 (timer), IRQ1 (keyboard), IRQ2, IRQ12 (mouse) unmasked; from this point the PIT is ticking, which the next two steps require for their millisecond delays during controller reset.
-7. **xHCI/USB** – `xhci_init()`, after interrupts are enabled (needs the PIT ticking for real millisecond delays during controller/port reset).
-8. **Network** – `net_init()` (which calls `rtl8139_init()` and applies the static IP configuration), for the same reason as xHCI.
-9. **Disk** – optional; can be used by filesystem code later.
+1. **Serial** – `serial_init()`, deliberately the very first call in `_start()` — before the console, before the GDT — so its console-output mirror (see [Serial UART Driver](#serial-uart-driver-16550)) catches boot logging from the first line onward.
+2. **Console** – `initialize_console()` uses the `BootInfo` from the bootloader.
+3. **ACPI** – `acpi_init(bi->RsdpAddress)`, once LufiraFS is mounted (needed for `klog()`); see [`09_acpi.md`](09_acpi.md).
+4. **HPET/RTC** – `hpet_init()` (needs ACPI's "HPET" table) and a one-shot `rtc_get_time()` read, purely informational at this point (scheduler ticks remain PIT-only).
+5. **PCI** – `pci_init()` enumerates all devices.
+6. **Interrupts enabled** – `sti` plus IRQ0 (timer), IRQ2 (cascade) unmasked; from this point the PIT is ticking, which every step below requires for millisecond delays during controller reset.
+7. **Disk** – `disk_init()` (AHCI → NVMe → legacy ATA PIO fallback chain; see [Disk Drivers](#disk-drivers-ata-pio--ahci--nvme)), called after `sti` specifically so AHCI/NVMe's PIT-calibrated waits are available.
+8. **xHCI/USB** – `xhci_init()`, before legacy PS/2 (USB HID is the more likely real input source; PS/2 is the fallback).
+9. **Keyboard** – `keyboard_init()`, IRQ1 unmasked immediately after.
+10. **Mouse** – `mouse_init()`, IRQ12 unmasked immediately after.
+11. **Network** – `net_init()` (RTL8139/e1000/e1000e probe chain plus static-IP fallback), then a bounded DHCP attempt (`dhcp_start()`) if a NIC was found.
+12. **Audio** – `sound_init()` tries HDA first, then AC’97.
 
 Interrupt handlers are registered in the IDT before enabling IRQs. See [`02_kernel_init.md`](02_kernel_init.md) for the complete, authoritative boot order.
 

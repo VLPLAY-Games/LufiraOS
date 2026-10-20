@@ -228,8 +228,7 @@ int fat_lookup_path(fat_fs_t *fs,
             continue;
         }
 
-        // ".." — пока не уходим выше root; полноценный parent traversal
-        // через запись ".." можно сделать позже.
+        // ".." — пока не уходим выше root (полноценный traversal — позже).
         if (component[0] == '.' &&
             component[1] == '.' &&
             component[2] == '\0')

@@ -14,20 +14,13 @@
 #define PAGE_PS     0x80    // Page size (2MB / 1GB)
 #endif
 
-// Как invlpg() в paging.c (static там, не экспортирован) — та же функция,
-// своя копия здесь по той же причине, по которой map_page_in_space() ниже
-// вообще держит отдельную от paging.c копию huge-page-split логики (см. её
-// комментарий). НАЙДЕННЫЙ БАГ: эта копия, в отличие от map_page()/
-// map_page_in_pml4() (paging.c), нигде не звала invlpg() после расщепления
-// huge-страницы — расщепление меняет PDE с 2MB-страницы на указатель на PT,
-// но TLB мог успеть закэшировать старую (huge) трансляцию на этот же
-// виртуальный адрес ДО расщепления (например, если pml4_phys уже активен в
-// CR3 вызывающего — сама map_page_in_space() документирует это как
-// обязанность вызывающего, но не защищается сама). Без явного invlpg CPU
-// мог продолжать использовать старую запись вместо новой PT — в точности
-// симптом "RSVD=1 page fault по адресу, чья PTE при проверке после краша
-// оказывается валидной" (воспроизведено живьём на legacy BIOS boot, см.
-// разбор в истории изменений).
+// Как invlpg() в paging.c (static там) — своя копия здесь по той же причине,
+// по которой map_page_in_space() ниже держит отдельную от paging.c копию
+// huge-page-split логики. ВАЖНО: после расщепления huge-страницы (PDE с
+// 2MB-страницы на указатель на PT) нужен явный invlpg — TLB мог закэшировать
+// старую трансляцию ДО расщепления (например, если pml4_phys уже активен в
+// CR3 вызывающего), и без сброса CPU продолжал бы использовать старую запись
+// вместо новой PT.
 static inline void elf_invlpg(uint64_t addr) {
     asm volatile ("invlpg (%0)" : : "r" (addr) : "memory");
 }
@@ -158,19 +151,14 @@ static int map_page_in_space(uint64_t pml4_phys,
         uint64_t *new_pt = (uint64_t *)phys_to_virt(new_pt_phys);
 
         // PAGE_IDENTITY_SHARED (paging.h) — ЭТА копия huge-page-split-логики
-        // (параллельная paging.c: map_page()/map_page_in_pml4(), см. подробный
-        // комментарий там же и у free_user_address_space()) не выставляла
-        // этот бит, хотя их результат читает ОДИН И ТОТ ЖЕ
-        // free_user_address_space() — тот принимал все 512 "ещё нетронутых"
-        // identity-записей, появившихся ЗДЕСЬ (elf_load_to_process() грузит
-        // ELF-сегменты именно через эту функцию, т.е. на КАЖДОМ exec'е), за
-        // настоящие личные страницы процесса и honestly pmm_free_page()'ил
-        // их по одной — а это физически та же самая, разделяемая со ВСЕЙ
-        // системой identity-память (см. build_identity_pdpt(), paging.c).
-        // Раз из общего пула она так "освобождалась", pmm_alloc_page() рано
-        // или поздно отдавал её же под что-то совсем другое — и затем
-        // следующий такой же exec() пытался освободить её ПОВТОРНО (поймано
-        // detector'ом pmm_free_page() как double-free на вторую же "ls").
+        // (параллельная map_page()/map_page_in_pml4() в paging.c) обязана
+        // выставлять этот бит: результат читает ОДИН И ТОТ ЖЕ
+        // free_user_address_space(), который иначе принял бы все 512 "ещё
+        // нетронутых" identity-записей, появившихся здесь (на КАЖДОМ
+        // exec()), за настоящие личные страницы процесса и освободил бы
+        // разделяемую со ВСЕЙ системой identity-память (см.
+        // build_identity_pdpt(), paging.c) — с двойным освобождением на
+        // следующем таком же exec().
         for (int j = 0; j < 512; j++) {
             new_pt[j] =
                 (phys_2m + j * PAGE_SIZE) |
@@ -526,11 +514,10 @@ void* elf_load_to_process(const void *elf_data,
     return (void*)header->entry;
 }
 
-// Сохраняет текущее EFLAGS.IF и отключает прерывания. run/exec выполняются
-// синхронно прямо из обработчика IRQ1 клавиатуры, где прерывания уже
-// отключены самим CPU — безусловный "sti" на ранних return'ах раньше
-// включал их преждевременно, позволяя таймерному IRQ вклиниться и повредить
-// кучу/список процессов. Восстанавливаем именно то состояние, что было на входе.
+// Сохраняет EFLAGS.IF и отключает прерывания. run/exec идут синхронно из
+// обработчика IRQ1 клавиатуры (прерывания уже отключены CPU) — безусловный
+// "sti" на раннем return включил бы их преждевременно, дав таймерному IRQ
+// повредить кучу/список процессов. Восстанавливаем именно входное состояние.
 static inline uint64_t elf_irq_save(void) {
     uint64_t flags;
     asm volatile("pushfq; popq %0" : "=r"(flags) :: "memory");
@@ -579,16 +566,13 @@ static int elf_exec_internal(const void *elf_data,
         return -1;
     }
 
-    // process_create() всегда ставит cwd в корень (см. process.c) — верно
-    // для самого первого процесса (idle/shell), но не для run/runbg
-    // (command_run()/command_runbg(), kernel/shell/commands/*.c): та же
-    // проблема, что process_fork() уже решает для SYS_FORK (копирует
-    // cwd_inode/cwd_path родителя, process.c) — новый процесс здесь тоже
-    // логически "потомок" вызывающего (шелла), и должен унаследовать его
-    // текущий каталог, а не всегда стартовать в "/". elf_exec_replace()
-    // (do_exec()/command_exec()) этой проблемы не имело изначально — та
-    // переиспользует существующий proc, cwd в нём и так уже на месте
-    // (v0.7 план, этап 5, под-этап 3).
+    // process_create() всегда ставит cwd в корень — верно для самого первого
+    // процесса (idle/shell), но не для run/runbg: новый процесс здесь
+    // логически "потомок" вызывающего шелла и должен унаследовать его
+    // текущий каталог (та же проблема, что process_fork() решает для
+    // SYS_FORK, копируя cwd_inode/cwd_path родителя). elf_exec_replace()
+    // этой проблемы не имеет — переиспользует существующий proc, cwd в нём
+    // уже на месте.
     if (current_process) {
         proc->cwd_inode = current_process->cwd_inode;
         strcpy(proc->cwd_path, current_process->cwd_path);
@@ -613,12 +597,10 @@ static int elf_exec_internal(const void *elf_data,
     // Устанавливаем точку входа
     proc->context.rip = (uint64_t)entry;
 
-    // Строим argv[]/envp[] на верху уже выделенного process_create()'ом
-    // пользовательского стека этого процесса — заменяет собой те самые
-    // "мёртвые" 3 qword'а, что process_create() туда до этого записал (их
-    // не читает никто, см. комментарий в crt0.S), новым содержимым, и
-    // кладёт РЕАЛЬНЫЙ RSP/argc/argv/envp в контекст процесса — см.
-    // build_exec_stack() (process.c) и комментарий у main()'а в crt0.S.
+    // Строим argv[]/envp[] на верху пользовательского стека, выделенного
+    // process_create() — заменяет "мёртвые" 3 qword'а, которые никто не
+    // читает (см. crt0.S), и кладёт РЕАЛЬНЫЙ RSP/argc/argv/envp в контекст
+    // процесса (build_exec_stack(), process.c; см. main() в crt0.S).
     uint64_t new_rsp, argv_addr, envp_addr;
     if (build_exec_stack(proc->page_table, proc->stack_base, argv, envp,
                           &new_rsp, &argv_addr, &envp_addr) != 0) {
@@ -649,13 +631,10 @@ static int elf_exec_internal(const void *elf_data,
     // FOREGROUND
     asm volatile("cli");
 
-    // Отсюда мы прыгаем в новый процесс сырым context_switch() и можем не
-    // вернуться в этот стек вызовов ещё очень долго. Раньше здесь стоял
-    // ручной EOI на случай, если это выполняется внутри timer_irq_handler()
-    // (через USB HID) — теперь EOI шлётся централизованно в самом начале
-    // irq_handler() (kernel/system/cpu/irq.c), до вызова любого конкретного
-    // обработчика, так что к этому моменту он уже отправлен независимо от
-    // того, вернёмся мы сюда или нет.
+    // Отсюда прыгаем в новый процесс сырым context_switch() и можем не
+    // вернуться в этот стек вызовов ещё очень долго — ручной EOI здесь не
+    // нужен: он шлётся централизованно в начале irq_handler() (irq.c), до
+    // вызова любого обработчика, независимо от того, вернёмся мы сюда или нет.
 
     // Цель для Ctrl+C (см. shell_handle_ctrl_c() в shell.c). runbg сюда не
     // попадает вовсе (см. ранний return в background-ветке выше) — фоновые
@@ -735,8 +714,7 @@ int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name,
     if (!entry) {
         printf("[ELF] exec: failed to load '%s', old process untouched\n", name);
         // new_pml4/new_stack уже выделены process_prepare_exec() выше, но
-        // proc так и не подтвердил их через process_commit_exec() — раньше
-        // они просто бросались здесь навсегда при каждой неудачной загрузке.
+        // proc их не подтвердил через process_commit_exec() — освобождаем явно.
         free_user_address_space(new_pml4);
         elf_irq_restore(irq_flags);
         free_argv_envp(argv, envp);
@@ -793,11 +771,9 @@ int elf_exec_replace(const void *elf_data, uint64_t elf_size, const char *name,
            proc->pid, name, (uint64_t)entry);
     klog("[ELF] PID %u exec'd '%s'", proc->pid, name);
 
-    // Отсюда мы уже не вернёмся по этому стеку вызовов (exec может быть
-    // вызван и из timer_irq_handler(), см. комментарий выше) — EOI на этот
-    // случай теперь шлётся централизованно в начале irq_handler(), до
-    // вызова любого обработчика, так что отдельный ручной EOI здесь больше
-    // не нужен (и был бы вторым/лишним).
+    // Отсюда уже не вернёмся по этому стеку вызовов (exec может быть вызван
+    // и из timer_irq_handler()) — отдельный ручной EOI здесь не нужен, он
+    // шлётся централизованно в начале irq_handler().
 
     // Цель для Ctrl+C (см. shell_handle_ctrl_c() в shell.c) — exec меняет
     // образ proc "на месте", PID остаётся тем же.

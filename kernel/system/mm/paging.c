@@ -36,15 +36,11 @@ uint64_t get_current_pml4(void) {
     return cr3;
 }
 
-// parent — виртуальный (через phys_to_virt()) указатель на родительскую
-// таблицу; возвращает такой же виртуальный указатель на дочернюю. Сами
-// записи остаются физическими адресами, как и положено записям таблиц
-// страниц. x86-64 берёт U/S-бит по всем уровням трансляции сразу — если
-// хоть один уровень supervisor-only, весь адрес считается supervisor-only
-// независимо от листового PTE. Поэтому промежуточные таблицы здесь создаются
-// с PAGE_USER: реальное разрешение всё равно проверяется по флагам
-// листового PTE, так что разрешительные промежуточные записи ничего лишнего
-// не открывают, а их отсутствие сломало бы любой ring3-доступ к памяти.
+// parent/результат — виртуальные указатели (phys_to_virt()); записи таблиц —
+// физические адреса. x86-64 берёт U/S-бит по ВСЕМ уровням сразу: один
+// supervisor-only уровень делает supervisor-only весь адрес. Поэтому
+// промежуточные таблицы всегда создаются с PAGE_USER — реальное ограничение
+// всё равно на листовом PTE, без этого сломался бы любой ring3-доступ.
 static pt_entry_t* get_or_create_table(pt_entry_t *parent, uint64_t index, int create) {
     if (!(parent[index] & PAGE_PRESENT)) {
         if (!create) return NULL;
@@ -64,10 +60,10 @@ static pt_entry_t* get_or_create_table(pt_entry_t *parent, uint64_t index, int c
     }
 }
 
-// Строит по одному PD на гигабайт с huge-страницами, identity-отображающими
-// физическую память 0..mem_gb*1GB. Вызывается дважды: для низкой (virt==phys)
-// карты PML4[0] и для отдельного physmap (PML4[PHYSMAP_PML4_INDEX]). CR3 ещё
-// не переключён на kernel_pml4, поэтому raw-указатели тут безопасны.
+// Строит по PD на гигабайт с huge-страницами, identity-отображая физическую
+// память 0..mem_gb*1GB. Вызывается дважды: для низкой карты PML4[0] (virt==phys)
+// и для physmap (PML4[PHYSMAP_PML4_INDEX]); CR3 ещё не на kernel_pml4, поэтому
+// raw-указатели тут безопасны.
 static void build_identity_pdpt(pt_entry_t *pdpt, uint64_t mem_gb) {
     for (uint64_t gb = 0; gb < mem_gb; gb++) {
         uint64_t pd_phys = pmm_alloc_page();
@@ -114,21 +110,10 @@ void paging_init(BootInfo* bi) {
     uint64_t desc_count = bi->MemoryMapSize / desc_size;
     uint64_t max_phys = 0;
 
-    // ВАЖНО: только EfiConventionalMemory (как и pmm_init(), pmm.c — тот же
-    // самый фильтр) — без него этот скан цеплял и высокие MMIO/reserved
-    // регионы из карты памяти (PCI64-окно OVMF, ACPI-таблицы и т.п.,
-    // которые реальным RAM не являются), раздувая max_phys до значений в
-    // десятки-сотни GB при 256MB РЕАЛЬНОЙ памяти у VM. mem_gb упирался в
-    // потолок (512) и build_identity_pdpt() строила identity-карту на
-    // 512 GB вместо ~1 — а clone_low_identity_map() (process_create(),
-    // process.c) и clone_address_space_deep() (process_fork()) потом на
-    // КАЖДОМ создании/форке процесса честно копировали все эти 512
-    // "призрачных" GB-регионов (ни один из которых не соответствует
-    // настоящей памяти), выделяя и копируя по странице на каждый —
-    // ~500-1500 физических страниц churn'а за один fork()+exec(), что и
-    // приводило к исчерпанию PMM после полутора-двух сотен подряд идущих
-    // команд шелла, несмотря на то что сам churn был формально
-    // сбалансирован (alloc и free парно).
+    // ВАЖНО: учитываем только EfiConventionalMemory (как и pmm_init(), тот же
+    // фильтр) — иначе в скан попадут MMIO/reserved-регионы (PCI64-окно OVMF,
+    // ACPI-таблицы и т.п.), реальным RAM не являющиеся, что раздует max_phys
+    // и identity-карту далеко за пределы настоящей памяти.
     for (uint64_t i = 0; i < desc_count; i++) {
         EFI_MEMORY_DESCRIPTOR *d = (EFI_MEMORY_DESCRIPTOR*)(map + i * desc_size);
         if (d->Type != EfiConventionalMemory) continue;
@@ -136,19 +121,11 @@ void paging_init(BootInfo* bi) {
         if (end > max_phys) max_phys = end;
     }
 
-    // Фреймбуфер (bi->FrameBufferBase) консоль (drivers/console/console.c,
-    // "framebuffer = (uint32_t*)bi->FrameBufferBase") адресует НАПРЯМУЮ как
-    // physical==virtual указатель — а GOP-фреймбуферы живут далеко ЗА
-    // пределами настоящей RAM (у QEMU/OVMF обычно в районе нескольких GB, в
-    // отдельном MMIO-окне). EfiConventionalMemory-фильтр выше корректно его
-    // не считает (это не RAM), но identity-карта ниже обязана его всё равно
-    // покрывать — иначе первая же запись в консоль ПОСЛЕ переключения CR3
-    // page-fault'ится в пустоту (строка framebuffer[...] = ...), потому что
-    // новая, уже правильно маленькая (по размеру настоящей RAM) identity-карта
-    // больше не простирается так далеко, как раздутая прежняя (см. основной
-    // комментарий выше про mem_gb=512). Чиним явным расширением max_phys под
-    // ОДИН конкретный дополнительный регион, а не возвратом к "взять верхнюю
-    // границу вообще всей карты памяти".
+    // Консоль (drivers/console/console.c) адресует framebuffer напрямую как
+    // physical==virtual указатель, а GOP-фреймбуфер лежит далеко за пределами
+    // настоящей RAM (вне EfiConventionalMemory) — поэтому его нужно явно
+    // включить в identity-карту отдельным расширением max_phys, иначе первая
+    // же запись в консоль после переключения CR3 page-fault'ится в пустоту.
     uint64_t fb_end = bi->FrameBufferBase + bi->FrameBufferSize;
     if (fb_end > max_phys) max_phys = fb_end;
 
@@ -184,12 +161,10 @@ int map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
         uint64_t pt_phys = pmm_alloc_page();
         if (!pt_phys) return -1;
 
-        // Все 512 записей здесь — ещё нерасщеплённая identity-память (та же
-        // физическая страница, что виртуальный адрес), пока ниже под
-        // PT_INDEX(virt) одну из них не перезапишут под конкретный запрос
-        // вызывающего — помечаем ИХ ВСЕ как общие, чтобы
-        // free_user_address_space() знал, что их нельзя отдавать обратно в
-        // pmm (см. PAGE_IDENTITY_SHARED, paging.h).
+        // Все 512 записей пока нерасщеплённая identity-память (phys==virt);
+        // ниже под PT_INDEX(virt) одну перезапишут под реальный запрос.
+        // Помечаем все PAGE_IDENTITY_SHARED, чтобы free_user_address_space()
+        // не отдавал их обратно в pmm (см. paging.h).
         pt_entry_t *pt = (pt_entry_t*)phys_to_virt(pt_phys);
         for (int i = 0; i < 512; i++) {
             pt[i] = paddr_to_entry(phys_base + i * PAGE_SIZE, pde_flags | PAGE_IDENTITY_SHARED);
@@ -272,13 +247,11 @@ void unmap_page(uint64_t virt) {
     
     uint64_t phys = *pte & 0x000FFFFFFFFFF000ULL;
     if (phys) {
-        // PAGE_MMAP_SHARED (v0.8-мост, пункт 4, shm.h) — страница общая с
-        // другим процессом через MAP_SHARED; реальное pmm_free_page()
-        // внутри shm_release() случится только когда ПОСЛЕДНИЙ процесс её
-        // отпустит, не раньше. shm_find_region_by_page() вернёт -1, если
-        // область ещё не зарегистрирована (sys_mmap() откатывается после
-        // частичной неудачи ДО вызова shm_create() — см. его комментарий)
-        // — тогда ведём себя как обычно.
+        // PAGE_MMAP_SHARED — страница общая через MAP_SHARED (shm.h);
+        // pmm_free_page() внутри shm_release() происходит только когда её
+        // отпустит ПОСЛЕДНИЙ процесс. Если область ещё не зарегистрирована
+        // (sys_mmap() откатился до shm_create()), shm_find_region_by_page()
+        // вернёт -1 — тогда освобождаем как обычно.
         if (*pte & PAGE_MMAP_SHARED) {
             int id = shm_find_region_by_page(phys);
             if (id >= 0) shm_release(id);
@@ -292,9 +265,8 @@ void unmap_page(uint64_t virt) {
     invlpg(virt);
 }
 
-// Как get_physical_address(), но работает с ЛЮБЫМ адресным пространством
-// по его физическому PML4, а не только с текущим (активным по CR3) —
-// через identity mapping, без переключения CR3.
+// Как get_physical_address(), но для ЛЮБОГО адресного пространства по его
+// физическому PML4 (через identity mapping, без переключения CR3).
 uint64_t get_physical_address_in_pml4(uint64_t pml4_phys, uint64_t virt) {
     pt_entry_t *pml4 = (pt_entry_t*)phys_to_virt(pml4_phys);
     if (!pml4) return 0;
@@ -320,14 +292,12 @@ uint64_t get_physical_address_in_pml4(uint64_t pml4_phys, uint64_t virt) {
     }
 }
 
-// Проверяет, что 4KB-страница, содержащая virt, отображена в pml4_phys и
-// доступна из ring3: PAGE_USER должен стоять на каждом уровне трансляции —
-// "низкий/канонический адрес" сам по себе ничего не доказывает, код ядра
-// (без PAGE_USER) и пользовательская память лежат в одном диапазоне.
-// need_write дополнительно требует PAGE_WRITE на листовой записи (PDE для
-// huge-страницы, иначе PTE — расщепление huge-страницы по частям при первом
-// обращении означает, что разные 4KB одного 2MB-региона могут иметь разные
-// флаги).
+// Проверяет, что 4KB-страница с virt отображена в pml4_phys и доступна из
+// ring3: PAGE_USER должен стоять на каждом уровне трансляции (канонический
+// адрес сам по себе ничего не доказывает, код ядра и пользовательская память
+// лежат в одном диапазоне). need_write дополнительно требует PAGE_WRITE на
+// листовой записи (PDE для huge-страницы, иначе PTE — при расщеплении разные
+// 4KB одного 2MB-региона могут иметь разные флаги).
 int is_user_accessible(uint64_t pml4_phys, uint64_t virt, int need_write) {
     pt_entry_t *pml4 = (pt_entry_t*)phys_to_virt(pml4_phys);
     if (!pml4) return 0;
@@ -358,10 +328,9 @@ int is_user_accessible(uint64_t pml4_phys, uint64_t virt, int need_write) {
     return 1;
 }
 
-// То же самое для целого диапазона [addr, addr+len) — проверяет КАЖДУЮ
-// затронутую 4KB-страницу отдельно, а не только первую/последнюю (см.
-// комментарий у is_user_accessible() про расщепление huge-страниц).
-// len==0 тривиально валиден (нечего проверять).
+// То же для диапазона [addr, addr+len): проверяет КАЖДУЮ затронутую
+// 4KB-страницу отдельно (huge-страницы могут быть расщеплены по-разному).
+// len==0 тривиально валиден.
 int is_user_range_valid(uint64_t pml4_phys, uint64_t addr, uint64_t len, int need_write) {
     if (len == 0) return 1;
 
@@ -382,11 +351,9 @@ uint64_t get_physical_address(uint64_t virt) {
     return get_physical_address_in_pml4(get_current_pml4(), virt);
 }
 
-// Раньше PML4[0] всех процессов указывал на ОДИН общий kernel_pdpt/PD — когда
-// ELF одного процесса расщеплял huge-страницу под свой код, это меняло
-// identity map сразу для всей системы, и другие процессы падали в page fault
-// на уже отданных под что-то другое физических страницах. Даём каждому
-// процессу приватную копию PDPT+PD (leaf-записи huge-страниц — по значению).
+// Раньше PML4[0] процессов указывал на общий kernel_pdpt/PD — расщепление
+// huge-страницы одним процессом (ELF) ломало identity map всем остальным.
+// Даём каждому процессу приватную копию PDPT+PD (huge-записи — по значению).
 void clone_low_identity_map(uint64_t dest_pml4_phys) {
     pt_entry_t *dest_pml4 = (pt_entry_t*)phys_to_virt(dest_pml4_phys);
 
@@ -413,32 +380,19 @@ void clone_low_identity_map(uint64_t dest_pml4_phys) {
     dest_pml4[0] = paddr_to_entry(new_pdpt_phys, PAGE_PRESENT | PAGE_WRITE);
 }
 
-// Единственная функция, разбирающая PML4 целиком — обходит пользовательскую
-// половину (индексы 0-255) PDPT->PD->PT, освобождает каждую присутствующую
-// физическую страницу (листовую и промежуточные таблицы), затем сам PML4.
-// Kernel space (256-511) не трогает — общая между процессами.
+// Единственная функция, разбирающая PML4 целиком: обходит пользовательскую
+// половину (0-255) PDPT->PD->PT, освобождает каждую присутствующую физическую
+// страницу и промежуточные таблицы, затем сам PML4. Kernel space (256-511,
+// общий между процессами) не трогает.
 //
-// PML4[0] — особый случай: рядом с настоящей памятью процесса там может
-// лежать нерасщеплённая huge-страница из clone_low_identity_map() (общая
-// identity-копия ядра, освобождать нельзя — см. PAGE_HUGE-ветку ниже), а
-// после расщепления такой huge-страницы под конкретный адрес процесса
-// соответствующая PT содержит смесь: одна запись — реальная страница
-// процесса, остальные 511 — нетронутые identity-копии (PAGE_IDENTITY_SHARED,
-// проставляется в map_page()/map_page_in_pml4() при расщеплении — см.
-// paging.h). Раньше вместо явного бита использовалось сравнение
-// leaf_phys==leaf_virt ("у нетронутой identity-записи физический адрес
-// совпадает с виртуальным, у настоящей pmm_alloc_page()-страницы это
-// совпадение практически невозможно") — но это было верно только пока
-// pmm_alloc_page() монотонно шёл вперёд и никогда не выдавал НИЗКИЕ
-// физические адреса повторно. Как только появился оборот битмапа (см.
-// pmm_alloc_page(), pmm.c) — клонированная fork()'ом копия такой
-// "identity" PT (clone_address_space_deep(), process.c, копирует ВСЕ 512
-// записей в НОВЫЕ физические страницы, включая эти 511 "обёрнутых") вполне
-// может получить от pmm_alloc_page() низкий физический адрес, случайно
-// совпадающий с виртуальным — и тогда эта СОБСТВЕННАЯ, уже ни с кем не
-// общая страница ребёнка никогда не освобождалась бы: постоянная утечка
-// ~2MB на каждый fork()+exec(), в точности то, что и наблюдалось. Явный бит
-// не зависит от numeric coincidence вообще.
+// PML4[0] — особый случай: рядом с памятью процесса может лежать общая
+// нерасщеплённая identity-huge-страница из clone_low_identity_map() (не
+// освобождаем, см. PAGE_HUGE-ветку), а после расщепления соответствующая PT
+// содержит смесь реальных страниц процесса и нетронутых identity-копий
+// (помечены PAGE_IDENTITY_SHARED в map_page()/map_page_in_pml4()). Используется
+// именно этот бит, а не сравнение физического/виртуального адресов — с
+// оборотом битмапа pmm_alloc_page() такое сравнение может случайно совпасть и
+// для настоящей, уже собственной страницы ребёнка.
 void free_user_address_space(uint64_t pml4_phys) {
     pt_entry_t *pml4 = (pt_entry_t*)phys_to_virt(pml4_phys);
     if (!pml4) return;

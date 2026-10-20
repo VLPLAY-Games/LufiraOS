@@ -2,7 +2,7 @@
 
 This document describes the interactive shell and command set of LufiraOS. **As of v0.7, the shell is no longer kernel code.** It is a real ring-3 ELF program, `shell.elf`, built in a separate sibling repository, [`lufira-packages`](https://github.com/VLPLAY-Games/lufira-packages) — and almost every command that used to be a kernel-native built-in is now its own small userspace package in that same repository, talking to the kernel purely through the syscall ABI documented in [`13_syscalls.md`](13_syscalls.md).
 
-**What's still in this repository:** `kernel/shell/shell.c` and `kernel/shell/commands/*.c` still exist in the source tree and are still compiled into `kernel.bin` (see [`05_build_system.md`](05_build_system.md)) — but they are **dead code**. Nothing calls into them anymore; `kernel.c` spawns `/bin/shell.elf` directly on boot (see [`02_kernel_init.md`](02_kernel_init.md#23-create-shell-process)) and never falls back to anything kernel-native. Several commands that existed in that dead code (network, audio, and a handful of diagnostic commands) were never ported to userspace at all — see [What Didn't Make the Move](#what-didnt-make-the-move).
+**What's still in this repository:** `kernel/shell/shell.c` and `kernel/shell/commands/*.c` still exist in the source tree and are still compiled into `kernel.bin` (see [`05_build_system.md`](05_build_system.md)) — but they are **dead code**. Nothing calls into them anymore; `kernel.c` spawns `/bin/shell.elf` directly on boot (see [`02_kernel_init.md`](02_kernel_init.md#23-create-shell-process)) and never falls back to anything kernel-native. The network (`ifconfig`/`ping`/`wget`) and audio (`beep`/`music`/`mixer`) commands that existed in that dead code were dropped during the 0.8.0 userspace split, but are back as of this release — now real `/bin/*.elf` packages in `lufira-packages`, see [Networking](#networking) and [Audio](#audio) below. A handful of diagnostic commands never came back — see [What Didn't Make the Move](#what-didnt-make-the-move).
 
 ---
 
@@ -25,6 +25,8 @@ This document describes the interactive shell and command set of LufiraOS. **As 
    - [USB Mass Storage](#usb-mass-storage)
    - [Color](#color)
    - [System / Power](#system--power)
+   - [Networking](#networking)
+   - [Audio](#audio)
    - [Package Management](#package-management)
 6. [Command Reference](#command-reference)
 7. [What Didn't Make the Move](#what-didnt-make-the-move)
@@ -198,6 +200,26 @@ See [`15_users_permissions.md`](15_users_permissions.md) for the full model.
 
 **`version`, `trap`, and `status` are gone.** None of the old kernel-native diagnostic commands (`version` — kernel build info; `trap` — deliberately trigger a CPU exception; `status` — interrupt/CPU state) were ported; there is no equivalent package and no shell builtin for any of them.
 
+### Networking
+
+Restored this release — see [Overview](#overview) above. All three live in `lufira-packages/user/`, share the IP parse/format helpers in `common/ip_addr.h`, and reach the kernel's networking stack ([`16_networking.md`](16_networking.md)) through the syscalls each file's own comment names, not by talking to the stack directly.
+
+| Command | Syntax | Description |
+|---------|--------|-------------|
+| `ifconfig` | `ifconfig` or `ifconfig <ip> <netmask> <gateway>` | No arguments: prints link state, MAC, and the current `inet`/`netmask`/`gateway` via `SYS_NET_CONFIG_GET`. With all three arguments: sets them via `SYS_NET_CONFIG_SET` (see [`16_networking.md`](16_networking.md#network-configuration) — the DNS server field is left untouched, same as the kernel-native version this replaces). |
+| `ping` | `ping <ip> [count]` | Sends one ICMP Echo Request per iteration (default 4) via the single-shot `SYS_PING` syscall, printing each reply/timeout — the per-sequence loop and output formatting live entirely in `ping.c`, `SYS_PING` itself does just one request-and-wait per call. |
+| `wget` | `wget <ip> <path> [output-filename]` | Builds `http://<ip><path>` and fetches it in one `SYS_NET_FETCH` call (see [`16_networking.md`](16_networking.md#https-client-and-sys_net_fetch)); `http_fetch()` tries `ip_str_to_addr()` on the host before DNS, so a literal IP needs no resolver round-trip. Up to ~2 MiB per fetch (`WGET_FETCH_CAP`, the same ceiling `dlpg` uses for package downloads). |
+
+### Audio
+
+Also restored this release, alongside Networking above. `beep.c`/`music.c` share a tone synthesizer (`common/sound_tone.h`) built on `SYS_SOUND_PLAY_PCM`; all three audio commands check `SYS_SOUND_INFO`'s `available` flag first and print a plain error if no audio driver (AC'97 or HDA, see [`07_drivers.md`](07_drivers.md)) was found at boot.
+
+| Command | Syntax | Description |
+|---------|--------|-------------|
+| `beep` | `beep` | Plays one 440 Hz, 250 ms tone via `sound_play_tone_pcm()`, then `SYS_SOUND_STOP`. |
+| `music` | `music` | Plays a fixed 11-note test melody (the same notes/durations as the old kernel-native `command_music()`'s `test_melody[]`), one `sound_play_tone_pcm()` call per note. |
+| `mixer` | `mixer` or `mixer <0-100>` | No arguments: prints the active driver name, volume, and sample rate from `SYS_SOUND_INFO` (or "offline" if none). With a number: sets volume via `SYS_SOUND_SET_VOLUME`, rejecting anything outside 0–100. |
+
 ### Package Management
 
 | Command | Syntax | Description |
@@ -257,6 +279,12 @@ Also in `lufira-packages/user/`, documented together since they share one patter
 | `devmode` | `devmode <on\|off>` | `/bin/devmode.elf` |
 | `reboot` | `reboot` | `/bin/reboot.elf` |
 | `shutdown` | `shutdown` | `/bin/shutdown.elf` |
+| `ifconfig` | `ifconfig` / `ifconfig <ip> <netmask> <gateway>` | `/bin/ifconfig.elf` |
+| `ping` | `ping <ip> [count]` | `/bin/ping.elf` |
+| `wget` | `wget <ip> <path> [output-filename]` | `/bin/wget.elf` |
+| `beep` | `beep` | `/bin/beep.elf` |
+| `music` | `music` | `/bin/music.elf` |
+| `mixer` | `mixer` / `mixer <0-100>` | `/bin/mixer.elf` |
 | `dlpg` | `dlpg <subcommand> ...` | `/bin/dlpg.elf` — see [`17_package_manager.md`](17_package_manager.md) |
 | `df` | `df` | `/bin/df.elf` |
 | `du` | `du [path]` | `/bin/du.elf` |
@@ -271,14 +299,14 @@ These were kernel-native commands before v0.7 and have **no userspace equivalent
 
 | Removed command(s) | Why it's gone |
 |---------------------|----------------|
-| `ifconfig`, `ping`, `wget` | Networking (see [`16_networking.md`](16_networking.md)) never got a general-purpose syscall for raw sockets/ICMP/interface configuration — only `SYS_NET_FETCH` exists, a single blocking "fetch this URL" call, and its only caller today is `dlpg sync`/`upgrade` (see [`17_package_manager.md`](17_package_manager.md)). There's no package that exposes `SYS_NET_FETCH` as a general-purpose command. |
-| `beep`, `mixer`, `music` | Audio (`kernel/drivers/sound/ac97.c`) has no syscall surface at all — the AC'97 driver is still kernel-internal-only, and nothing exposes it to userspace. |
 | `version`, `trap`, `status` | Diagnostic/demo commands with no clear userspace replacement priority; simply not ported. |
 | `edit` | Append-to-file; superseded in spirit by `write` (full overwrite) but never itself ported. |
 | `colors` (plural) | The palette-table display command; `color`/`fg`/`bg`/`reset` (the ones that actually *change* color) were ported, this purely informational one was not. |
 | `rename` | Not a separate command anymore — `mv` absorbed its logic but the old shell's second name for the same command didn't carry over. |
 
-The shell's own source comment states this plainly: *"Network/sound still hit kernel-internal functions without a syscall — not ported to packages or here; typing such a command honestly answers 'unknown command,' like any other not-found program."*
+**`ifconfig`/`ping`/`wget` and `beep`/`music`/`mixer` used to be listed here too** (dropped in the 0.8.0 userspace split, same as everything else in this table) — they're back as of this release, now real packages: see [Networking](#networking) and [Audio](#audio) above. What made it possible is new this release too: `SYS_NET_CONFIG_GET`/`SET`, `SYS_PING`, and `SYS_SOUND_INFO`/`SET_VOLUME`/`PLAY_PCM`/`STOP` are all v0.9.0 additions to the syscall ABI (see [`13_syscalls.md`](13_syscalls.md)) — before this release there genuinely was no syscall for any of this, exactly as the old "no syscall surface" explanation used to say.
+
+`lufira-packages/shell/shell.c`'s own top-of-file comment has been updated to match: it used to read *"Network/sound still hit kernel-internal functions without a syscall — not ported to packages or here; typing such a command honestly answers 'unknown command,' like any other not-found program"*, and now instead notes that sound and networking are "now entirely in userspace too (`beep`/`mixer`/`music` over `SYS_SOUND_*`, `ping`/`ifconfig`/`wget` over `SYS_PING`/`SYS_NET_CONFIG_*`/`SYS_NET_FETCH` — all in `user/`)". The diagnostic/demo commands above (`version`/`trap`/`status`) are what's left that the old wording still describes.
 
 ---
 
@@ -308,11 +336,15 @@ See [`15_users_permissions.md`](15_users_permissions.md) for the full on-disk fo
 
 `devmode.elf` wraps `SYS_DEVMODE`, a thin syscall over `devmode_set()`/`devmode_is_enabled()` (`system/devmode/`) — see [`04_logging.md`](04_logging.md) for the full design. The kernel-side logging behavior itself is unchanged by any of this; only how userspace flips the switch changed.
 
+### Networking and Audio
+
+`ifconfig`/`ping`/`wget` wrap `SYS_NET_CONFIG_GET`/`SYS_NET_CONFIG_SET`/`SYS_PING`/`SYS_NET_FETCH` over the kernel's network stack — see [`16_networking.md`](16_networking.md), which also covers the RTL8139/e1000/e1000e NIC drivers and the DHCP client these commands sit on top of. `beep`/`music`/`mixer` wrap `SYS_SOUND_INFO`/`SYS_SOUND_SET_VOLUME`/`SYS_SOUND_PLAY_PCM`/`SYS_SOUND_STOP` over whichever sound driver (AC'97 or Intel HDA) `sound_init()` found at boot — see [`07_drivers.md`](07_drivers.md). Both command groups were missing from `lufira-packages` since the 0.8.0 userspace split, and for good reason until now: `SYS_NET_CONFIG_GET`/`SET`, `SYS_PING`, and all four `SYS_SOUND_*` syscalls are new in v0.9.0 (see [`13_syscalls.md`](13_syscalls.md)) — there was no syscall for any of this before, so there was nothing for a userspace package to wrap.
+
 ---
 
 ## Conclusion
 
-The interactive shell and almost all of the command set it drives moved out of the kernel binary entirely in v0.7 — `shell.elf` is an ordinary preemptible userspace process, and the roughly forty commands it can run are independent, dynamically-linked packages in a separate repository, installed and updated through the package manager described in [`17_package_manager.md`](17_package_manager.md). The syscall ABI (SYS_OPEN/SYS_MKDIR/SYS_PSLIST/SYS_SU/…, see [`13_syscalls.md`](13_syscalls.md)) is what makes this possible: every one of these packages does exactly what the old kernel-native command used to do, just through a syscall instead of a direct function call inside the kernel. A handful of commands — mostly ones needing a syscall surface that doesn't exist yet (networking, audio) — didn't make the move and are simply gone; see [What Didn't Make the Move](#what-didnt-make-the-move).
+The interactive shell and almost all of the command set it drives moved out of the kernel binary entirely in v0.7 — `shell.elf` is an ordinary preemptible userspace process, and the (now more than forty) commands it can run are independent, dynamically-linked packages in a separate repository, installed and updated through the package manager described in [`17_package_manager.md`](17_package_manager.md). The syscall ABI (SYS_OPEN/SYS_MKDIR/SYS_PSLIST/SYS_SU/…, see [`13_syscalls.md`](13_syscalls.md)) is what makes this possible: every one of these packages does exactly what the old kernel-native command used to do, just through a syscall instead of a direct function call inside the kernel. Networking and audio commands took the longest path back — dropped in the 0.8.0 split, they're only restored as of this release (see [Networking](#networking) and [Audio](#audio)) — but a handful of mostly-diagnostic commands still haven't made the move and are simply gone; see [What Didn't Make the Move](#what-didnt-make-the-move).
 
 For more details, refer to the source code in this repository's `kernel/system/syscall/syscall.c` (for what each syscall actually does) and the sibling `lufira-packages` repository's `shell/shell.c`, `base/`, and `user/` (for what each command actually does with it).
 

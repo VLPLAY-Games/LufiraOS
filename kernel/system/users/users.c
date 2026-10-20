@@ -342,11 +342,9 @@ int users_set_password(const char *name, const char *new_password) {
 }
 
 // Хэш заводского пароля root'а ("toor") из tools/seed/passwd, пересчитанный
-// с ЕГО ЖЕ солью — сравнение просто "хэш совпадает с тем, что реально
-// хранится у root СЕЙЧАС" даёт неверный результат после смены соли без
-// смены пароля (users_set_password() всегда меняет и то, и другое вместе,
-// так что этого на практике не бывает, но явная проверка через
-// salted_password_hash(root.password_salt, "toor") устойчива к этому в любом случае).
+// с ЕГО ЖЕ солью — прямое сравнение "хэш совпадает с текущим" было бы
+// некорректно после смены соли без смены пароля (на практике не бывает,
+// users_set_password() меняет оба сразу, но так надёжнее).
 int users_root_has_default_password(void) {
     user_entry_t root;
     if (users_lookup_by_uid(0, &root) != 0) return 0;

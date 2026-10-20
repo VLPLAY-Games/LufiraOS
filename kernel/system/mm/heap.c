@@ -17,10 +17,8 @@ typedef struct block_header {
 static block_header_t *heap_start = NULL;
 static uint64_t heap_initialized = 0;
 
-// kmalloc()/kfree() иногда вызываются уже ИЗНУТРИ обработчика IRQ, где
-// прерывания уже отключены самим CPU — запоминаем реальное состояние
-// EFLAGS.IF на захвате и восстанавливаем именно его, а не безусловный "sti"
-// (иначе таймерный IRQ мог бы вклиниться и повредить список блоков кучи).
+// kmalloc/kfree могут вызываться из обработчика IRQ (прерывания уже отключены) —
+// сохраняем реальный EFLAGS.IF и восстанавливаем именно его, а не просто "sti".
 static inline uint64_t heap_lock(void) {
     uint64_t flags;
     asm volatile("pushfq; popq %0" : "=r"(flags) :: "memory");
@@ -176,8 +174,7 @@ void kfree(void *ptr) {
     heap_unlock(flags);
 }
 
-// Суммирует размеры FREE/USED блоков по списку (для команды free) — та же
-// цепочка block_header_t, что heap_dump() уже обходит для отладки.
+// Суммирует размеры FREE/USED блоков (для команды free) — обходит тот же список, что и heap_dump().
 void heap_get_stats(uint64_t *used_out, uint64_t *free_out) {
     uint64_t used = 0, free_bytes = 0;
     uint64_t flags = heap_lock();

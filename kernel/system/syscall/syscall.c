@@ -2052,7 +2052,7 @@ void syscall_init(void) {
     // Число не выводится из syscall.h автоматически (нет единого SYS_COUNT —
     // номера SYS_* просто #define'ы) — бумить вручную при добавлении нового
     // syscall'а.
-    DLOG("[SYSCALL] 67 system calls registered\n");
+    DLOG("[SYSCALL] 75 system calls registered\n");
 }
 
 // ========== ДИСПАТЧЕР ==========

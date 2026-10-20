@@ -2,6 +2,145 @@
 
 All notable changes to LufiraOS are documented in this file.
 
+## [0.9.0] - 2026-10-17
+
+Mostly a storage/hardware-support release: two new disk controllers (AHCI,
+NVMe), three new filesystem drivers (ext2/ext4, exFAT, RAMFS), Intel HDA
+audio, legacy BIOS boot alongside UEFI, a second Intel NIC family
+(e1000/e1000e) with DHCP, and real FPU/XMM support in the libc — the last of
+which is what makes the release's other headline possible: a port of
+**Doom** (`doomgeneric`), playable from the desktop with sound. The GUI
+builder (`LufiraOS-Builder`) grew a hardware-selection UI (which audio/net/
+disk device to build for) and pins fresh checkouts to the latest released
+tag instead of whatever commit HEAD happens to be. A long tail of
+reliability fixes — audio latency, an HDA verb timeout, a log-interleaving
+race, AHCI/NVMe boot stalls, a real-hardware input hang — came out of
+actually exercising all of the above.
+
+### Added
+
+- **AHCI and NVMe disk drivers** (`kernel/drivers/disk/ahci.c`, `nvme.c`),
+  alongside the existing legacy ATA PIO path — `--disk-mode ahci|nvme|ide`
+  in `LufiraOS-Builder`.
+- **RAMFS** (`kernel/fs/ramfs/`) and **ext2/ext4** (`kernel/fs/ext2/`) and
+  **exFAT** (`kernel/fs/exfat/`) filesystem drivers, alongside LufiraFS and
+  FAT.
+- **Intel HDA audio driver** (`kernel/drivers/sound/hda.c`), alongside the
+  existing AC'97 driver — CORB/RIRB command rings, DMA playback. Builder
+  gained an `--audio ac97|hda` choice.
+- **Legacy BIOS boot**, alongside UEFI (`boot_legacy/`: `stage1.asm`/
+  `stage2.asm`) — same kernel image, a second boot path for firmware
+  without UEFI support.
+- **USB hotplug** — `xhci_poll_hotplug()` detects device attach/detach after
+  boot, not just devices present at `xhci_init()` time.
+- **FPU/XMM support in the libc** — `libc/src/math.c` is the first libc
+  source file built *without* `-mgeneral-regs-only` (real `double` needs
+  the SysV ABI's XMM registers); the kernel already saved/restored the
+  FXSAVE area on every context switch, so this was safe to turn on. What
+  `doomgeneric`'s fixed-point-averse renderer needed to run at all.
+- **Serial UART (16550)**, **HPET**, and **CMOS RTC** drivers
+  (`kernel/drivers/serial/`, `kernel/system/timer/hpet.c`, `rtc.c`).
+- **Intel e1000/e1000e NIC drivers**, alongside RTL8139, plus a **DHCP**
+  client (`kernel/net/dhcp.c`) — networking no longer requires a static IP.
+- **Doom** — a `doomgeneric` port (`games/doom/`) with sound, launched as a
+  fullscreen GUI app from the desktop (`wm.c`'s `launch_fullscreen_app()`
+  hands the WM registration to the game process and takes it back on exit);
+  installable via `dlpg` from a new "games" package category.
+- **Mounted USB/FAT drives no longer read the whole device into RAM up
+  front** for exFAT; the same streaming change landed for mounts in
+  `lufira-packages`' `mount` command.
+- **Settings app** (`lufira-packages`) gained an **About** tab (OS name,
+  version, build date, developer) and a scrollable installed-packages list
+  (previously clipped past a handful of entries).
+- **Per-package kernel-version requirements** — `lufira-packages`'
+  `index.json` now declares which kernel version(s) each package needs;
+  `dlpg` and `LufiraOS-Builder` both check it before installing/building.
+- **`dlpg`'s installed-package table grew from 32 to 64 entries**
+  (`MAX_INSTALLED`), ahead of the ~49-package repository size.
+- **`ifconfig`/`wget`/`beep`/`music`/`ping`/`mixer`** shell commands,
+  previously dropped during the 0.8.0 userspace-split, restored in
+  `lufira-packages`.
+- **`LufiraOS-Builder` GUI**: per-component hardware pickers (AC'97 vs HDA,
+  which NIC, which disk controller); a fresh clone now pins itself to the
+  latest released tag of `LufiraOS`/`lufira-packages` instead of building
+  whatever commit HEAD happens to be; Arch Linux OVMF firmware paths
+  (`edk2-ovmf` package) added to the auto-detection list.
+
+### Fixed
+
+- **AC'97 audio had a noticeable playback delay.** The ring-buffer producer
+  could run arbitrarily far ahead of the hardware `CIV` register; capped
+  how far ahead it's allowed to get (`AC97_STREAM_MAX_LOOKAHEAD_PAGES`),
+  bounding worst-case latency instead of only guarding against a full-wrap
+  collision.
+- **Debug-mode boot log occasionally printed two lines merged into one.**
+  Timer-IRQ-driven log calls (from `usb_poll()`) could interleave with the
+  kernel's own foreground `printf()` — neither had interrupt-disable
+  protection around the shared cursor state. Fixed with the same
+  save-EFLAGS/cli/restore pattern already used by the heap and console
+  write locks.
+- **AHCI/NVMe boot was much slower than IDE, especially visible as
+  text-rendering stalls during Debug-mode init; NVMe sometimes failed to
+  initialize at all** (`[NVMe] Namespace LBA size unsupported`, falling
+  back to legacy ATA PIO). Three compounding causes: fixed-iteration busy
+  waits that are far too slow under QEMU/TCG emulation (replaced with a
+  fast-spin-then-PIT-calibrated-wait hybrid in `ahci.c`/`nvme.c`/`disk.c`);
+  a false-positive legacy-ATA device-presence check (QEMU's "pc" chipset
+  always instantiates an inert PIIX IDE controller, so the old floating-bus
+  test reported "present" even with no real drive — replaced with the
+  OSDev-standard register-latch probe); and `lufirafs_sync()`'s dirty-block
+  set growing unboundedly once writes started failing, re-walked on every
+  `klog()` call. NVMe's own Identify-Namespace read could also observe a
+  torn DMA payload (an impossible `lbads==0`) despite a successful
+  completion — now retried a few times instead of accepted at face value.
+- **Debug mode printed a stale syscall count** (`27 system calls
+  registered`, later `45`, while 65+ were actually registered) — no single
+  source of truth for the total, just a hand-maintained number next to the
+  registration code.
+- **Real hardware: boot hung completely during mouse initialization and
+  reported "keyboard not found."** `mouse_init()`'s byte-wait loops were
+  unbounded busy-waits — harmless in QEMU (no PS/2 mouse response ever
+  comes, but something always eventually answers), fatal on hardware with
+  no physical PS/2 mouse wired up at all. Bounded the same way the PS/2
+  keyboard path already was.
+- **`LufiraOS-Builder`'s GUI package list was empty on a fresh clone**
+  (worked only with a local `lufira-packages` checkout alongside it) — it
+  now falls back to fetching `index.json` from GitHub, the same source
+  `dlpg sync` uses.
+- **`SYS_NET_FETCH` stalled the whole system for the duration of a fetch.**
+  The network stack's internal blocking waits (`tcp.c`, `dns.c`) used
+  `pit_wait_ms(1)` — a `hlt` in the current process with no call into the
+  scheduler — instead of `process_sleep(1)`, so nothing else got a
+  timeslice until the fetch finished or timed out. Switched to
+  `process_sleep(1)` throughout; `dlpg sync`/`upgrade` and `wget` no longer
+  freeze the rest of the system while they run.
+
+### Known Issues
+
+- **WM partial-repaint (dirty-rect compositing) is implemented but not
+  fully reliable.** `do_win_fill`/`do_win_draw_rect`/`do_win_draw_text` now
+  scope the present step to the changed window region instead of the whole
+  screen, but interacting with some programs still behaves like a full
+  redraw in practice — not resolved, needs further investigation.
+- **Memory usage grows with repeated open/close of GUI programs**,
+  especially noticeable when resizing a window repeatedly — looks like a
+  leak somewhere in the WM or window-buffer lifecycle, not yet
+  root-caused.
+- **Doom's audio over HDA is reduced to short beeps, not continuous
+  playback.**
+- **NVMe is still occasionally flaky**: boot sometimes stalls around
+  `[XHCI] Controller ready`, or the system hangs at a random point later —
+  intermittent, looks like a race condition specific to NVMe disk mode,
+  not yet root-caused.
+- **Real hardware: boot hangs right after "AHCI SATA mode enabled."**
+  Untested-on-real-hardware status continues to apply broadly — see below.
+- **TLS has no certificate chain validation** and no strong entropy source
+  (unchanged from 0.8.0).
+- **Mounted FAT drives are still root-directory-only** (exFAT mounts no
+  longer read the whole device into RAM up front — see Added — but FAT
+  mounts still do).
+- All prior Known Issues not superseded above still apply.
+
 ## [0.8.0] - 2026-10-08
 
 The largest release so far: a package manager, a GUI with a userspace window

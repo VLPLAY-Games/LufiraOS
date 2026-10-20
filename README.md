@@ -1,6 +1,6 @@
 # LufiraOS
 
-![Version](https://img.shields.io/badge/version-0.8.0-blue)
+![Version](https://img.shields.io/badge/version-0.9.0-blue)
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
 ![Status](https://img.shields.io/badge/status-alpha-orange)
 
@@ -8,7 +8,7 @@
 
 This repository is the kernel and UEFI bootloader. Everything that runs in userspace — the shell, coreutils, the package manager, the GUI and its apps — lives in a sibling repository, [lufira-packages](https://github.com/VLPLAY-Games/lufira-packages), built and staged onto a disk image by [LufiraOS-Builder](https://github.com/VLPLAY-Games/LufiraOS-Builder). Standalone syscall-level test programs live in [lufira-tests](https://github.com/VLPLAY-Games/lufira-tests).
 
-# 🚨 VERSION 0.8.0 (ALPHA) 🚨
+# 🚨 VERSION 0.9.0 (ALPHA) 🚨
 
 > ## ⚠️ IMPORTANT NOTICE
 > ### This is a **PRE-ALPHA** hobby operating system.
@@ -20,7 +20,7 @@ This repository is the kernel and UEFI bootloader. Everything that runs in users
 
 # ⚠️ Documentation Notice
 
-> This documentation is provided for LufiraOS v0.8.0 and may contain inaccuracies, outdated information, or minor inconsistencies with the current source code. LufiraOS is an actively developed project, and its architecture and implementation may change over time.
+> This documentation is provided for LufiraOS v0.9.0 and may contain inaccuracies, outdated information, or minor inconsistencies with the current source code. LufiraOS is an actively developed project, and its architecture and implementation may change over time.
 >If a discrepancy exists between this documentation and the source code, the source code should be considered the authoritative reference.
 > Documentation will be continuously reviewed and updated as the project evolves. See [CHANGELOG.md](CHANGELOG.md) for a detailed history of changes.
 
@@ -31,12 +31,13 @@ This repository is the kernel and UEFI bootloader. Everything that runs in users
 | **Architecture** | x86_64 (64-bit) |
 | **RAM** | 64 MB |
 | **Disk Space** | 16 MB (fixed-size disk image: FAT12 ESP + LufiraFS region) |
-| **Firmware** | UEFI (BIOS/Legacy not supported) |
+| **Firmware** | UEFI, or legacy BIOS via `boot_legacy/` |
+| **Disk controller** | ATA PIO, AHCI, or NVMe |
 | **Display** | Any VESA/VBE-compatible framebuffer |
-| **Audio (optional)** | AC'97 compatible audio controller |
-| **Network (optional)** | RTL8139-compatible Ethernet, for the package manager and `wget`/`ping` |
+| **Audio (optional)** | AC'97 or Intel HDA compatible audio controller |
+| **Network (optional)** | RTL8139, Intel e1000, or Intel e1000e compatible Ethernet, for the package manager and `wget`/`ping` |
 
-**Note:** The system runs primarily in QEMU and may not work correctly on real hardware.
+**Note:** The system runs primarily in QEMU and may not work correctly on real hardware — see [Known Issues](#known-issues-and-limitations).
 
 ---
 
@@ -100,7 +101,7 @@ LufiraOS is a from-scratch operating system that boots via UEFI, features a grap
 - **Preemptive Multitasking** – the timer (100 Hz) preempts ring-3 code on a fixed timeslice, so a process that never yields can't stall the system; process states are READY, RUNNING, BLOCKED, SLEEPING, STOPPED, TERMINATED, with `fork()`/`exec()`/`wait()` and POSIX-style signals.
 - **Virtual Memory** – `mmap()`/`munmap()` (anonymous, eager-allocated) back the minimal libc's `malloc()`.
 - **ELF Executable Support** – loads and runs 64-bit ELF programs (ET_EXEC and ET_DYN) with real `argv`/`envp`; ET_DYN packages share one dynamically-linked `libc.so` instead of a static copy each.
-- **System Calls** – 65 syscalls with user-pointer validation and errno-style error codes, covering files, processes, memory, users, USB, signals, a GUI/windowing surface, generic IPC, and networking.
+- **System Calls** – 75 syscalls with user-pointer validation and errno-style error codes, covering files, processes, memory, users, USB, signals, a GUI/windowing surface, generic IPC, and networking.
 - **Mailbox IPC** – a generic per-process message mailbox (`SYS_IPC_SEND`/`RECV`), not GUI-specific; the window manager's own client protocol is built on top of it in userspace.
 - **Users & Permissions** – Unix-like `uid`/`gid`/9-bit permission model with persistent accounts (`/etc/passwd`, `/etc/group`).
 - **Package Manager** – `.lpg` packages, installed/updated/removed by `dlpg`, which can also sync and upgrade straight from a GitHub-hosted index over HTTPS.
@@ -142,7 +143,7 @@ LufiraOS is a from-scratch operating system that boots via UEFI, features a grap
 - **Virtual Memory**
   - `mmap()`/`munmap()` — anonymous, eager-allocated, per-process region tracking, `PROT_READ`/`PROT_WRITE`/`PROT_EXEC` enforced via the NX bit.
 
-- **System Calls (65 implemented)**
+- **System Calls (75 implemented)**
   - File operations: `open`, `close`, `read`, `write`, `seek`, `pipe`, `dup2`, `mkdir`, `rmdir`, `unlink`, `readdir`.
   - Process control: `exit`, `getpid`, `sleep`, `kill`, `yield`, `fork`, `exec`, `wait`, signals (`sigaction`, `sigreturn`, `alarm`), foreground tracking.
   - Memory: `mmap`, `munmap`.
@@ -159,6 +160,7 @@ LufiraOS is a from-scratch operating system that boots via UEFI, features a grap
   - Dynamically linked as a shared `libc.so`, cached by the kernel after first load — packages no longer each carry a static copy.
   - Arena-based `malloc`/`free` built on `mmap`.
   - A `string.h` subset and a small `printf` (`%d %u %x %s %c %p %l*`).
+  - `math.c` — the first libc source built with real FPU/XMM support (SysV `double`), needed by Doom's renderer; the rest of the libc stays on `-mgeneral-regs-only`.
 
 - **Users, Groups & Permissions**
   - Unix-like `uid`/`gid`/9-bit permission model enforced on every file/directory operation; root (`uid` 0) bypasses all checks.
@@ -172,33 +174,38 @@ LufiraOS is a from-scratch operating system that boots via UEFI, features a grap
   - Dirty block tracking and flushing back to disk.
   - Full path resolution (multi-level directories, per-process cwd) and directory operations (`mkdir`, `rm`, `opendir`, `readdir`).
   - Host-side `mkfs_lufirafs` tool for formatting/populating the disk image at build time.
-  - **FAT driver** (`kernel/fs/fat/`) — `mount`/`unmount` a USB flash drive's FAT12/16/32 filesystem (read/write) under a path prefix (e.g. `/mnt/usb0`), wired straight into the VFS: ordinary `open`/`read`/`write`/`mkdir`/`unlink`/`readdir`/`cat`/`cp`/`ls`/`rm` work on it directly, no separate mount-specific commands needed. Root-directory-only per mount (no subdirectory traversal on the flash drive yet) and the whole device image is read into RAM up front.
+  - **FAT driver** (`kernel/fs/fat/`) — `mount`/`unmount` a USB flash drive's FAT12/16/32 filesystem (read/write) under a path prefix (e.g. `/mnt/usb0`), wired straight into the VFS: ordinary `open`/`read`/`write`/`mkdir`/`unlink`/`readdir`/`cat`/`cp`/`ls`/`rm` work on it directly, no separate mount-specific commands needed. Root-directory-only per mount (no subdirectory traversal on the flash drive yet).
+  - **ext2/ext4** (`kernel/fs/ext2/`), **exFAT** (`kernel/fs/exfat/`), and **RAMFS** (`kernel/fs/ramfs/`) drivers, alongside LufiraFS and FAT. Unlike FAT, exFAT mounts no longer read the whole device into RAM up front.
 
 - **Networking**
-  - **Ethernet/ARP/IPv4/ICMP/TCP** — a polled (no interrupts) stack over an RTL8139 driver; TCP does stop-and-wait retransmission and a real advertised receive window (no congestion control).
+  - **Ethernet/ARP/IPv4/ICMP/TCP** — a polled (no interrupts) stack over RTL8139, Intel e1000, or Intel e1000e; TCP does stop-and-wait retransmission and a real advertised receive window (no congestion control).
+  - **DHCP** — automatic IP configuration, alongside the existing static-IP option.
   - **UDP + DNS** — a minimal resolver for turning hostnames into IPv4 addresses, so networking no longer requires literal IPs.
   - **TLS 1.2, from scratch** — ECDHE key exchange over X25519, AES-128-GCM records, SNI, and RSA signature verification of the server's ServerKeyExchange against its own certificate. **No certificate chain / root CA validation** — see [Known Issues](#known-issues-and-limitations).
   - **An HTTP(S) client and `SYS_NET_FETCH` syscall** — one blocking call resolves, connects, requests, and returns a parsed response body to userspace; the package manager's `dlpg sync`/`upgrade` are its first real use.
 
 - **Package Manager**
-  - `.lpg` package format (header, dependency table, file table) and `dlpg` — install/update/list/remove, with dependency version checks and `/etc/packages/` bookkeeping.
+  - `.lpg` package format (header, dependency table, file table) and `dlpg` — install/update/list/remove, with dependency version checks and `/etc/packages/` bookkeeping. Up to 64 installed packages (`MAX_INSTALLED`).
   - `dlpg sync`/`dlpg upgrade` fetch the current package index and newer packages straight from a GitHub-hosted repository over HTTPS.
+  - Each package in the index declares which kernel version(s) it needs; both `dlpg` and `LufiraOS-Builder` check this before installing/building.
   - See [lufira-packages](https://github.com/VLPLAY-Games/lufira-packages) for the actual package sources and the index.
 
 - **GUI + Window Manager**
   - A generic mailbox IPC primitive plus a GUI syscall surface (window create/destroy/fill/draw/poll-event/move, framebuffer present) — the window manager itself is an ordinary userspace process, not kernel code, registered once via `SYS_WM_REGISTER`.
-  - Z-ordering, drag, resize/maximize/minimize, a taskbar with a Start menu (Exit GUI/Shutdown/Reboot), desktop launcher icons, dirty-rectangle compositing for responsive cursor movement.
-  - GUI apps (terminal — wraps a real shell behind pipes, notepad, a file manager, a calculator, system info) in `lufira-packages`.
+  - Z-ordering, drag, resize/maximize/minimize, a taskbar with a Start menu (Exit GUI/Shutdown/Reboot), desktop launcher icons, dirty-rectangle compositing for responsive cursor movement — content updates (fill/draw-rect/draw-text) also track a dirty rectangle to scope the present step to the changed region, though this isn't fully reliable yet (see Known Issues).
+  - **Fullscreen apps** — a launcher can hand `SYS_WM_REGISTER` to a child process (`fork()`, not `exec()` of the WM itself) and block until it exits, reclaiming the registration afterward. Used by **Doom** (a `doomgeneric` port, with sound).
+  - GUI apps (terminal — wraps a real shell behind pipes, notepad, a file manager, a calculator, system info, Doom) in `lufira-packages`.
 
 - **Drivers**
   - **Console** – graphical text output, 256-color palette, scrollback, scaled/tilted big-text rendering (boot logo, shell watermark).
-  - **Disk (ATA PIO)** – sector read/write for primary IDE channel.
+  - **Disk** – ATA PIO (primary IDE channel), plus AHCI and NVMe controllers.
   - **Keyboard (PS/2)** – scancode translation, modifiers, IRQ1.
   - **Mouse (PS/2)** – packet decoding, IRQ12.
-  - **USB (xHCI)** – full command/event/transfer-ring host-controller driver, with a HID boot-protocol keyboard/mouse driver and USB Mass Storage (Bulk-Only Transport) support, unified with PS/2 through a common input dispatcher.
-  - **Network (RTL8139)** – Ethernet driver under the full stack described above.
+  - **USB (xHCI)** – full command/event/transfer-ring host-controller driver, with a HID boot-protocol keyboard/mouse driver, USB Mass Storage (Bulk-Only Transport) support, and hotplug (device attach/detach after boot), unified with PS/2 through a common input dispatcher.
+  - **Network** – RTL8139, Intel e1000, and Intel e1000e Ethernet drivers under the full stack described above.
   - **PCI** – bus enumeration, BAR management.
-  - **AC'97 Audio** – mixer control, DMA playback, tone generation.
+  - **Audio** – AC'97 (mixer control, DMA playback) and Intel HDA (CORB/RIRB command rings).
+  - **Serial (16550 UART)**, **HPET**, and **CMOS RTC** – alongside the PIT.
 
 - **ACPI**
   - RSDP parsing (revision 1 and 2).
@@ -232,7 +239,7 @@ LufiraOS is a from-scratch operating system that boots via UEFI, features a grap
 +--------------------------------------------------+
 \| KERNEL MODE |
 \| +------------------------------------------+ |
-\| | System Calls (65) | |
+\| | System Calls (75) | |
 \| +------------------------------------------+ |
 \| | VFS / LufiraFS Driver / Users&Perms | |
 \| +------------------------------------------+ |
@@ -247,8 +254,9 @@ LufiraOS is a from-scratch operating system that boots via UEFI, features a grap
 \| | Network Stack (Eth/ARP/IP/ICMP/TCP/UDP/ | |
 \| | DNS/TLS 1.2/HTTP(S)) | |
 \| +------------------------------------------+ |
-\| | Drivers (Console, Disk, Keyboard, Mouse, | |
-\| | USB/xHCI+MSD, RTL8139/Net, PCI, AC'97, | |
+\| | Drivers (Console, Disk/AHCI/NVMe, Keyboard, | |
+\| | Mouse, USB/xHCI+MSD, Net, PCI, AC'97/HDA, | |
+\| | Serial/HPET/RTC, | |
 \| | ACPI) | |
 \| +------------------------------------------+ |
 \| | Devmode / klog | |
@@ -312,11 +320,14 @@ This repository's own `make clean` still removes just this repository's build ar
 
 **QEMU Parameters** (as launched by `LufiraOS-Builder`):
 
-- OVMF UEFI firmware (`/usr/share/ovmf/OVMF.fd`)
-- Disk image as IDE drive
+- OVMF UEFI firmware (`/usr/share/ovmf/OVMF.fd`), or legacy BIOS boot
+- Disk image as IDE, AHCI, or NVMe (`--disk-mode`, default `ide`)
 - KVM acceleration when available (`-machine pc,accel=kvm:tcg`), software emulation otherwise
-- 256 MB RAM, AC'97 audio (ALSA backend), RTL8139 NIC via QEMU user-mode networking
+- 256 MB RAM, AC'97 or HDA audio (`--audio`, ALSA backend), RTL8139/e1000/e1000e NIC (`--net-device`) via QEMU user-mode networking
 - Serial output redirected to stdio
+
+The GUI (`gui.py`) exposes the same hardware choices as pickers instead of
+CLI flags.
 
 ---
 
@@ -326,14 +337,14 @@ Detailed documentation is available in the `documentation/` directory:
 
 | **File** | **Description** |
 | -------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| [`01_bootloader.md`](documentation/01_bootloader.md)               | UEFI bootloader, boot modes, BootInfo structure             |
+| [`01_bootloader.md`](documentation/01_bootloader.md)               | UEFI and legacy BIOS bootloaders, boot modes, BootInfo structure |
 | [`02_kernel_init.md`](documentation/02_kernel_init.md)             | Kernel entry point and initialization order                 |
 | [`03_bootinfo.md`](documentation/03_bootinfo.md)                   | BootInfo structure reference                                |
 | [`04_logging.md`](documentation/04_logging.md)                     | Logging macros (log.h), developer mode, and `klog`          |
 | [`05_build_system.md`](documentation/05_build_system.md)           | This repository's build (kernel + bootloader only) — see `LufiraOS-Builder` for image assembly/QEMU |
 | [`06_libraries.md`](documentation/06_libraries.md)                 | System libraries (types, colors, string, etc.) and the shared `libc.so` |
-| [`07_drivers.md`](documentation/07_drivers.md)                     | Device drivers (console, disk, keyboard, mouse, USB/xHCI + Mass Storage, RTL8139, PCI, AC'97) |
-| [`08_filesystem.md`](documentation/08_filesystem.md)               | LufiraFS driver, Virtual Filesystem (VFS), FAT/USB mounting  |
+| [`07_drivers.md`](documentation/07_drivers.md)                     | Device drivers (console, disk/AHCI/NVMe, keyboard, mouse, USB/xHCI + Mass Storage + hotplug, RTL8139/e1000/e1000e, PCI, AC'97/HDA, serial/HPET/RTC) |
+| [`08_filesystem.md`](documentation/08_filesystem.md)               | LufiraFS, ext2/ext4, exFAT, RAMFS, VFS, FAT/USB mounting     |
 | [`09_acpi.md`](documentation/09_acpi.md)                           | ACPI subsystem (RSDP, FADT, shutdown)                       |
 | [`10_cpu_interrupts.md`](documentation/10_cpu_interrupts.md)       | CPU, GDT, IDT, IRQ, TSS, PIT, preemptive scheduling          |
 | [`11_memory_management.md`](documentation/11_memory_management.md) | PMM, Paging, Heap, `mmap`/`munmap`                           |
@@ -341,7 +352,7 @@ Detailed documentation is available in the `documentation/` directory:
 | [`13_syscalls.md`](documentation/13_syscalls.md)                   | All 65 system calls, by category                             |
 | [`14_shell_commands.md`](documentation/14_shell_commands.md)       | The (now userspace) shell and its commands                   |
 | [`15_users_permissions.md`](documentation/15_users_permissions.md) | Users, groups, and file permissions                          |
-| [`16_networking.md`](documentation/16_networking.md)               | Network stack: Ethernet/ARP/IP/ICMP/TCP/UDP/DNS/TLS 1.2/HTTP(S) |
+| [`16_networking.md`](documentation/16_networking.md)               | Network stack: Ethernet/ARP/IP/ICMP/TCP/UDP/DNS/DHCP/TLS 1.2/HTTP(S) |
 | [`17_package_manager.md`](documentation/17_package_manager.md)     | `.lpg` format, `dlpg`, `sync`/`upgrade`                       |
 | [`18_gui_wm.md`](documentation/18_gui_wm.md)                       | Mailbox IPC, the GUI syscall surface, the WM client protocol  |
 
@@ -372,19 +383,22 @@ LufiraOS/
 │   │   └── utils.c            # Console helpers
 │   └── bootinfo.h             # BootInfo structure
 │
+├── boot_legacy/                # Legacy BIOS bootloader (stage1.asm/stage2.asm) — alternative to boot/
+│
 ├── kernel/                    # Kernel sources
 │   ├── kernel.c               # Entry point, initialization
 │   ├── linker.ld              # Linker script
 │   ├── drivers/               # Device drivers
 │   │   ├── console/           # Console driver
-│   │   ├── disk/              # ATA PIO driver
+│   │   ├── disk/              # ATA PIO, AHCI, and NVMe drivers
 │   │   ├── keyboard/          # PS/2 keyboard driver
 │   │   ├── mouse/             # PS/2 mouse driver
-│   │   ├── usb/               # xHCI host controller + USB HID + Mass Storage driver
-│   │   ├── net/                # RTL8139 Ethernet driver
+│   │   ├── usb/               # xHCI host controller + USB HID + Mass Storage driver, with hotplug
+│   │   ├── net/                # RTL8139, Intel e1000, and Intel e1000e Ethernet drivers
+│   │   ├── serial/             # 16550 UART driver
 │   │   ├── input/             # Shared PS/2 + USB HID input dispatcher (also feeds the WM)
 │   │   ├── pci/                # PCI bus driver
-│   │   └── sound/             # AC'97 audio driver
+│   │   └── sound/             # AC'97 and Intel HDA audio drivers
 │   ├── fs/                    # Filesystem
 │   │   ├── lufirafs/          # LufiraFS driver (primary filesystem)
 │   │   │   ├── lufirafs.c            # Core implementation
@@ -392,6 +406,9 @@ LufiraOS/
 │   │   │   ├── lufirafs.h            # Driver API
 │   │   │   └── lufirafs_format.h     # On-disk format (shared with mkfs_lufirafs)
 │   │   ├── fat/                # FAT driver, used by mount/unmount for USB drives
+│   │   ├── exfat/              # exFAT driver
+│   │   ├── ext2/               # ext2/ext4 driver
+│   │   ├── ramfs/              # RAMFS driver
 │   │   └── vfs/                # Virtual Filesystem
 │   │       ├── vfs.c          # VFS core
 │   │       └── vfs.h          # VFS header
@@ -413,9 +430,9 @@ LufiraOS/
 │       ├── ipc/                 # Generic per-process mailbox IPC
 │       ├── mm/                  # Memory management (PMM, Paging, Heap, mmap)
 │       ├── process/             # Process management (preemptive, fork/exec/signals)
-│       ├── syscall/             # System calls (65), including the GUI/FB and net surface
+│       ├── syscall/             # System calls (75), including the GUI/FB and net surface
 │       ├── users/               # User/group database (/etc/passwd, /etc/group)
-│       └── timer/               # PIT timer, preemption timeslice
+│       └── timer/               # PIT, HPET, and CMOS RTC; preemption timeslice
 │
 ├── libc/                      # Minimal userspace C library (built as a shared libc.so)
 │   ├── crt0.S                 # Startup code (_start -> main(argc, argv, envp))
@@ -444,9 +461,11 @@ LufiraOS/
 ## Known Issues and Limitations
 
 - **TLS has no certificate chain validation.** The from-scratch TLS 1.2 client verifies the server actually controls the key in the certificate it presents, but does not check that certificate against any trusted root CA — fine against a naive on-path attacker, not against one who can present their own certificate. No hardware RNG either, so no real forward secrecy. See `documentation/16_networking.md`.
-- **`SYS_NET_FETCH` stalls the whole system for the duration of a fetch** — the same synchronous model `wget` always had; a large download blocks every other process until it completes or times out.
-- **No DHCP.** Static IP configuration plus QEMU SLIRP's built-in DNS forwarder only.
-- **`mount` reads the whole USB device into RAM up front** (capped at 8 MB) — no lazy/streaming FAT access, and only the root directory of a mounted drive is reachable (no subdirectory traversal yet) — see [`08_filesystem.md`](documentation/08_filesystem.md).
+- **`mount` of a FAT drive reads the whole USB device into RAM up front** (capped at 8 MB; exFAT mounts no longer do this) — no lazy/streaming FAT access, and only the root directory of a mounted drive is reachable (no subdirectory traversal yet) — see [`08_filesystem.md`](documentation/08_filesystem.md).
+- **WM dirty-rectangle partial repaint is not fully reliable.** Content updates are supposed to present only the changed region instead of the whole screen, but interacting with some programs still behaves like a full redraw — not resolved, under investigation.
+- **GUI memory usage grows with repeated open/close of programs**, more noticeably when resizing windows — looks like a leak somewhere in the WM or window-buffer lifecycle, not yet root-caused.
+- **Doom's audio over HDA is reduced to short beeps**, not continuous playback.
+- **NVMe disk mode is occasionally flaky** — boot sometimes stalls around USB controller initialization, or the system hangs at a random later point; intermittent, looks like a race condition specific to NVMe, not yet root-caused.
 - **No memory protection beyond paging permissions and mmap's own bookkeeping.** `mmap` is anonymous-only, eagerly allocated, and never reclaims address space after `munmap`.
 - **No setuid/setgid, no multi-group membership, and a non-cryptographic password hash.** The users/permissions model is a straightforward `uid`/`gid`/9-bit implementation, not a hardened one — see [`15_users_permissions.md`](documentation/15_users_permissions.md).
 - **Real hardware is untested.** The system is developed and tested exclusively in QEMU; UEFI/ACPI/USB quirks on real firmware are unknown.
@@ -459,8 +478,8 @@ LufiraOS/
 Contributions are welcome! Here are some areas for improvement:
 
 - **Filesystem**: Long file name (LFN) support, additional filesystem drivers (ext2, ISO9660), LufiraFS indirect-block-chain growth beyond a single indirect block, subdirectory traversal on a mounted USB drive (currently root-directory-only).
-- **Drivers**: AHCI/SATA, graphics acceleration, multi-block USB Mass Storage transfers.
-- **Networking**: DHCP, TLS certificate chain/root-CA validation, a real entropy source, TCP congestion control.
+- **Drivers**: graphics acceleration, multi-block USB Mass Storage transfers, real-hardware AHCI/mouse-init stability.
+- **Networking**: TLS certificate chain/root-CA validation, a real entropy source, TCP congestion control.
 - **Processes**: Copy-on-write address spaces, demand-paged `mmap`.
 - **Security**: setuid/setgid, cryptographically sound password hashing, VFS-level permission enforcement (currently caller-enforced, not VFS-enforced).
 - **Shell**: Redirection, environment variables, scripting (see `lufira-packages`).

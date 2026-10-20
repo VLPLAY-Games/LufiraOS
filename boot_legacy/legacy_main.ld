@@ -1,7 +1,6 @@
-/* legacy_main.ld — тот же приём, что kernel/linker.ld: плоский бинарник,
- * точка входа = самый первый байт (.text.prologue), грузится по
- * фиксированному физическому адресу (должен совпадать с
- * LEGACY_MAIN_LOAD_ADDR в layout.inc). */
+/* legacy_main.ld — как kernel/linker.ld: плоский бинарник, точка входа —
+ * первый байт (.text.prologue), грузится по фиксированному физическому
+ * адресу (должен совпадать с LEGACY_MAIN_LOAD_ADDR в layout.inc). */
 ENTRY(legacy_main)
 
 SECTIONS

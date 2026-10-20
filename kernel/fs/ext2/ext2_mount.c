@@ -25,9 +25,8 @@ typedef struct {
     uint32_t ino;
 } ext2_file_private_t;
 
-// Батчит соседние "грязные" секторы в одну SCSI-команду — дословно тот же
-// приём, что sync_mount_to_usb() в fat_mount.c (своя копия: тот модуль
-// ничего не экспортирует наружу).
+// Батчит соседние "грязные" секторы в одну SCSI-команду — тот же приём, что
+// в fat_mount.c (своя копия: тот модуль ничего не экспортирует).
 static void sync_mount_to_usb(vfs_ext2_mount_t *m) {
     uint32_t total = m->fs.image_size / 512;
     uint32_t lba = 0, written = 0, failed = 0;

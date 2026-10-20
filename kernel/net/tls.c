@@ -358,7 +358,7 @@ static int tls_read_record(uint32_t budget_ticks, uint8_t *out_type,
                 return 0;
             }
             if (pit_get_ticks() >= deadline) return 0;
-            process_sleep(1); // НАЙДЕННЫЙ БАГ — см. net_lock_acquire() в net.h
+            process_sleep(1); // не busy-spin пока ждём данные
         }
     }
 }

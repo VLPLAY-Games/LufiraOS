@@ -33,8 +33,9 @@ This document describes the filesystem subsystem of LufiraOS, which consists of 
 8. [The `mkfs_lufirafs` Tool](#the-mkfs_lufirafs-tool)
 9. [Special Devices](#special-devices)
 10. [FAT and USB Mass Storage Mounting](#fat-and-usb-mass-storage-mounting)
-11. [Dependencies](#dependencies)
-12. [Conclusion](#conclusion)
+11. [Additional Filesystem Drivers (ext2/ext4, exFAT, RAMFS)](#additional-filesystem-drivers-ext2ext4-exfat-ramfs)
+12. [Dependencies](#dependencies)
+13. [Conclusion](#conclusion)
 
 ---
 
@@ -335,7 +336,7 @@ Standard file descriptors (stdin, stdout, stderr) are connected to the console d
 
 The original FAT12/16/32 driver (`kernel/fs/fat/fat.c`/`.h`) sat in the source tree for a long time without being compiled into the kernel at all — dead code. It is now built (`kernel/fs/fat/fat.c` is listed in `KERNEL_C_SOURCES` in the `Makefile`) and used by two shell commands, `mount` and `unmount` (`kernel/shell/commands/mount.c`; full command reference in [`14_shell_commands.md`](14_shell_commands.md)), to read and write a **USB flash drive's** FAT filesystem.
 
-This is **not** a second VFS mount point. LufiraFS remains the only filesystem registered with the VFS (see [Architecture](#architecture)) — `mount`/`unmount` work directly against a single global `fat_fs_t` and the USB Mass Storage driver, entirely outside the VFS layer, the same way `usbinfo`/`usbread`/`usbwrite` already talk to `xhci_msd_*` directly (driver-level details in [`07_drivers.md`](07_drivers.md)).
+This was **not** a second VFS mount point back when FAT was the only mountable format — through v0.8.x, `mount`/`unmount` worked directly against a single global `fat_fs_t`, entirely outside the VFS layer. As of v0.9.0 that is no longer the whole story: with ext2/ext4, exFAT, and RAMFS drivers added (see [Additional Filesystem Drivers](#additional-filesystem-drivers-ext2ext4-exfat-ramfs) below), `vfs_open()`/`vfs_create()`/`vfs_mkdir()`/`vfs_unlink()`/`vfs_lookup()` (`kernel/fs/vfs/vfs.c`) — and their cwd-relative `_at()` counterparts — now each probe the FAT, RAMFS, ext2, and exFAT mount registries, in that order, *before* falling through to LufiraFS. Each driver's `vfs_<fs>_open()`/`vfs_<fs>_mkdir()`/etc. returns `-2` to mean "path isn't under this mount," which just advances the dispatcher to the next candidate; any other return (including an error) is final. So a mounted FAT/ext2/exFAT/RAMFS prefix genuinely sits in front of LufiraFS inside the ordinary VFS call path now, not beside it. `usbinfo`/`usbread`/`usbwrite` are unrelated to any of this and still talk to `xhci_msd_*` directly (driver-level details in [`07_drivers.md`](07_drivers.md)).
 
 **Loading the image.** `fat_init(fs, image, image_size)` expects the *entire* device image already resident in RAM as one flat buffer — there is no lazy or streaming block I/O once mounted. `command_mount()` therefore:
 
@@ -352,6 +353,36 @@ The UEFI ESP partition (see [Disk Layout](#disk-layout)) is still FAT12, but it 
 
 ---
 
+## Additional Filesystem Drivers (ext2/ext4, exFAT, RAMFS)
+
+Added in v0.9.0, alongside the pre-existing LufiraFS and FAT drivers. All three follow the same split as FAT: a format-only driver that doesn't know about USB or the VFS (`ext2.c`, `exfat.c`) plus a `_mount.c` on top providing the VFS/USB glue — the same shape as `fat.c`/`fat_mount.c`. `SYS_MOUNT`/`SYS_UNMOUNT` (see [`13_syscalls.md`](13_syscalls.md#privileged-system-control-31-40)) auto-detect the format instead of taking an explicit choice: `sys_mount()` tries `vfs_fat_mount()`, then `vfs_ext2_mount()`, then `vfs_exfat_mount()` in that fixed order — each driver refuses to mount an image that isn't its own format (bad magic/signature), so exactly one is expected to succeed; `sys_unmount()` probes the same three in the same order to find whichever one actually holds the prefix.
+
+### ext2/ext3/ext4 (`kernel/fs/ext2/ext2.c`, `ext2_mount.c`)
+
+One driver handles ext2, ext3, and ext4 — on disk they're a single format distinguished by feature flags, and a real Linux driver mounts all three the same way, so a separate driver per version would just be duplicated code. Supported:
+
+- Classic block mapping (direct + single- + double-indirect blocks, no triple-indirect — plenty of headroom for ordinary files) for ext2-style inodes.
+- ext4 extent trees (`EXT2_FEATURE_INCOMPAT_EXTENTS`) of **any** depth, but **read/overwrite of an existing mapping only** — extending an extent-mapped file with a brand-new block isn't implemented (`block_for_index()` returns 0 for that case, which the caller treats as an ordinary error, not tree corruption, the same way it already treats classic triple-indirection as unsupported). New files/directories created by this driver (`ext2_create()`/`ext2_mkdir()`) always use classic mapping, which grows without that limitation. `ext2_truncate()` on an extent-mapped file converts it to classic mapping (the extent tree is already empty post-truncate, so there's nothing to lose), after which it can be written like any other file.
+- 64-bit block group descriptors (`EXT2_FEATURE_INCOMPAT_64BIT`), read and written via the descriptor's own `desc_size` rather than `sizeof(ext2_group_desc_t)`.
+
+Not supported — and refused outright at mount time rather than risking silent corruption: group/inode/extent checksums (`RO_COMPAT_GDT_CSUM`/`UNINIT_BG`, `metadata_csum`), and any incompat feature bit outside `EXT2_SUPPORTED_INCOMPAT` (`FILETYPE`, `EXTENTS`, `64BIT`, `MMP`, `FLEX_BG`) — notably `RECOVER`/`JOURNAL_DEV`/`META_BG`/inline-data/encryption. The ext3/ext4 journal itself is never replayed (uncommitted transactions or not) — `HAS_JOURNAL` isn't an error, the driver just reads and writes data directly the way plain ext2 always has, journal untouched.
+
+`ext2_mount.c` mirrors `fat_mount.c`'s architecture (whole image resident in RAM, direct pointer access) but without FAT's root-only restriction — ext2's native inode tree supports real nested-directory lookup. `EXT2_MOUNT_MAX` caps concurrent ext2 mounts at 2, and `MOUNT_MAX_IMAGE_BYTES` (8 MiB) applies here too — the same RAM-headroom reasoning as FAT's identical limit (see [Loading the image](#fat-and-usb-mass-storage-mounting) above).
+
+### exFAT (`kernel/fs/exfat/exfat.c`, `exfat_mount.c`)
+
+exFAT supports real nested directories of arbitrary depth (unlike FAT's root-directory-only limitation), which rules out FAT's "just cache the root" shortcut. Instead, a small registry of directory caches (`EXFAT_DIR_CACHE_SLOTS`, 8 slots, LRU eviction) is keyed by each directory's first cluster; the volume root is an ordinary entry in that same registry, not a special permanent slot.
+
+**exFAT mounting does not read the whole device into RAM up front, unlike FAT** (see [Loading the image](#fat-and-usb-mass-storage-mounting) above, which still does). Only the boot region and FAT table (capped at `EXFAT_META_MAX_BYTES`, 16 MiB) and the Allocation Bitmap (capped at `EXFAT_BITMAP_MAX_BYTES`, 8 MiB — the single source of truth for cluster occupancy, consulted on every allocation/free) are kept resident. File *contents* are never copied into RAM wholesale: `exfat_read_file()`/`exfat_write_file()` read and write directly against the device, cluster by cluster, through the same `exfat_blockdev_t` abstraction `fat_blockdev_t` uses (512-byte blocks, batched and retried in `exfat_mount.c` the same way `ext2_mount.c`/`fat_mount.c` do). This is the "mounted USB/FAT drives no longer read the whole device into RAM up front" change mentioned in the v0.9.0 changelog — it landed for exFAT specifically (and for `lufira-packages`' `mount` command's own streaming path); FAT mounting itself (`fat_init()`, above) is unchanged and still buffers the entire image.
+
+Known, deliberate limitations: file names are ASCII-only (code points < 128) even though exFAT itself stores names in UTF-16, since this kernel works in `char*`; and writes always build cluster chains through the FAT (`NoFatChain` is never set on write), while reads still honor `NoFatChain` on files that already have it set (e.g. written by Windows).
+
+### RAMFS (`kernel/fs/ramfs/ramfs.c`)
+
+A purely in-memory filesystem, mounted by path prefix the same way FAT is (`ramfs_mount(prefix)`), but backed by a real node tree (`kmalloc` per node, a linked list of children per directory) rather than FAT's flat on-disk image — so nested directories of arbitrary depth are supported natively, with none of FAT's root-only restriction. Data does not survive reboot and is never synced anywhere; it's closer to a `tmpfs` than to persistent storage, suited to `/tmp` and similar scratch space. `kernel.c` mounts `/tmp` this way automatically at boot (`ramfs_mount("/tmp")`). Limits: `RAMFS_MAX_MOUNTS` (4 concurrent mounts), `RAMFS_MOUNT_PREFIX_MAX` (32 bytes), `RAMFS_MAX_NAME` (64 bytes per path component).
+
+---
+
 ## Dependencies
 
 | Component | Depends On | Purpose |
@@ -364,6 +395,9 @@ The UEFI ESP partition (see [Disk Layout](#disk-layout)) is still FAT12, but it 
 | LufiraFS VFS Wrapper | LufiraFS Driver, VFS | Bridge between layers |
 | Special Devices | Console | Output operations |
 | FAT Driver (`mount`/`unmount`) | Heap, USB xHCI Mass Storage Driver | Whole-image buffer (`kmalloc`) and block I/O (`xhci_msd_read_block`/`xhci_msd_write_block`) for USB FAT filesystems — see [FAT and USB Mass Storage Mounting](#fat-and-usb-mass-storage-mounting) |
+| ext2/ext4 Driver (`mount`/`unmount`) | Heap, USB xHCI Mass Storage Driver | Whole-image buffer and block I/O, same shape as FAT — see [Additional Filesystem Drivers](#additional-filesystem-drivers-ext2ext4-exfat-ramfs) |
+| exFAT Driver (`mount`/`unmount`) | Heap, USB xHCI Mass Storage Driver | Resident metadata/bitmap buffers only, plus direct per-cluster device I/O — see [Additional Filesystem Drivers](#additional-filesystem-drivers-ext2ext4-exfat-ramfs) |
+| RAMFS Driver | Heap | Node-tree allocation (`kmalloc` per file/directory node), no device I/O at all |
 
 ---
 

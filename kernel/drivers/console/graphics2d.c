@@ -70,9 +70,8 @@ void gfx_blit(int32_t dst_x, int32_t dst_y, const uint32_t *src,
         uint32_t *dst_row = framebuffer + (uint32_t)py * pixels_per_scan_line + (uint32_t)x0;
         memcpy(dst_row, src_row, copy_w * sizeof(uint32_t));
     }
-    // Точный прямоугольник, не весь экран — см. подробный комментарий у
-    // console_mark_dirty_rect() (console.h/.c): именно этот вызов (через
-    // SYS_FB_PRESENT) WM гонит на КАЖДОЕ движение мыши, раньше это
-    // раздувало "грязную" область до целого кадра на каждый тик.
+    // Точный прямоугольник, не весь экран — см. console_mark_dirty_rect()
+    // (console.h/.c): этот вызов (через SYS_FB_PRESENT) WM гонит на каждое
+    // движение мыши.
     console_mark_dirty_rect(x0, y0, (int)copy_w, (int)(y1 - y0));
 }

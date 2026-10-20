@@ -1,18 +1,13 @@
 // math.h — IEEE-754 double-математика через аппаратный FPU (x87 для
-// sin/cos/tan/log*/atan2 — у них нет SSE2-эквивалента, SSE2 sqrtsd для
-// sqrt, обычная double-арифметика для всего остального).
+// sin/cos/tan/log*/atan2, SSE2 sqrtsd для sqrt, обычная арифметика для
+// остального).
 //
 // ВАЖНО: math.c — единственный файл libc, собираемый БЕЗ
-// -mgeneral-regs-only (см. SHARED_LIBC_SOURCES/compile_libc_shared() в
-// lufira-packages/build.py) — именно эта функция под x86-64 SysV ABI
-// обязана передавать/возвращать double через XMM-регистры, что
-// -mgeneral-regs-only запрещает в принципе. Это касается и ЛЮБОГО
-// другого .c-файла (ядра или пакета), который захочет напрямую объявить
-// double/float или вызвать что-то отсюда — ему тоже придётся собираться
-// без -mgeneral-regs-only (см. пример в build.py). Корректность этого при
-// переключении процессов обеспечена заранее: kernel/system/process/
-// process.c уже сохраняет/восстанавливает FXSAVE-область (fpu_save()/
-// fpu_restore()) на каждом switch_to_process() — см. комментарий там же.
+// -mgeneral-regs-only (см. build.py) — x86-64 SysV ABI обязан передавать
+// double через XMM-регистры, что этот флаг запрещает. Любой другой файл,
+// объявляющий double/float напрямую, тоже должен собираться без этого
+// флага. FXSAVE/FXRESTORE при переключении процессов уже обеспечены в
+// process.c (switch_to_process()).
 #pragma once
 
 #define M_E        2.71828182845904523536

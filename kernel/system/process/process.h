@@ -15,23 +15,17 @@
 #define USER_STACK_AREA_START 0x0000700000000000ULL
 
 // Отдельный маленький стек для обработчиков сигналов (SYS_SIGACTION) — один
-// и тот же виртуальный адрес у каждого процесса (не pid-сдвинутый, как
-// USER_STACK_AREA_START) — своя PML4 на процесс, коллизий нет, ребёнку после
-// fork() достаётся автоматически тем же постраничным копированием
-// (clone_address_space_deep()). Нужен отдельный от основного user-стека:
-// context.rsp на момент доставки сигнала может указывать на кернел-стек
-// процесса (прерван внутри блокирующего syscall'а) — недоступен для
-// ring3-обработчика (баг: обработчик падал в page fault на "своём" стеке).
+// и тот же виртуальный адрес у каждого процесса (своя PML4, коллизий нет;
+// fork() копирует автоматически вместе с остальным адресным пространством).
+// Нужен отдельно от основного user-стека: context.rsp на момент доставки
+// сигнала может указывать на кернел-стек процесса (прерван внутри
+// блокирующего syscall'а) — недоступен для ring3-обработчика.
 #define SIGNAL_STACK_AREA_START 0x0000690000000000ULL
 #define SIGNAL_STACK_SIZE (2 * PAGE_SIZE) // печать внутри обработчика (printf) — небольшой запас сверх 1 страницы
-// Было 16KB — тесно для глубокой (хоть и нехвостовой) рекурсии вроде
-// обхода BSP-дерева в порте doomgeneric (R_RenderBSPNode: по одному кадру
-// на узел дерева, глубина ~log2(число узлов), но с учётом всех локальных
-// переменных кадра запас нужен по-честному). Поднято с кратным запасом —
-// 128KB тривиальны на фоне 128-256MB, которые QEMU выделяет этой ОС
-// (lufira_builder/qemu.py), и стек всё ещё выделяется заранее целиком
-// (allocate_user_stack_in() — не по требованию), так что лишние страницы
-// просто занимают физическую память, а не фрагментируют что-то ценное.
+// Поднято со старых 16KB — мало для глубокой рекурсии (BSP-обход в порте
+// doomgeneric, R_RenderBSPNode). 128KB тривиальны на фоне 128-256MB RAM у
+// QEMU, а стек выделяется заранее целиком, так что лишние страницы просто
+// занимают память, не фрагментируя ничего ценного.
 #define USER_STACK_SIZE       (128 * 1024)  // 128KB
 
 // Область под mmap(). Один адрес для всех процессов (в отличие от
@@ -184,17 +178,13 @@ typedef struct process {
     // отдельный от родителя (как и у POSIX fork() message queues не
     // наследуются).
     ipc_mailbox_t mailbox;
-    // FXSAVE/FXRSTOR legacy area (x87/MMX/XMM0-15/MXCSR) — 512 bytes,
-    // MUST be 16-byte aligned (FXSAVE/FXRSTOR #GP on an unaligned operand).
-    // kmalloc() only guarantees 8-byte alignment (heap.c), so fpu_state is
-    // a manually-aligned pointer INTO fpu_state_raw, not a raw kmalloc()
-    // result — fpu_state_raw is what actually gets kfree()'d.
-    // Allocated/initialized to a clean FPU state by alloc_fpu_state() in
-    // process_create()/process_init(); fork() overwrites it with a live
-    // fxsave() of the parent instead (process_fork()). See switch_to_process()
-    // for where it's actually saved/restored on every context switch — the
-    // kernel itself never touches XMM/FPU (-mgeneral-regs-only), but ring3
-    // processes can (and for the planned DOOM port, will).
+    // FXSAVE/FXRSTOR legacy area (x87/MMX/XMM0-15/MXCSR), 512 байт, ДОЛЖЕН
+    // быть выровнен на 16 байт (иначе #GP) — kmalloc() даёт только 8, поэтому
+    // fpu_state — вручную выровненный указатель внутрь fpu_state_raw (именно
+    // его освобождает kfree()). Заполняется чистым состоянием в
+    // alloc_fpu_state() (process_create()/process_init()); fork() заменяет
+    // его живым fxsave() родителя. Сохраняется/восстанавливается в
+    // switch_to_process() на каждом переключении.
     uint8_t *fpu_state;
     void *fpu_state_raw;
     struct process *next;

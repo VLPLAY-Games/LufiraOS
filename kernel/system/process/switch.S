@@ -118,15 +118,10 @@ context_switch:
     # Restore RDI before RSI
     movq 40(%rsi), %rdi
 
-    # Prepare RFLAGS restore value. Pushed straight from memory (NOT via
-    # %rax as a scratch register, like before) — %rax was just restored to
-    # its real context value a few lines up (0(%rsi)), and routing RFLAGS
-    # through it here clobbered that value right before the jmp below. For
-    # a freshly-forked child this %rax IS the fork() return value (0, so it
-    # takes the "child" branch) — with the clobber it silently became
-    # whatever RFLAGS happened to be (always non-zero, e.g. 0x202+), so the
-    # child always fell through to the "parent" branch instead ("Parent
-    # process here!" printed twice, "Child process here!" never printed).
+    # RFLAGS пушится прямо из памяти, НЕ через %rax как временный регистр:
+    # %rax уже восстановлен в реальное значение контекста (0(%rsi), для
+    # только что forked ребёнка это возвращаемое значение fork()) —
+    # маршрутизация через него затёрла бы это значение перед jmp ниже.
     pushq 136(%rsi)
 
     # Restore RSI LAST
@@ -143,20 +138,13 @@ context_switch:
 # ============================================================
 # void context_enter_ring3(process_context_t* old, process_context_t* new)
 #
-# Same as context_switch() (identical SAVE half, same layout above), except
-# the RESTORE half performs a genuine ring0->ring3 transition via iretq
-# instead of a same-privilege jmp. Used exactly once per process: the very
-# first time it's ever activated (process_t.first_run in process.c), or
-# whenever exec() replaces a process's image (elf_exec_replace() in elf.c) —
-# both cases are "a new program's first instruction," which today ran with
-# kernel privilege until the process's first syscall RETURN (the only other
-# place in the kernel that does a real iretq back to ring3 is
-# syscall_entry.S — same CS/SS selectors, 0x33/0x2B, reused here).
-#
-# No r11-as-jump-target dance needed here (unlike context_switch): nothing
-# below needs a scratch register protected across the final transfer, since
-# the transfer is iretq consuming a frame already built on the stack, not a
-# jmp through a register.
+# Как context_switch() (идентичная половина SAVE), но RESTORE делает
+# настоящий переход ring0->ring3 через iretq вместо jmp на том же уровне
+# привилегий. Используется ровно раз на процесс: при самой первой активации
+# (process_t.first_run) или после exec() (elf_exec_replace(), elf.c) — оба
+# случая это "первая инструкция новой программы" (CS/SS те же 0x33/0x2B,
+# что и в syscall_entry.S). Трюк с r11 как промежуточным регистром здесь не
+# нужен: iretq берёт готовый кадр со стека, а не прыгает через регистр.
 # ============================================================
 
 .global context_enter_ring3
@@ -206,19 +194,15 @@ context_enter_ring3:
     movq 144(%rsi), %rax
     movq %rax, %cr3
 
-    # Switch to the TARGET process's own ring0 kernel stack before building
-    # anything — current_kernel_rsp was just set to next->ring0_stack by
-    # switch_to_process() right before this call, same global
-    # syscall_entry.S itself swaps onto on syscall entry. This is NOT
-    # optional: %rsp at function entry belongs to whoever CALLED us (e.g.
-    # the previous process's own stack, already fully captured above into
-    # *rdi and no longer needed) — that stack is mapped only in the OLD
-    # process's page table, not the one we just switched CR3 into, so
-    # building the iretq frame there after the cr3 switch page-faults
-    # (confirmed live: supervisor write, not-present, on what turned out to
-    # be the caller's stack — this exact bug happened during development).
-    # ring0_stack, by contrast, is guaranteed mapped in the NEW cr3, because
-    # allocate_ring0_stack() mapped it there specifically for this process.
+    # Переключаемся на СОБСТВЕННЫЙ ring0-стек целевого процесса ДО постройки
+    # кадра — current_kernel_rsp уже выставлен в next->ring0_stack
+    # switch_to_process() непосредственно перед этим вызовом (тот же стек,
+    # на который переключается syscall_entry.S при входе в syscall). Это не
+    # опционально: %rsp на входе принадлежит ВЫЗВАВШЕМУ (стек предыдущего
+    # процесса, уже сохранённый выше в *rdi) и замаплен только в СТАРОЙ
+    # таблице страниц — построение кадра на нём после смены CR3 дало бы page
+    # fault. ring0_stack гарантированно замаплен в НОВОМ cr3
+    # (allocate_ring0_stack() маппит его именно туда для этого процесса).
     movq current_kernel_rsp(%rip), %rsp
 
     # Build the iretq frame on that stack — transient scratch space,

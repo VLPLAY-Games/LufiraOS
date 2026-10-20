@@ -1,6 +1,6 @@
 // Сетевые команды — ifconfig/ping/wget. Драйвер: kernel/drivers/net/rtl8139.c,
-// стек: kernel/net/ (eth/arp/ip/icmp/tcp). wget работает только с
-// IP-адресами (без DNS) и минимальным блокирующим TCP-клиентом — см. план.
+// стек: kernel/net/. wget работает только с IP (без DNS), через минимальный
+// блокирующий TCP-клиент.
 #include "../commands.h"
 #include "../shell.h"
 #include "drivers/console/console.h"
@@ -124,10 +124,9 @@ static int find_header_end(const uint8_t *buf, int len) {
     return -1;
 }
 
-// wget <ip> <path> [output-filename] — HTTP/1.0 GET через минимальный
-// блокирующий TCP-клиент (kernel/net/tcp.c), тело ответа (без заголовков)
-// пишется в файл по мере поступления. Аргументы — из СЫРОГО input_buffer
-// (см. execute_command() в shell.c): путь/имя файла регистрозависимы.
+// wget <ip> <path> [output-filename] — HTTP/1.0 GET (kernel/net/tcp.c), тело
+// ответа пишется в файл по мере поступления. Аргументы — из сырого
+// input_buffer: путь/имя файла регистрозависимы.
 void command_wget(const char *args) {
     if (!args || !*args) {
         printf("\nUsage: wget <ip> <path> [output-filename]\n");

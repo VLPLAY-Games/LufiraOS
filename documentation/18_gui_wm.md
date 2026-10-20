@@ -12,9 +12,11 @@ This document describes the kernel side of LufiraOS's GUI: a generic mailbox IPC
 4. [GUI Syscalls](#gui-syscalls)
 5. [Input Routing](#input-routing)
 6. [Process Exit and Orphaned Windows](#process-exit-and-orphaned-windows)
-7. [Dependencies](#dependencies)
-8. [Known Limitations](#known-limitations)
-9. [Conclusion](#conclusion)
+7. [Fullscreen Applications](#fullscreen-applications)
+8. [Partial Repaint (Dirty-Rect Compositing)](#partial-repaint-dirty-rect-compositing)
+9. [Dependencies](#dependencies)
+10. [Known Limitations](#known-limitations)
+11. [Conclusion](#conclusion)
 
 ---
 
@@ -138,6 +140,39 @@ A client that crashes or gets `kill`ed doesn't get a chance to close its own win
 
 ---
 
+## Fullscreen Applications
+
+Some GUI programs — currently just the `doomgeneric` port, `games/doom/` in `lufira-packages`, launched as `doom.elf` — want the entire screen and don't speak the windowed `SYS_WIN_*` protocol at all; they call `SYS_WM_REGISTER` themselves and drive `SYS_FB_*` directly. The kernel only ever allows one registered WM at a time (see [GUI Syscalls](#gui-syscalls)), so handing a fullscreen app the screen means the *real* WM has to give up its registration first — and get it back once the app exits, without the whole desktop session dying in between.
+
+`wm.c`'s `launch_fullscreen_app()` (`apps/wm.c`) does this with `fork()`, not `exec()`:
+
+1. The WM calls `sys_wm_unregister()` on itself. (An earlier implementation instead had the *child* `exec()` straight over the WM process image — simpler, but it permanently lost the original WM: once the game exited, the system was back at a bare console, not the desktop, because nothing remained to re-register. See the comment at `launch_fullscreen_app()` in `apps/wm.c`.)
+2. It then `fork()`s. The child `sys_exec()`s the target binary (e.g. `doom.elf`), which registers *itself* as the WM from inside its own init (`DG_Init()`, for `doomgeneric`) via `sys_wm_register()` — not something `wm.c` does on the child's behalf.
+3. The parent (the original WM process) blocks on `sys_wait(pid, ...)` until the child exits.
+4. On exit, the parent calls `sys_wm_register()` to reclaim the registration, then forces a full repaint (`mark_dirty_full()` + `composite_scene()` + `present_frame(1)`) — the fullscreen app spent the whole time drawing directly into the framebuffer, so nothing the WM remembers about its own last-presented frame is still valid; a partial dirty-rect present (see below) would be meaningless here.
+
+The WM process itself is never destroyed or replaced — it just blocks, doing nothing, for as long as the fullscreen app runs.
+
+---
+
+## Partial Repaint (Dirty-Rect Compositing)
+
+**This mechanism is implemented but known to be unreliable in practice — see the caveat below before relying on it.**
+
+Earlier, every change to anything on screen — even just the mouse moving — re-ran the full `composite_scene()`/`present_frame()` path: re-render every window into `g_fb`, `memcpy()` the whole scene into `g_present_fb`, draw the cursor, and `SYS_FB_PRESENT` the entire framebuffer. `wm.c` now tracks *what kind* of change happened through a pair of dirty flags:
+
+- **`g_content_dirty`** — something about the scene actually changed (any window content, geometry, z-order, or focus). Drives whether `composite_scene()` reruns at all.
+- **`g_cursor_moved`** — only the mouse cursor moved; cheap, handled by `present_frame()` alone (re-blit the cursor silhouette) without recompositing.
+
+On top of that, `mark_dirty_rect(x, y, w, h)` and `mark_dirty_full()` (`apps/wm.c`) distinguish *how much* of the screen actually needs to be re-presented:
+
+- **`mark_dirty_full()`** sets `g_dirty_full` — the next present is a full-screen `sys_fb_present()`. This is still what most interactions use: creating/destroying a window, moving or resizing one, raising it, changing focus, opening the start menu, and finishing a fullscreen app all call `mark_dirty_full()` directly, because they can move or expose arbitrary, previously-unrelated screen regions.
+- **`mark_dirty_rect()`** instead records (and, across repeated calls, grows) a bounding rectangle, and the eventual present is scoped to the union of that rectangle and the cursor's bounding box, via `sys_fb_present_rect()` — the dirty-rectangle variant of `SYS_FB_PRESENT` (see [`13_syscalls.md`](13_syscalls.md#gui--window-manager-50-62)) — instead of the whole screen. Only three RPC handlers in `wm.c` call it today: `do_win_fill()`, `do_win_draw_rect()`, and `do_win_draw_text()` — i.e. a client drawing into its *own* window's existing bounds, without moving, resizing, or raising it.
+
+**Known issue — not a solved problem.** Because only fill/rect/text drawing goes through `mark_dirty_rect()` and essentially everything else (window move, resize, focus change, raise-to-top, open/close, the start menu) still calls `mark_dirty_full()`, a real interactive session still triggers full-screen presents very often in practice — dragging a window around, for instance, is a continuous stream of full repaints, not a small moving rectangle. Partial presenting works correctly for the narrow case it covers, but it has not eliminated the "basically always a full redraw" behavior the mechanism was meant to fix, and the interaction between the dirty-rect path and some programs can still behave like a full redraw even in cases that look like they should qualify for the partial path. This is an open problem, not resolved in this release — see the project's `CHANGELOG.md` Known Issues for 0.9.0.
+
+---
+
 ## Dependencies
 
 | Component | Depends On | Purpose |
@@ -155,12 +190,14 @@ A client that crashes or gets `kill`ed doesn't get a chance to close its own win
 - **96-byte mailbox messages, 32 slots per process** — fine for the small fixed-shape RPC/input messages this protocol actually carries, not a general-purpose large-message IPC mechanism.
 - **No per-request correlation ID** — relies on the "one request in flight per client" invariant holding; a client that ever sent a second `SYS_WIN_*` call before the first replied would misparse the response to the first as the response to the second. Every current client (`gui_widgets.c` and all GUI apps) is written to respect this.
 - **The kernel enforces no window-ownership/focus policy** — that's entirely `wm.c`'s responsibility; a kernel bug could in principle let a malicious client address an RPC that `wm.c` doesn't validate, since the kernel itself only authenticates `SYS_FB_*` (WM-only), not the contents of a `SYS_WIN_*` request.
+- **Dirty-rect partial repaint is unreliable** — see [Partial Repaint (Dirty-Rect Compositing)](#partial-repaint-dirty-rect-compositing). Implemented for in-place window fill/rect/text drawing, but most other interactions (move, resize, focus, raise, open/close) still force a full-screen present, and even the covered cases don't reliably avoid full redraws with every program. Open problem, not resolved this release.
+- **Memory usage grows with repeated open/close of GUI programs**, most noticeable when resizing a window repeatedly — looks like a leak somewhere in the WM or window-buffer lifecycle (`resize_window_buffer()`/window teardown in `apps/wm.c`), not yet root-caused.
 
 ---
 
 ## Conclusion
 
-The kernel's half of the GUI is deliberately thin: a generic mailbox primitive, a privileged framebuffer-present syscall, and a set of RPC wrappers that relay window operations to whichever process registered itself as the window manager. All of the actual compositing, input focus, drag/resize, taskbar, and app logic lives in ordinary userspace code in `lufira-packages`, exercising the same syscall surface any other program could.
+The kernel's half of the GUI is deliberately thin: a generic mailbox primitive, a privileged framebuffer-present syscall, and a set of RPC wrappers that relay window operations to whichever process registered itself as the window manager. All of the actual compositing, input focus, drag/resize, taskbar, and app logic lives in ordinary userspace code in `lufira-packages`, exercising the same syscall surface any other program could. This release added two more pieces of that userspace logic worth knowing about even though they're not kernel mechanism: fullscreen apps borrowing the WM registration via `fork()` (see [Fullscreen Applications](#fullscreen-applications)) rather than replacing the WM process outright, and a dirty-rect partial-repaint path that cuts down unnecessary full-screen presents for simple in-window drawing — though, honestly, not yet for much else (see [Partial Repaint (Dirty-Rect Compositing)](#partial-repaint-dirty-rect-compositing)).
 
 For more details, refer to `kernel/system/ipc/mailbox.c`/`wm_protocol.h`, the `SYS_WIN_*`/`SYS_FB_*`/`SYS_WM_REGISTER`/`SYS_IPC_*` implementations in `kernel/system/syscall/syscall.c`, and `apps/wm.c` in `lufira-packages`.
 

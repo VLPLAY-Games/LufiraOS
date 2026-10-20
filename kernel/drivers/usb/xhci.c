@@ -38,10 +38,8 @@ static inline void reg_write64(void *base, uint32_t off, uint64_t val) {
 }
 
 // Отображение BAR0 — общий mmio_map() (system/mm/paging.h/.c), не частная
-// копия: v0.9, фаза 1, добавила AHCI как второго MMIO-потребителя этого же
-// KERNEL_MMIO_BASE-диапазона, и два независимых bump-аллокатора, каждый
-// заново стартующий с одного и того же базового адреса, перезаписывали бы
-// отображения друг друга (см. комментарий у mmio_map() в paging.h).
+// копия: при нескольких MMIO-потребителях в общем KERNEL_MMIO_BASE-диапазоне
+// независимые bump-аллокаторы перезаписывали бы отображения друг друга.
 static void *map_mmio(uint64_t phys, uint64_t size) {
     return mmio_map(phys, size);
 }
@@ -577,22 +575,17 @@ static void xhci_write_erdp(void) {
 }
 
 // Декодирует один завершённый interrupt IN HID-отчёт и немедленно
-// перевооружает конвейер. Вынесено в общий хелпер: Event Ring один на все
-// endpoint'ы, и синхронное ожидание MSD/control-передачи (xhci_wait_for_event
-// с ненулевым want_ptr) попутно вычитывает и чужие события — те же interrupt
-// IN отчёты клавиатуры/мыши. Отброшенное событие оставляло бы HID-endpoint
-// без перевооружённого TD навсегда; обслуживая его прямо тут, конвейер не
-// голодает независимо от того, кто дренирует кольцо.
+// перевооружает конвейер. Event Ring один на все endpoint'ы, и синхронное
+// ожидание MSD/control-передачи попутно вычитывает чужие события (те же
+// отчёты клавиатуры/мыши) — обслуживая их здесь, HID-endpoint не остаётся
+// без перевооружённого TD, кто бы ни дренировал кольцо.
 static void xhci_service_hid_event(uint8_t slot_id, uint32_t status) {
     xhci_slot_t *slot = xhci_slot_for_id(slot_id);
     if (!slot || !slot->hid_ep_dci) return; // не HID-событие (например, MSD)
 
-    // Баг: мышь не двигалась (клавиатура работала) — здесь принимался только
-    // TRB_COMPLETION_SUCCESS. hid_report_expected_len захардкожен в 8 байт
-    // под клавиатуру, но тот же размер запрашивался и у мыши (boot-отчёт
-    // обычно 3-4 байта) — xHCI честно репортит Short Packet, ожидаемое
-    // завершение, не ошибку; строгая проверка "== SUCCESS" отбрасывала
-    // каждый отчёт мыши молча.
+    // hid_report_expected_len захардкожен в 8 байт под клавиатуру, но тот же
+    // размер запрашивается и у мыши (boot-отчёт обычно 3-4 байта) — xHCI
+    // честно репортит Short Packet, это ожидаемое завершение, не ошибка.
     uint8_t cc = (uint8_t)((status >> TRB_COMPLETION_CODE_SHIFT) & 0xFFu);
     if (cc == TRB_COMPLETION_SUCCESS || cc == TRB_COMPLETION_SHORT_PACKET) {
         if (slot->hid_protocol == USB_HID_PROTOCOL_KEYBOARD) {
@@ -610,32 +603,24 @@ static void xhci_service_hid_event(uint8_t slot_id, uint32_t status) {
 }
 
 // Один общий Event Ring обслуживает синхронное ожидание (want_ptr != 0:
-// энумерация, MSD) и неблокирующий опрос usb_poll() (want_ptr == 0). Каждое
-// просмотренное, но не совпавшее событие не отбрасывается: HID Transfer
-// Event обслуживается через xhci_service_hid_event(), чтобы клавиатура/мышь
-// не остались без перевооружённого TD. Жёсткий предел итераций — защита от
-// зависания (usb_poll() вызывается с запрещёнными прерываниями).
+// энумерация, MSD) и неблокирующий опрос usb_poll() (want_ptr == 0). Не
+// совпавшее событие не отбрасывается: HID Transfer Event обслуживается через
+// xhci_service_hid_event(). Жёсткий предел итераций защищает от зависания
+// (usb_poll() вызывается с запрещёнными прерываниями).
 //
-// xhci_sync_wait_depth > 0 — синхронное ожидание идёт, usb_poll() не трогает
-// Event Ring: иначе он мог бы перехватить событие, которого ждёт синхронный
-// вызов, и тот таймаутил бы напрасно.
+// xhci_sync_wait_depth > 0 — идёт синхронное ожидание, usb_poll() не трогает
+// Event Ring, иначе он мог бы перехватить ожидаемое синхронным вызовом
+// событие и тот таймаутил бы напрасно.
 static volatile int xhci_sync_wait_depth = 0;
 
-// НАЙДЕНО ЖИВЫМ ТЕСТОМ (hotplug, v0.9 фаза 1): xhci_sync_wait_depth выше
-// защищает только путь ЧЕРЕЗ xhci_wait_for_event() — но xhci_port_reset()
-// (вызываемый и из boot-time скана в xhci_init(), и из xhci_poll_hotplug()
-// при подключении) ждёт PRC через ГОЛЫЙ pit_wait_ms(), а не через
-// xhci_wait_for_event(), так что sync_wait_depth его не прикрывает. Этот
-// pit_wait_ms() реентерабельно пускает следующий тик PIT — то есть снова
-// usb_poll() — ПРЯМО ПОСРЕДИ сброса порта; без отдельной защиты
-// xhci_poll_hotplug() увидел бы CSC того же самого порта (он действительно
-// взводится во время сброса) и запустил бы ВТОРОЕ, вложенное
-// Enable Slot/Address Device на тот же физический порт поверх ещё не
-// завершённого первого — ломая общий Command/Event Ring настолько, что всё
-// зависало (стенд: экран намертво вставал на "Port N: no device" после
-// добавления hotplug, без этого флага). xhci_enum_busy закрывает ровно эту
-// дыру: 1 на всё время ЛЮБОГО port_reset+enumerate (boot-time скан ИЛИ
-// hotplug-attach), xhci_poll_hotplug() просто выходит сразу, если уже 1.
+// xhci_sync_wait_depth защищает только путь через xhci_wait_for_event() — но
+// xhci_port_reset() ждёт PRC через голый pit_wait_ms(), который реентерабельно
+// пускает очередной тик PIT (usb_poll()) прямо посреди сброса порта: без
+// отдельной защиты xhci_poll_hotplug() увидел бы CSC того же порта и запустил
+// бы вложенное Enable Slot/Address Device поверх ещё не завершённого первого,
+// ломая общий Command/Event Ring. xhci_enum_busy закрывает эту дыру: 1 на всё
+// время любого port_reset+enumerate (boot-time скан или hotplug-attach),
+// xhci_poll_hotplug() выходит сразу, если уже 1.
 static volatile int xhci_enum_busy = 0;
 
 static int xhci_wait_for_event_impl(uint32_t want_type, uint64_t want_ptr,
@@ -676,14 +661,10 @@ static int xhci_wait_for_event_impl(uint32_t want_type, uint64_t want_ptr,
       no_new_event:
         if (want_ptr == 0) return -1; // usb_poll(): "сейчас ничего нет" — не ошибка
 
-        // Баг: SYS_MOUNT зависал навсегда (HLT=1, RIP неподвижен). pit_wait_ms()
-        // ждёт продвижения pit_ticks через hlt, которое двигает только
-        // таймерный IRQ — но IA32_FMASK маскирует EFLAGS.IF на вход в любой
-        // syscall, так что hlt внутри pit_wait_ms(), вызванного из SYS_MOUNT,
-        // ждал прерывания, которое не могло прийти (boot-time вызыватели
-        // работали, т.к. у них IF было включено). Фикс: временно включаем
-        // прерывания на время ожидания одного тика, затем восстанавливаем
-        // EFLAGS.IF вызывающего.
+        // IA32_FMASK маскирует EFLAGS.IF на входе в syscall, так что hlt
+        // внутри pit_wait_ms(), вызванного из обработчика syscall, не дождался
+        // бы таймерного IRQ. Временно включаем прерывания на время ожидания
+        // одного тика, затем восстанавливаем EFLAGS.IF вызывающего.
         {
             uint64_t saved_flags;
             asm volatile("pushfq; popq %0" : "=r"(saved_flags) :: "memory");
@@ -847,12 +828,10 @@ static int xhci_set_protocol_boot(xhci_slot_t *slot, uint8_t interface_num) {
     return xhci_control_transfer(slot, &setup, NULL);
 }
 
-// Обновляет EP0 Max Packet Size в Device Context на реальное значение,
-// узнанное из полного дескриптора устройства (первый запрос всегда идёт со
-// значением "по умолчанию для скорости", которое не всегда совпадает).
-// Упрощение: TR Dequeue Pointer/DCS в переданном Endpoint Context
-// фактически игнорируются контроллером при Evaluate Context (кроме
-// Max Packet Size) — не пересчитываем текущую позицию кольца отдельно.
+// Обновляет EP0 Max Packet Size в Device Context на реальное значение из
+// полного дескриптора устройства (первый запрос идёт со значением "по
+// умолчанию для скорости", не всегда совпадающим). TR Dequeue Pointer/DCS
+// контроллер при Evaluate Context игнорирует, пересчитывать их не нужно.
 static int xhci_evaluate_ep0_max_packet(xhci_slot_t *slot, uint16_t real_max_packet) {
     memset(slot->input_ctx_virt, 0, PAGE_SIZE);
     uint32_t *icc = xhci_ctx_at(slot->input_ctx_virt, 0);
@@ -973,9 +952,8 @@ static int xhci_bulk_transfer(xhci_slot_t *slot, xhci_ring_t *ring, uint8_t dci,
     xhci_ring_doorbell(slot->slot_id, dci);
 
     uint32_t status; uint8_t got_slot;
-    // Таймаут 1000мс (было 100мс — в 5 раз короче control-передач, 500мс —
-    // основная причина нестабильности mount/unmount под нагрузкой на
-    // сотнях/тысячах секторов). Приведено к тому же порядку.
+    // Таймаут 1000мс — с запасом под mount/unmount при чтении/записи
+    // больших объёмов секторов.
     if (xhci_wait_for_event(TRB_TYPE_TRANSFER_EVENT, trb_phys, &status, &got_slot, 1000) != 0) {
         printf("[XHCI] MSD bulk transfer timed out (slot=%u dci=%u)\n", slot->slot_id, dci);
         return -1;
@@ -990,11 +968,9 @@ static int xhci_bulk_transfer(xhci_slot_t *slot, xhci_ring_t *ring, uint8_t dci,
 }
 
 // Полный цикл Bulk-Only Transport: CBW (bulk OUT) -> опциональная стадия
-// данных (bulk IN либо OUT, смотря по direction_in) -> CSW (bulk IN).
-// Переиспользует общий xhci_dma_scratch последовательно для всех трёх
-// стадий (к моменту каждого следующего memcpy предыдущая передача уже
-// полностью завершена и подтверждена контроллером) — отдельный буфер под
-// каждую стадию не нужен, ровно как и в control-передачах энумерации.
+// данных (bulk IN/OUT) -> CSW (bulk IN). Переиспользует общий
+// xhci_dma_scratch последовательно для всех трёх стадий — к моменту
+// следующего memcpy предыдущая передача уже подтверждена контроллером.
 static int xhci_msd_command(xhci_slot_t *slot, const uint8_t *cdb, uint8_t cdb_len,
                              void *data_buf, uint32_t data_len, int direction_in)
 {
@@ -1077,10 +1053,8 @@ static int xhci_msd_read_capacity(xhci_slot_t *slot, uint32_t *out_max_lba, uint
     return 0;
 }
 
-// Вызывается сразу после конфигурации bulk-endpoint'ов. TEST UNIT READY
-// нарочно не проверяем на ошибку — многие флешки отвечают NOT READY на
-// самую первую команду сразу после Configure Endpoint (обычное дело,
-// не признак поломки), а READ CAPACITY чуть погодя уже проходит нормально.
+// TEST UNIT READY нарочно не проверяем на ошибку — многие флешки отвечают
+// NOT READY на первую команду после Configure Endpoint, это не поломка.
 static int xhci_msd_init(xhci_slot_t *slot) {
     xhci_msd_test_unit_ready(slot);
 
@@ -1380,20 +1354,12 @@ static void xhci_enumerate_device(uint8_t port, uint8_t speed) {
 /* ======================================================================== */
 /* Hotplug: подключение/отключение после загрузки                          */
 /* ======================================================================== */
-// v0.9, фаза 1, пункт 6. До этой версии xHCI-драйвер энумерировал порты
-// РОВНО ОДИН РАЗ, во время xhci_init() — PORTSC.CSC (Connect Status Change)
-// определён, но никогда не читался; физическое отключение устройства не
-// освобождало вообще ничего (ни слот, ни кольца, ни DMA-страницы), и
-// use-site'ы Mass Storage (xhci_msd_slot_for_index() -> xhci_slot_for_id())
-// просто продолжали считать устройство живым до первого реального таймаута
-// на bulk-передаче (см. разбор в коммит-сообщении/истории — 1000мс на
-// операцию, вечно повторяющихся). Эта секция добавляет: опрос CSC раз в тик
-// PIT (xhci_poll_hotplug(), вызывается из usb_poll()), подключение через
-// переиспользование уже существующего xhci_enumerate_device(), и настоящее
-// освобождение ресурсов слота при отключении (xhci_teardown_slot()) —
-// после которого xhci_msd_slot_for_index()/xhci_slot_for_id() сами начинают
-// возвращать NULL, то есть I/O на отключённую флешку отваливается сразу, а
-// не зависает на таймауте.
+// Опрос PORTSC.CSC раз в тик PIT (xhci_poll_hotplug(), из usb_poll())
+// обнаруживает подключение/отключение. Подключение переиспользует
+// xhci_enumerate_device(); отключение освобождает ресурсы слота
+// (xhci_teardown_slot()), после чего xhci_slot_for_id()/
+// xhci_msd_slot_for_index() сразу возвращают NULL — I/O на отключённое
+// устройство отваливается сразу, а не зависает на таймауте.
 
 // true, если порт port уже отслеживается живым слотом — защита от повторной
 // Enable Slot Command на дребезг CSC без реального физического отключения
@@ -1419,18 +1385,13 @@ static void xhci_recompute_ready(void) {
 }
 
 // Полностью освобождает ресурсы слота физически отключённого устройства:
-// шлёт Disable Slot Command (чисто хост-сторонняя операция — контроллер
-// отрабатывает её и для уже пропавшего устройства, поэтому её результат не
-// блокирует освобождение памяти ниже, best-effort), снимает запись из
-// DCBAA, возвращает PMM все выделенные страницы (device/input context,
-// EP0-кольцо, HID interrupt-кольцо + буфер отчёта ИЛИ оба MSD bulk-кольца —
-// смотря по device_class) и гасит in_use, делая слот снова свободным под
-// будущий Enable Slot Command. Соответствующая запись в xhci_hid_devices[]/
-// xhci_msd_devices[] гасится (valid=0 / in_use=0) ПО ИНДЕКСУ, сохранённому
-// в слоте при регистрации — массив не ужимается и позиции не сдвигаются,
-// потому что usb_index оттуда уходит наружу как стабильный индекс
-// монтирования (fat_mount.c/ext2_mount.c/exfat_mount.c), который обязан
-// переживать жизнь конкретного slot_id.
+// шлёт Disable Slot Command (best-effort — контроллер отрабатывает её и для
+// уже пропавшего устройства), снимает запись из DCBAA, возвращает PMM все
+// выделенные страницы (контексты, EP0-кольцо, HID- или оба MSD bulk-кольца —
+// смотря по device_class) и гасит in_use. Запись в xhci_hid_devices[]/
+// xhci_msd_devices[] гасится по индексу, сохранённому в слоте: массив не
+// ужимается, т.к. этот индекс уходит наружу как стабильный индекс
+// монтирования (fat_mount.c/ext2_mount.c/exfat_mount.c).
 static void xhci_teardown_slot(xhci_slot_t *slot) {
     uint8_t slot_id = slot->slot_id;
 
@@ -1466,11 +1427,8 @@ static void xhci_teardown_slot(xhci_slot_t *slot) {
 }
 
 // Опрос PORTSC.CSC на всех портах root hub'а — единственный способ узнать о
-// hotplug в этой архитектуре (ни контроллер, ни это ядро не используют
-// прерывания вообще — см. общий разбор вверху файла). Вызывается из
-// usb_poll() раз в тик PIT (100 Гц) — то же разрешение, что и у опроса
-// Event Ring; человеку, физически втыкающему/выдёргивающему устройство, это
-// неотличимо от мгновенной реакции.
+// hotplug без прерываний. Вызывается из usb_poll() раз в тик PIT (100 Гц),
+// неотличимо от мгновенной реакции для человека.
 static void xhci_poll_hotplug(void) {
     // Уже идёт port_reset+enumerate (boot-time скан ИЛИ другой hotplug,
     // включая тот, что сейчас выполняется ВЫШЕ нас по стеку реентерабельно
@@ -1566,8 +1524,8 @@ void xhci_init(void) {
     memset(xhci_dma_scratch_virt, 0, PAGE_SIZE);
 
     // Необязательный буфер — при неудаче просто не батчим (xhci_msd_command()
-    // ниже проверяет xhci_dma_scratch_big_virt и откатывается на маленький
-    // буфер с cap в PAGE_SIZE, как было раньше), а не валим всю инициализацию.
+    // проверяет xhci_dma_scratch_big_virt и откатывается на маленький буфер),
+    // а не валим всю инициализацию.
     uint64_t big_phys = pmm_alloc_contiguous_pages(XHCI_MSD_BIG_SCRATCH_PAGES);
     if (big_phys) {
         xhci_dma_scratch_big_phys = big_phys;
@@ -1596,12 +1554,9 @@ void xhci_init(void) {
     xhci_controller_present = 1;
 
     // Каждый порт энумерируется полностью, прежде чем переходить к
-    // следующему (как в UHCI) — Address Device Command выполняется для
-    // одного слота за раз, пока энумерация синхронна. xhci_enum_busy=1 на
-    // весь скан — иначе реентерабельный usb_poll() (через pit_wait_ms()
-    // внутри xhci_port_reset(), см. разбор у xhci_enum_busy) запустил бы
-    // xhci_poll_hotplug() поверх ещё не завершённого boot-time сканирования
-    // того же порта.
+    // следующему — энумерация синхронна. xhci_enum_busy=1 на весь скан,
+    // иначе реентерабельный usb_poll() (см. разбор у xhci_enum_busy) запустил
+    // бы xhci_poll_hotplug() поверх ещё не завершённого скана того же порта.
     xhci_enum_busy = 1;
     for (uint8_t port = 1; port <= xhci_max_ports; port++) {
         uint8_t speed = 0;
@@ -1692,14 +1647,11 @@ int xhci_msd_write_block(int index, uint32_t lba, const void *buf, uint32_t bloc
 
 void usb_poll(void) {
     if (!xhci_controller_present) return;
-    // Синхронное ожидание (control/bulk-передача) уже само дренирует Event
-    // Ring и обслуживает попутные HID-события — не лезем сюда, чтобы не
-    // перехватить событие, которого ждут они (см. xhci_sync_wait_depth).
-    // Опрос PORTSC на hotplug тоже откладываем до следующего тика: он сам
-    // может затеять полную синхронную энумерацию (xhci_enumerate_device()),
-    // а начинать её, пока снаружи уже идёт другое синхронное ожидание,
-    // означало бы вложенный xhci_wait_for_event() поверх ещё не
-    // завершившегося — лишняя сложность ради выигрыша в 10мс никому не нужна.
+    // Синхронное ожидание (control/bulk-передача) само дренирует Event Ring
+    // и обслуживает попутные HID-события — не лезем сюда, чтобы не
+    // перехватить их событие (см. xhci_sync_wait_depth). Опрос PORTSC на
+    // hotplug тоже откладываем: он может затеять свою синхронную энумерацию,
+    // а вложенный xhci_wait_for_event() поверх текущего не нужен.
     if (xhci_sync_wait_depth > 0) return;
 
     xhci_poll_hotplug();

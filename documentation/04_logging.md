@@ -250,6 +250,27 @@ The colour management functions are defined in the console driver and use the fr
 
 All logging macros accept `printf`-style format strings and variable arguments. This allows for convenient formatting of numeric values, addresses, and other data types.
 
+### Interrupt Locking Around `printf()` (v0.9.0)
+
+`printf()` (`console.c`) used to have no protection against being interrupted mid-line. The timer IRQ (100 Hz, `pit.c`) calls `usb_poll()`, which can call `xhci_poll_hotplug()` for USB hotplug detection (see the changelog's "USB hotplug" addition), and that path can itself `DLOG()`/`printf()` — asynchronously, from inside the IRQ handler, while a foreground `printf()` call elsewhere might still be partway through writing its own line. Both calls share the same cursor state (`current_x`/`current_y`/`pending_line_open`), so without protection, characters from the two calls could interleave, producing the "debug-mode boot log occasionally printed two lines merged into one" bug described in the v0.9.0 changelog.
+
+The fix is a matched pair of helpers, `console_printf_lock()`/`console_printf_unlock()`, that `printf()` now calls around its entire body:
+
+```c
+static inline uint64_t console_printf_lock(void) {
+    uint64_t flags;
+    asm volatile("pushfq; popq %0" : "=r"(flags) :: "memory");
+    asm volatile("cli");
+    return flags;
+}
+
+static inline void console_printf_unlock(uint64_t flags) {
+    asm volatile("push %0; popfq" : : "r"(flags) : "memory", "cc");
+}
+```
+
+This is the same save-`EFLAGS.IF`/`cli`/restore pattern already used elsewhere in the kernel — the heap lock and `console_write_lock()` (the userspace-facing VFS write path in `vfs.c`) both follow the identical shape. Saving and restoring the real flag, rather than unconditionally `cli`/`sti`, matters here specifically because `printf()` can legitimately be called with interrupts already disabled (e.g. from inside the IRQ handler itself) — an unconditional `sti` on exit would wrongly re-enable interrupts in that case.
+
 ---
 
 ## Dependencies

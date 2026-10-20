@@ -104,7 +104,7 @@ typedef struct __attribute__((packed)) {
 } usb_bot_csw_t;
 
 /* SCSI command opcodes — только то, что нужно для базового блочного
- * чтения/записи (без файловой системы поверх, см. план). */
+ * чтения/записи (без файловой системы поверх). */
 #define SCSI_CMD_TEST_UNIT_READY 0x00
 #define SCSI_CMD_INQUIRY         0x12
 #define SCSI_CMD_READ_CAPACITY10 0x25

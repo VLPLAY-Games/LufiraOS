@@ -34,7 +34,8 @@ Before v0.7 this was all one Makefile (`make run`/`make debug`/`make monitor`, a
 **Key facts:**
 - `LufiraOS/Makefile` produces exactly two artifacts: `build/BOOTX64.EFI` (UEFI bootloader) and `build/kernel.bin` (raw kernel binary). It has no `run`/`debug`/`monitor`/`disk` targets anymore.
 - `LufiraOS-Builder/build.py` is a standalone Python CLI (with an optional Tkinter GUI, `gui.py`) that drives everything downstream of those two files: compiling the host-side `mkfs_lufirafs` tool, fetching or building userspace `.lpg` packages, assembling `disk.img`, and launching QEMU.
-- `LufiraOS-Builder` expects sibling checkouts (`../LufiraOS`, `../lufira-packages` relative to itself) by default, both overridable with `--lufira-repo`/`--lufira-packages-repo`, and will `git clone` them automatically if missing (`tools.ensure_repo()`).
+- `LufiraOS-Builder` expects sibling checkouts (`../LufiraOS`, `../lufira-packages` relative to itself) by default, both overridable with `--lufira-repo`/`--lufira-packages-repo`, and will `git clone` them automatically if missing (`tools.ensure_repo()`). A **freshly cloned** repository is then pinned to its latest SemVer release tag (`v*`, highest first) via `tools._checkout_latest_release_tag()`, instead of being left on the default branch's HEAD — so a from-scratch `python3 build.py run` builds the latest *released* `LufiraOS`, not whatever is mid-development on `main`. No-op for `lufira-packages` (or any repo with no `v*` tags at all), which ships releases as prebuilt `.lpg` via its own `index.json` instead — see below. An *existing* checkout at that path is left alone either way; this only applies the moment a clone happens.
+- `LufiraOS-Builder` supports three disk controllers, two audio controllers, and three NICs for `run`/`debug`/`monitor` — `--disk-mode ide|ahci|nvme`, `--audio ac97|hda|none`, `--net-device rtl8139|e1000|e1000e|none` (`lufira_builder/config.py`'s `DISK_CHOICES`/`AUDIO_CHOICES`/`NET_CHOICES`, expanded into QEMU device strings by `lufira_builder/qemu.py`) — picking which of LufiraOS's own driver code paths (`kernel/drivers/disk`, `kernel/drivers/sound`, `kernel/drivers/net`) actually gets exercised. The GUI (`gui.py`) exposes the same three choices as dropdowns in an "Emulated devices" panel, next to a separate "Legacy BIOS" vs "UEFI" launch-mode picker (see [`01_bootloader.md`](01_bootloader.md#legacy-bios-boot-boot_legacy)) that only becomes selectable once `--legacy-bios` is checked.
 - By default, `LufiraOS-Builder` does **not** need a local `lufira-packages` checkout or toolchain at all: it downloads prebuilt `.lpg` packages (plus `shell.elf`/`libc.so`) straight from `lufira-packages`' own published `index.json`/`release/` on GitHub, the same place `dlpg sync`/`dlpg upgrade` pull from at runtime (see [`17_package_manager.md`](17_package_manager.md)). Pass `--build-packages-from-source` to build a local `lufira-packages` checkout instead, for package development.
 
 ---
@@ -111,6 +112,12 @@ Useful flags (full list: `python3 build.py <subcommand> --help`):
 | `--no-default-packages` | Don't install the default package set (`shell.elf`/`libc.so` are still staged — not optional, the kernel loads `shell.elf` directly on every boot). |
 | `--only-package NAME` | Install only the named default package(s), instead of all of them. |
 | `--build-packages-from-source` | Build `lufira-packages` locally instead of downloading its prebuilt release. |
+| `--legacy-bios` | Also embed the legacy BIOS boot chain (`boot_legacy/` in `LufiraOS` — `stage1.bin`/`stage2.bin`/`legacy_main.bin`, built via `make bootloader-bios`, which needs `nasm`) into `disk.img` alongside the UEFI path — one image, bootable both ways. See [`01_bootloader.md`](01_bootloader.md#legacy-bios-boot-boot_legacy). |
+| `--boot-mode uefi\|bios` | Which firmware `run`/`debug`/`monitor` launch QEMU with (default `uefi`); `bios` only works on an image built with `--legacy-bios` (QEMU then falls back to its built-in SeaBIOS instead of `-bios <OVMF>`). |
+| `--audio ac97\|hda\|none` | Which audio controller `run`/`debug`/`monitor` attach (default `ac97`) — exercises `kernel/drivers/sound/ac97.c` or `hda.c` in the guest; `none` omits an audio device entirely. |
+| `--net-device rtl8139\|e1000\|e1000e\|none` | Which NIC `run`/`debug`/`monitor` attach (default `rtl8139`) — exercises `kernel/drivers/net/rtl8139.c`, `e1000.c` or `e1000e.c`; `none` omits a NIC entirely. |
+| `--disk-mode ide\|ahci\|nvme` | Which controller `run`/`debug`/`monitor` attach `disk.img` through (default `ide`, legacy ATA) — `ahci`/`nvme` exercise `kernel/drivers/disk/ahci.c` or `nvme.c` instead. |
+| `--bios-path PATH` | Override the auto-detected OVMF firmware path (see Troubleshooting below). |
 
 A thin Tkinter GUI, `gui.py`, sits on top of the same CLI — every button runs the corresponding `build.py` subcommand as a subprocess and streams its output, so it can never drift from the CLI's own behavior.
 
@@ -144,11 +151,13 @@ qemu-system-x86_64 -machine pc,accel=kvm:tcg -bios <OVMF path> -drive file=disk.
 
 | Mode | Extra flags |
 |------|-------------|
-| `run` | 128 MB RAM, `-netdev user,id=net0 -device rtl8139,netdev=net0` (real network, unlike the old `-net none`), AC'97 audio, xHCI + USB keyboard/mouse, serial on stdio. |
-| `debug` | 256 MB RAM, same networking/USB, plus `-no-reboot -no-shutdown`, `-d int,cpu_reset,guest_errors` logged to `build/qemu_debug.log`, a `/system/devmode.flag` dropped onto the image first (enabling [developer mode](04_logging.md) for that run), the `lufira-tests` `.elf` payload staged under `/tests`, and an attached FAT12 USB stick image with a test file on it. |
+| `run` | 128 MB RAM, networking via `--net-device` (default `-netdev user,id=net0 -device rtl8139,netdev=net0` — real network, unlike the old `-net none`), audio via `--audio` (default AC'97), disk attached via `--disk-mode` (default legacy IDE), xHCI + USB keyboard/mouse, serial on stdio. |
+| `debug` | 256 MB RAM, same networking/audio/disk selection, plus `-no-reboot -no-shutdown`, `-d int,cpu_reset,guest_errors` logged to `build/qemu_debug.log`, a `/system/devmode.flag` dropped onto the image first (enabling [developer mode](04_logging.md) for that run), the `lufira-tests` `.elf` payload staged under `/tests`, and an attached FAT12 USB stick image with a test file on it. |
 | `monitor` | Same as `run`, plus `-monitor telnet:127.0.0.1:4444,server,nowait` and an attached (blank) USB stick image. |
 
 Networking is no longer disabled by default — the whole point of `run`/`debug`/`monitor` using QEMU's user-mode networking (SLIRP) is so the real network stack (DNS/TCP/TLS/HTTP, see [`16_networking.md`](16_networking.md)) and `dlpg sync`/`upgrade` have something to talk to.
+
+**Hardware choice flags** (`lufira_builder/qemu.py`): `--disk-mode` picks how `disk.img` is attached — `ahci` adds `-device ahci,id=ahci0` plus an `ide-hd` drive on that bus, `nvme` adds a bare `-device nvme,drive=maindisk,...`, `ide` (default) keeps the historical `-drive file=disk.img,if=ide,index=0`; LufiraOS's own `disk_init()` probes AHCI, then NVMe, then falls back to legacy ATA PIO regardless of which one QEMU presents, so all three boot. `--audio` picks `-device intel-hda` + `hda-duplex` or `-device AC97`, both routed through one shared `driver=alsa` audiodev (the one backend that works headless without a running PulseAudio/PipeWire session). `--net-device` maps directly to QEMU's own device model name (`rtl8139`/`e1000`/`e1000e`) attached to a single `-netdev user,id=net0`.
 
 ---
 
@@ -166,7 +175,8 @@ There is no host-side way to list a directory's contents inside `disk.img` — b
 
 ```
 LufiraOS/                      # this repository — kernel + bootloader ONLY
-├── boot/                      # Bootloader sources
+├── boot/                      # Bootloader sources (UEFI path)
+├── boot_legacy/                # Legacy BIOS boot chain (stage1.asm/stage2.asm/legacy_main.c) — see 01_bootloader.md
 ├── kernel/                    # Kernel sources (incl. net/, system/elf/dynlink.c, system/ipc/)
 ├── tools/                     # Host-side build tools (mkfs_lufirafs, lpg_pack, lpg_format.h) + seed/
 ├── libc/                      # Userspace libc sources (built by lufira-packages' build.py, not this Makefile)
@@ -200,7 +210,18 @@ lufira-packages/                # sibling repository — userspace: shell, packa
 
 ### Missing Tools / OVMF (`LufiraOS-Builder`)
 
-`LufiraOS-Builder` needs `qemu-system-x86_64`, `mkfs.fat`, `mmd`/`mcopy` (`mtools`), `dd`, and OVMF firmware, same as the old Makefile did. If OVMF isn't at `/usr/share/ovmf/OVMF.fd`, adjust `BIOS_PATH` in `lufira_builder/config.py`.
+`LufiraOS-Builder` needs `qemu-system-x86_64`, `mkfs.fat`, `mmd`/`mcopy` (`mtools`), `dd`, and OVMF firmware, same as the old Makefile did. `lufira_builder/config.py` auto-detects OVMF by checking a list of known per-distro paths, in order, and using the first one that actually exists on disk:
+
+| Path | Distro / package |
+|------|-------------------|
+| `/usr/share/ovmf/OVMF.fd` | Debian/Ubuntu (`ovmf`) |
+| `/usr/share/edk2/x64/OVMF.4m.fd` | Arch Linux (`edk2-ovmf`) |
+| `/usr/share/edk2-ovmf/x64/OVMF.fd` | some Arch derivatives |
+| `/usr/share/OVMF/OVMF_CODE.fd` | Fedora/RHEL/CentOS (`edk2-ovmf`) |
+| `/usr/share/edk2/ovmf/OVMF_CODE.fd` | older Fedora layout |
+| `/usr/share/qemu/ovmf-x86_64-code.bin` | openSUSE |
+
+If none of these exist, it falls back to the Debian/Ubuntu path so a missing-firmware error still points at a familiar, googleable path. Override the result entirely with `--bios-path PATH` (or edit `BIOS_PATH`/`_OVMF_CANDIDATES` in `lufira_builder/config.py` directly).
 
 ### Kernel Size Calculation (this repository)
 

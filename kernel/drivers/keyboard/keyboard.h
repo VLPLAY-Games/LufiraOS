@@ -20,9 +20,7 @@ int keyboard_scancode_to_key(uint8_t scancode, int *out_pressed);
 int keyboard_is_initialized(void);
 int keyboard_ctrl_pressed(void);
 
-// Позволяет ДРУГИМ источникам ввода (сейчас — USB HID, см. usb_hid.c)
-// сообщить сюда текущее состояние Ctrl из СВОЕГО отчёта, чтобы
-// keyboard_ctrl_pressed() отражал реальное состояние клавиши независимо от
-// того, через какое устройство она была нажата — QEMU обычно доставляет
-// один и тот же физический keystroke сразу на PS/2 и на USB HID.
+// Позволяет другим источникам ввода (USB HID, см. usb_hid.c) сообщить сюда
+// состояние Ctrl из своего отчёта, т.к. один keystroke может приходить
+// сразу по PS/2 и по USB HID.
 void keyboard_set_ctrl_state(int pressed);

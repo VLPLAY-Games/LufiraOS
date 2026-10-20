@@ -1,6 +1,5 @@
-// Команды USB Mass Storage — только блочное чтение/запись (без
-// монтирования файловой системы, см. план: VFS сегодня не поддерживает
-// вторую ФС вообще). Драйвер — kernel/drivers/usb/xhci.c.
+// Команды USB Mass Storage — только блочное чтение/запись, без монтирования
+// ФС (VFS пока не поддерживает вторую ФС). Драйвер — kernel/drivers/usb/xhci.c.
 #include "../commands.h"
 #include "drivers/console/console.h"
 #include "drivers/usb/xhci.h"
@@ -73,9 +72,8 @@ void command_usbread(const char *args) {
     printf("\n--- end ---\n");
 }
 
-// usbwrite <index> <lba> <text> — пишет text (с завершающим нулём) в
-// начало блока, остаток блока обнуляется. Для наглядной проверки
-// round-trip'а (usbwrite ... hello; usbread ...).
+// usbwrite <index> <lba> <text> — пишет text в начало блока, остаток
+// обнуляется. Для проверки round-trip'а вместе с usbread.
 void command_usbwrite(const char *args) {
     if (!args || !*args) {
         printf("\nUsage: usbwrite <device> <lba> <text>\n");

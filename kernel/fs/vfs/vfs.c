@@ -92,9 +92,8 @@ inode_t* vfs_create_inode(uint32_t ino, file_type_t type,
 
 /* ========== КОНСОЛЬ ========== */
 
-// Настоящее блокирующее чтение (раньше — заглушка, всегда EOF):
-// console_input_read() (drivers/input/input.c) блокирует процесс
-// (PROCESS_BLOCKED + schedule()) и сама будит его, когда
+// Блокирующее чтение: console_input_read() (drivers/input/input.c) блокирует
+// процесс (PROCESS_BLOCKED + schedule()) и сама будит его, когда
 // input_keyboard_event() кладёт байт в кольцевой буфер клавиатуры — тот
 // же приём, что у pipe_read()/pipe_write() ниже.
 static int console_read(file_t *f, void *buf, size_t count) {
@@ -104,11 +103,10 @@ static int console_read(file_t *f, void *buf, size_t count) {
 }
 
 // Лочит EFLAGS.IF на всё время записи (тот же приём, что heap_lock()/
-// elf_irq_save(): сохраняем реальное состояние, а не безусловный
-// cli/sti, на случай вызова из уже отключённых прерываний) — иначе
-// таймерный IRQ мог переключить CPU на другой процесс посреди put_char(),
-// и два писавших одновременно процесса перемешивали вывод байт-в-байт
-// (баг: два ELF подряд дали "mmap1 OKatches OK" вместо двух строк).
+// elf_irq_save(): сохраняем реальное состояние, а не безусловный cli/sti,
+// на случай вызова из уже отключённых прерываний) — иначе таймерный IRQ мог
+// переключить CPU на другой процесс посреди put_char(), и два писавших
+// одновременно процесса перемешивали бы вывод байт-в-байт.
 static inline uint64_t console_write_lock(void) {
     uint64_t flags;
     asm volatile("pushfq; popq %0" : "=r"(flags) :: "memory");
@@ -120,19 +118,14 @@ static inline void console_write_unlock(uint64_t flags) {
     asm volatile("push %0; popfq" : : "r"(flags) : "memory", "cc");
 }
 
-// Управляющие последовательности для /dev/console — свой простой формат,
-// не настоящий ANSI (эта ОС не обещает совместимости с внешними
-// терминалами). ESC (0x1B), затем однобайтовая команда:
-//   ESC 'f' <color>              — set_foreground_color (0..15)
-//   ESC 'b' <color>              — set_background_color (0..15)
-//   ESC 'p' <x_hi><x_lo><y_hi><y_lo> — set_cursor_position (big-endian u16)
-//   ESC 'c'                      — clear_screen
-//   ESC 'l'                      — move_cursor_left (НЕ '\b': тот стирает
-//                                   символ под курсором, см. put_char())
-//   ESC 'r'                      — move_cursor_right
-// Каждая последовательность должна укладываться ЦЕЛИКОМ в один sys_write()
-// (парсер не хранит состояние между вызовами) — так их и собирает
-// userspace/common/console.h.
+// Управляющие последовательности /dev/console — свой формат, не ANSI.
+// ESC (0x1B) + однобайтовая команда:
+//   ESC 'f'/'b' <color> — foreground/background (0..15)
+//   ESC 'p' <x_hi><x_lo><y_hi><y_lo> — cursor position (big-endian u16)
+//   ESC 'c' — clear_screen; ESC 'l'/'r' — cursor left/right (НЕ '\b': тот
+//   стирает символ под курсором, см. put_char())
+// Парсер не хранит состояние между вызовами — каждая последовательность
+// должна целиком уместиться в один sys_write() (см. userspace/common/console.h).
 static int console_write(file_t *f, const void *buf, size_t count) {
     (void)f;
     if (!buf || count == 0) return 0;
@@ -209,11 +202,10 @@ static uint32_t dev_inode_counter = 200;
 
 #define PIPE_BUF_SIZE 4096
 
-// Общее состояние одного анонимного pipe(). У read-конца и write-конца —
-// СВОИ отдельные inode_t (каждый со своим ref_count, который увеличивает
-// vfs_dup_fd() при fork()/dup2()), но оба указывают через
-// inode->private_data на ОДИН и тот же pipe_t. readers/writers считают
-// именно количество живых file_t-ссылок на соответствующий конец (а не
+// Общее состояние одного анонимного pipe(). У read- и write-конца — свои
+// отдельные inode_t (каждый со своим ref_count, увеличиваемым vfs_dup_fd()
+// при fork()/dup2()), но оба указывают через private_data на один и тот же
+// pipe_t. readers/writers считают живые file_t-ссылки на свой конец (а не
 // просто "открыт/закрыт"), чтобы fork() не путал дело.
 typedef struct pipe {
     uint8_t *buffer;
@@ -223,13 +215,9 @@ typedef struct pipe {
     uint32_t count;      // байт сейчас в буфере
     int readers;
     int writers;
-    // Процесс, заблокированный в pipe_read()/pipe_write() (не более
-    // одного с каждой стороны, как у console_input_waiter в input.c).
-    // Раньше блокировка (PROCESS_BLOCKED + schedule()) ничего не будила
-    // обратно в PROCESS_READY — планировщик пропускает всё, что не
-    // PROCESS_READY, так что читатель, дождавшийся пустого буфера раньше
-    // писателя, вис навсегда (не ловилось: test/pipe_test.elf всегда
-    // пишет раньше, чем читает).
+    // Процесс, заблокированный в pipe_read()/pipe_write() (не более одного
+    // с каждой стороны, как у console_input_waiter в input.c) — будится явно
+    // через pipe_wake(), иначе планировщик никогда не вернёт его в PROCESS_READY.
     process_t *read_waiter;
     process_t *write_waiter;
 } pipe_t;
@@ -261,16 +249,9 @@ static int pipe_read(file_t *f, void *buf, size_t count) {
                 break; // писателей больше нет и буфер пуст - EOF
             }
 
-            // НАЙДЕННЫЙ БАГ (терминал в GUI пустой: ни промпта, ни эха,
-            // хотя шелл честно пишет в пайп) — цикл раньше ждал полный
-            // count байт перед возвратом, даже если что-то уже прочитано.
-            // Настоящий read() на пайпе обязан вернуться при ХОТЯ БЫ
-            // одном байте ("короткое чтение"); terminal.c читает 256 байт
-            // разом, а шелл пишет промпт десятками байт одним sys_write() —
-            // они читались, но цикл не добирал до 256 и блокировал процесс
-            // навсегда (шелл тем временем ждёт ввод от терминала, который
-            // сам застрял здесь) — классический pipe-дедлок. Поэтому: если
-            // total>0, отдаём то, что есть, не дожидаясь остального.
+            // read() на пайпе обязан вернуться при хотя бы одном байте
+            // ("короткое чтение"), не дожидаясь полного count — иначе читатель,
+            // которому хватило бы уже принятого, блокируется навсегда.
             if (total > 0) break;
 
             // Ждём данных: уступаем CPU, пока кто-то не запишет или не
@@ -627,14 +608,11 @@ int vfs_close(int fd) {
     // f (file_t*) — ОДИН общий объект на все fd, что на него указывают:
     // fork() копирует fd_table родителя ребёнку присваиванием структуры
     // (process_fork(), process.c) — массив указателей, не сами file_t —
-    // так что files[i] родителя и ребёнка указывают на один и тот же
-    // file_t (тот же приём у vfs_dup2()). Раньше free_file(f) вызывался
-    // здесь безусловно: первый же process_exit() форкнутого ребёнка
-    // освобождал РОДИТЕЛЬСКИЙ file_t (например, у шелла) из-под ног —
-    // double-free/use-after-free, на практике — шелл, ломающийся после
-    // нескольких fork()+exec() подряд. f->inode->ref_count (vfs_dup_fd()
-    // увеличивает его на каждое дублирование fd) освобождает f только на
-    // последней ссылке.
+    // так что files[i] родителя и ребёнка указывают на один и тот же file_t
+    // (тот же приём у vfs_dup2()). f->inode->ref_count (vfs_dup_fd()
+    // увеличивает его на каждое дублирование fd) поэтому освобождает f
+    // только на последней ссылке — иначе один process_exit() освободил бы
+    // file_t, на который ещё смотрит другой процесс (double-free/UAF).
     int last_ref = 1;
     if (f->inode) {
         f->inode->ref_count--;

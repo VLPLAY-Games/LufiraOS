@@ -87,14 +87,12 @@ static void* acpi_find_table(void *sdt_start, uint32_t sdt_entries,
     return NULL;
 }
 
-// Ищем в DSDT объявление \_S5 (System State 5 — soft off) и достаём
-// реальные SLP_TYPa/SLP_TYPb. Это НЕ полноценный интерпретатор AML — целевой
-// поиск байтового паттерна "_S5_" с минимальной проверкой контекста, тот же
-// приём, что используют почти все hobby-ОС без ACPICA (см. OSDev wiki,
-// статья "AML"). Без этого shutdown "работал" только там, где платформа
-// случайно использует SLP_TYPa=0 (QEMU/Bochs/VirtualBox) — на части
-// реального железа он другой (3, 5, 6, 7...), и ACPI-выключение просто
-// не срабатывало бы, уходя в legacy-фоллбэки.
+// Ищем в DSDT объявление \_S5 (soft off) и достаём реальные SLP_TYPa/
+// SLP_TYPb. Не полноценный интерпретатор AML — целевой поиск байтового
+// паттерна "_S5_" с минимальной проверкой контекста (как у большинства
+// hobby-ОС без ACPICA). Без этого shutdown "работал" бы только там, где
+// SLP_TYPa случайно 0 (QEMU/Bochs/VirtualBox) — на реальном железе он
+// другой, и ACPI-выключение не срабатывало бы.
 static int acpi_find_s5_sleep_type(uint16_t *out_typa, uint16_t *out_typb) {
     if (!fadt || fadt->Dsdt == 0) return -1;
 

@@ -26,26 +26,21 @@ volatile int shell_is_respawn = 0;
 static process_t *(*shell_spawner_fn)(void) = NULL;
 
 // ============================================================
-// FPU/SSE context (FXSAVE/FXRSTOR) — see process.h for the field comment.
-//
-// Kernel code itself is built with -mgeneral-regs-only (Makefile) and never
-// touches XMM/x87/MMX, so this exists purely for ring3 processes — today
-// none of them use SSE either (lufira-packages' build.py uses the same
-// -mgeneral-regs-only flag), but nothing enforces that at the ABI level,
-// and the planned DOOM port will need real floats. Without this, two ring3
-// processes that both happened to use XMM registers would silently
-// corrupt each other's FPU state across every preemption.
+// FPU/SSE-контекст (FXSAVE/FXRSTOR) — см. комментарий у поля в process.h.
+// Ядро собирается с -mgeneral-regs-only и само не трогает XMM/x87/MMX — это
+// нужно только ring3-процессам (сейчас SSE не использует никто, но ничего
+// этого не запрещает, а планируемый порт DOOM будет). Без этого два
+// ring3-процесса с XMM портили бы друг другу FPU-состояние при вытеснении.
 // ============================================================
 
 #define FPU_STATE_SIZE 512 // fixed size/layout of the legacy FXSAVE area
 
-// Clean reference FXSAVE image, captured once in process_init() and
-// memcpy()'d into every new process's own area — NOT just zeroed: FCW/MXCSR
-// all-zero would mean every FPU/SSE exception is UNMASKED (bit layout is
-// "0 = enabled"), so the first float operation of any new process would
-// immediately fault (#MF/#XM) instead of just computing. fninit + a known
-// MXCSR gives a real, correctly-masked default state regardless of
-// whatever CR0/CR4/MXCSR the firmware happened to leave behind.
+// Эталонный образ FXSAVE, захватывается один раз в process_init() и
+// копируется в область каждого нового процесса — НЕ просто нули: нулевые
+// FCW/MXCSR означают, что все FPU/SSE-исключения размаскированы (бит "0 =
+// enabled"), и первая же float-операция нового процесса сразу зафолтится.
+// fninit + известный MXCSR дают корректное маскированное состояние
+// независимо от того, что оставила прошивка в CR0/CR4/MXCSR.
 static uint8_t fpu_init_template[FPU_STATE_SIZE] __attribute__((aligned(16)));
 
 static inline void fpu_save(uint8_t *area) {
@@ -56,23 +51,19 @@ static inline void fpu_restore(uint8_t *area) {
     asm volatile("fxrstor64 (%0)" :: "r"(area) : "memory");
 }
 
-// CR4.OSFXSR (bit 9) / CR4.OSXMMEXCPT (bit 10) must be set by the OS for
-// FXSAVE/FXRSTOR and SSE in general to be usable without #UD — the kernel
-// never set these itself (grepped: no CR4 write anywhere before this),
-// it has only ever "worked" because UEFI firmware (OVMF included) leaves
-// them set from its own long-mode SSE use. That's not something to rely
-// on — in particular the planned legacy-BIOS boot path (v0.9) will reach
-// long mode WITHOUT ever going through UEFI, with no guarantee CR4 is in
-// that state. Set both explicitly instead of inheriting firmware state.
+// CR4.OSFXSR(9)/OSXMMEXCPT(10) должны быть выставлены ОС для FXSAVE/FXRSTOR
+// и SSE без #UD — раньше это "работало" только потому, что прошивка UEFI
+// (включая OVMF) сама оставляет их выставленными. Полагаться на это нельзя:
+// планируемая загрузка через legacy BIOS (v0.9) попадёт в long mode вообще
+// без UEFI. Выставляем явно, а не наследуем состояние прошивки.
 static void fpu_enable(void) {
     uint64_t cr4;
     asm volatile("mov %%cr4, %0" : "=r"(cr4));
     cr4 |= (1 << 9) | (1 << 10);
     asm volatile("mov %0, %%cr4" :: "r"(cr4));
 
-    // CR0.EM (bit 2) must be clear (no x87/SSE emulation trap) and CR0.MP
-    // (bit 1) set (so WAIT/FPU instructions respect TS) — same reasoning
-    // as CR4 above: never touched before, only "worked" via firmware state.
+    // CR0.EM(2) должен быть снят (без trap на эмуляцию x87/SSE), CR0.MP(1) —
+    // выставлен (WAIT/FPU уважают TS) — та же причина, что и у CR4 выше.
     uint64_t cr0;
     asm volatile("mov %%cr0, %0" : "=r"(cr0));
     cr0 &= ~(1ULL << 2);
@@ -80,9 +71,8 @@ static void fpu_enable(void) {
     asm volatile("mov %0, %%cr0" :: "r"(cr0));
 }
 
-// Captures fpu_init_template — must run after fpu_enable() (FXSAVE itself
-// needs CR4.OSFXSR) and before the first process_create()/idle_process
-// setup that will memcpy() this template.
+// Захватывает fpu_init_template — должна выполняться после fpu_enable()
+// (FXSAVE нужен CR4.OSFXSR) и до первого process_create()/idle_process.
 static void fpu_init(void) {
     fpu_enable();
 
@@ -92,11 +82,9 @@ static void fpu_init(void) {
     fpu_save(fpu_init_template);
 }
 
-// fpu_state must be 16-byte aligned for FXSAVE/FXRSTOR; kmalloc() only
-// guarantees 8-byte alignment (heap.c), so over-allocate by 16 and align
-// the usable pointer up — fpu_state_raw (the real kmalloc() result, NOT
-// 16-byte aligned in general) is what free_fpu_state() below actually
-// kfree()'s. 0 on success, -1 on allocation failure.
+// fpu_state должен быть выровнен на 16 байт (FXSAVE/FXRSTOR), а kmalloc()
+// гарантирует только 8 — выделяем с запасом в 16 и выравниваем указатель;
+// fpu_state_raw (невыровненный результат kmalloc()) освобождает free_fpu_state().
 static int alloc_fpu_state(process_t *proc) {
     proc->fpu_state_raw = kmalloc(FPU_STATE_SIZE + 16);
     if (!proc->fpu_state_raw) {
@@ -146,10 +134,9 @@ uint64_t kernel_cr3 = 0;
 // process_create(), декремент — только в process_remove_from_list().
 static uint32_t process_count = 0;
 
-// Счётчик вложенных запретов прерываний. irq_disable()/irq_enable() иногда
-// вызываются уже изнутри обработчика IRQ (прерывания уже отключены CPU),
-// поэтому запоминаем EFLAGS.IF на первом захвате и делаем sti обратно только
-// если они были включены.
+// Счётчик вложенных запретов прерываний — irq_disable()/irq_enable() могут
+// вызываться уже из IRQ-обработчика, поэтому EFLAGS.IF запоминается на первом
+// захвате и восстанавливается, только если был включён.
 static volatile uint32_t irq_disable_counter = 0;
 static uint64_t irq_saved_flags = 0;
 
@@ -362,22 +349,19 @@ static uint64_t clone_address_space_deep(uint64_t src_pml4_phys) {
                         // копия, чем алиас в никуда.
                     }
 
-                    // PAGE_IDENTITY_SHARED снимается явно: memcpy() ниже
-                    // кладёт содержимое в СОБСТВЕННУЮ страницу ребёнка — для
-                    // него это уже личная память, которую его же
-                    // free_user_address_space() обязан освободить (иначе
-                    // страницы терялись бы для pmm на каждый fork(), см.
-                    // PAGE_IDENTITY_SHARED в paging.h).
+                    // PAGE_IDENTITY_SHARED снимается явно: memcpy() ниже кладёт
+                    // содержимое в СОБСТВЕННУЮ страницу ребёнка — его
+                    // free_user_address_space() обязан её освободить (иначе
+                    // страницы терялись бы для pmm на каждый fork(), см. paging.h).
                     uint64_t flags = src_pt[pt_idx] & (0xFFFULL | PAGE_NX) & ~(uint64_t)PAGE_IDENTITY_SHARED;
 
                     uint64_t new_phys = pmm_alloc_page();
                     if (!new_phys) return 0;
 
                     // Через kernel physmap (phys_to_virt), не через identity:
-                    // src_phys может быть страницей, занятой у форкающегося
-                    // процесса чем-то другим в его ELF-диапазоне 0x400000+
-                    // (fork() идёт под его собственным CR3) — см. phys_to_virt()
-                    // в paging.h.
+                    // src_phys может быть занят у форкающегося процесса чем-то
+                    // из его ELF-диапазона (fork() идёт под его собственным
+                    // CR3) — см. phys_to_virt() в paging.h.
                     memcpy(phys_to_virt(new_phys), phys_to_virt(src_phys), PAGE_SIZE);
 
                     new_pt[pt_idx] = (new_phys & 0x000FFFFFFFFFF000ULL) | flags;
@@ -657,10 +641,9 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     proc->cpu_ticks = 0;
     mailbox_init(&proc->mailbox);
 
-    // memset перед копированием, не только name[31]=0: иначе хвост буфера
-    // за коротким именем остаётся мусором из kmalloc() (не зануляется, см.
-    // malloc.c) и "утекает" через код, читающий name дальше NUL (нашлось на
-    // SYS_PSLIST: ps.c читал этот хвост как часть имени).
+    // memset перед копированием, не только name[31]=0: иначе хвост буфера за
+    // коротким именем остаётся мусором из kmalloc() (не зануляется) и
+    // "утекает" через код, читающий name дальше NUL (например, SYS_PSLIST).
     memset(proc->name, 0, sizeof(proc->name));
     for (int i = 0; i < 31 && name[i]; i++) proc->name[i] = name[i];
 
@@ -878,12 +861,10 @@ void process_exit(int exit_code) {
     if (exiting_process->pid == foreground_pid)
         foreground_pid = 0;
 
-    // WM — userspace-процесс; если он сам умирает (крах/kill), снимаем
-    // регистрацию (иначе SYS_WIN_*/SYS_FB_* повисли бы, ожидая ответа от
-    // несуществующего pid) и восстанавливаем текстовый режим — иначе экран
-    // застыл бы на последнем GUI-кадре. Известное ограничение: клиенты, уже
-    // заблокированные в wm_call() на RPC к умершему WM, остаются
-    // заблокированы навсегда (нет таймаута/сигнала для этого случая).
+    // WM — userspace-процесс; если он умирает сам (крах/kill), снимаем
+    // регистрацию (иначе SYS_WIN_*/SYS_FB_* повисли бы без ответа) и
+    // восстанавливаем текстовый режим. Известное ограничение: клиенты, уже
+    // заблокированные в wm_call() на умершем WM, остаются заблокированы навсегда.
     if (exiting_process->pid == g_wm_pid) {
         g_wm_pid = 0;
         console_redraw_from_history();
@@ -1238,10 +1219,9 @@ void switch_to_process(process_t *next) {
 
     // Доставка отложенного сигнала НЕ здесь: context в момент переключения
     // может застать процесс где угодно в середине кернела — подмена
-    // context.rip на обработчик привела бы к page fault при резюме (найдено
-    // тестированием). Доставка — в syscall_handler()
-    // (process_deliver_pending_signal(), перед возвратом из каждого
-    // syscall'а), где frame_ptr гарантированно настоящая ring3-точка.
+    // context.rip на обработчик привела бы к page fault при резюме. Доставка —
+    // в syscall_handler() (process_deliver_pending_signal(), перед возвратом
+    // из каждого syscall'а), где frame_ptr гарантированно настоящая ring3-точка.
 
     // Сохраняем FPU/SSE родителя ДО переключения — после него регистры
     // принадлежат следующему процессу. Тот же prev/idle fallback, что у
@@ -1250,21 +1230,18 @@ void switch_to_process(process_t *next) {
     process_t *fpu_save_owner = (prev && prev != next) ? prev : idle_process;
     fpu_save(fpu_save_owner->fpu_state);
 
-    // Первая активация идёт через настоящий ring0->ring3 переход (iretq,
-    // см. process_t.first_run в process.h), не через обычный context_switch()
-    // (jmp, CS/CPL не меняются). Все последующие резюме, включая вытесненный
-    // из ring3 процесс, используют context_switch().
+    // Первая активация идёт через настоящий ring0->ring3 переход (iretq, см.
+    // process_t.first_run в process.h), не через обычный context_switch()
+    // (jmp, CS/CPL не меняются); все последующие резюме — через context_switch().
     //
-    // ВАЖНО: ни один из них "не возвращается" в обычном смысле для ЭТОГО
+    // ВАЖНО: ни один из них не "возвращается" обычным образом для ЭТОГО
     // вызова — context_switch()/context_enter_ring3() захватывают RIP как
-    // "адрес возврата из CALL" и позже передают управление сюда же, но уже
-    // для ДРУГОГО (любого) процесса, когда-то переключённого прочь именно
-    // в этой точке кода. Поэтому fpu_restore() ниже обязан читать
-    // current_process (глобальная переменная, актуальная к этому моменту
-    // — её выставляет switch_to_process() ДО низкоуровневого переключения,
-    // см. выше), а НЕ локальный next — next пережил переключение как часть
-    // сохранённого состояния стека и может указывать совсем не на того,
-    // кто реально сейчас выполняется.
+    // адрес возврата из CALL и позже передают управление сюда же, но уже для
+    // ДРУГОГО процесса, когда-то переключённого прочь в этой же точке. Поэтому
+    // fpu_restore() ниже обязан читать глобальный current_process (его
+    // выставляет switch_to_process() до низкоуровневого переключения), а не
+    // локальный next — next пережил переключение в сохранённом состоянии
+    // стека и может указывать совсем не на того, кто реально сейчас выполняется.
     if (next->first_run) {
         next->first_run = 0;
         context_enter_ring3(prev_context, &next->context);
@@ -1499,13 +1476,11 @@ uint32_t process_get_wm_pid(void) {
     return g_wm_pid;
 }
 
-// Явный отказ от регистрации ДО выхода процесса — нужен WM (apps/wm.c)
-// для передачи полноэкранного владения doom.elf: fork() + эта функция в
-// родителе + sys_wm_register() в ребёнке, вместо старого трюка с exec()
-// самого себя (тот терял PID WM навсегда — после выхода игры возвращало в
-// голую консоль, а не обратно в WM). 0 — успех, -1 — вызывающий не
-// текущий владелец (ничего не меняем — защита от случайного освобождения
-// чужой регистрации).
+// Явный отказ от регистрации ДО выхода процесса — нужен WM (apps/wm.c) для
+// передачи полноэкранного владения doom.elf: fork() + эта функция в родителе
+// + sys_wm_register() в ребёнке, вместо exec() самого себя (терял PID WM
+// навсегда). 0 — успех, -1 — вызывающий не текущий владелец (защита от
+// освобождения чужой регистрации).
 int process_wm_unregister(uint32_t pid) {
     if (g_wm_pid != pid) return -1;
     g_wm_pid = 0;
@@ -1623,13 +1598,10 @@ uint64_t process_fork(uint64_t frame_ptr) {
     child->stack_size = parent->stack_size;
 
     // process_create() уже завёл ребёнку-плейсхолдеру собственные
-    // stdin/stdout/stderr (vfs_init_fd_table()), которые сейчас целиком
-    // заменяются родительской таблицей ниже. Без явного закрытия здесь эти
-    // 3 file_t/inode никогда не освобождались бы (баг: после ~85 fork()+exec()
-    // system-wide file_table[256] забивался осиротевшими записями ino=101-103,
-    // и alloc_file() начинал возвращать NULL для настоящих открытий — выглядело
-    // как порча ФС). closes временно подменяют current_fd_table на плейсхолдер,
-    // как в free_process_resources().
+    // stdin/stdout/stderr — без явного закрытия здесь эти 3 file_t/inode
+    // никогда не освобождались бы, раздувая system-wide file_table утечкой на
+    // каждый fork()+exec(). closes временно подменяют current_fd_table на
+    // плейсхолдер, как в free_process_resources().
     {
         fd_table_t *saved = current_fd_table;
         current_fd_table = &child->fd_table;
@@ -1717,11 +1689,10 @@ uint64_t process_fork(uint64_t frame_ptr) {
 
 // Доставляет p->pending_signal, переписывая конкретный syscall_frame_t,
 // который syscall_entry.S восстановит через sysret/iretq (см. вызов в
-// syscall_handler(), syscall.c). Единственное безопасное место: в отличие
-// от process_t.context (может застать процесс где угодно внутри кернела,
-// если вытеснили посреди syscall'а — ранняя версия, подменявшая context
-// прямо в switch_to_process(), падала в page fault на резюме), frame_ptr
-// здесь всегда настоящая ring3-точка возврата.
+// syscall_handler(), syscall.c). Единственное безопасное место: в отличие от
+// process_t.context (может застать процесс где угодно внутри кернела, если
+// вытеснили посреди syscall'а), frame_ptr здесь всегда настоящая
+// ring3-точка возврата.
 void process_deliver_pending_signal(uint64_t frame_ptr) {
     process_t *p = current_process;
     if (!p || !frame_ptr) return;

@@ -23,19 +23,9 @@
 #define MOUSE_ACK               0xFA
 #define MOUSE_RESET_OK          0xAA
 
-// НАЙДЕННЫЙ БАГ (причина зависания всей системы на старте): все функции
-// ниже, ждущие байт от PS/2-контроллера/мыши, были безлимитными busy-wait
-// циклами. На машине без физической PS/2-мыши (обычный случай для
-// usb-только железа и части VM-конфигураций) AUX-порт никогда не присылает
-// ни одного байта — mouse_init() вызывается ДО sti/xhci_init() (см.
-// kernel.c), так что это происходило раньше, чем система успевала поднять
-// хоть что-то ещё, включая сам USB/xHCI, который и предоставил бы реальную
-// мышь. Итог — полное зависание на отсутствии необязательного устройства.
-// Фикс: тот же паттерн ограниченного таймаута, что уже был в
-// keyboard_init() (kernel/drivers/keyboard/keyboard.c) — ждём байт не
-// бесконечно, а конечное число итераций, и если устройства нет —
-// mouse_init() корректно завершается с mouse_initialized=0, как и раньше
-// для остальных ошибок протокола.
+// Ограниченный таймаут ожидания байта от PS/2-контроллера/мыши: на
+// usb-only железе AUX-порт не отвечает вообще, и без лимита busy-wait
+// завис бы навсегда.
 #define PS2_TIMEOUT_ITERS 200000
 
 static int mouse_initialized = 0;
@@ -53,8 +43,8 @@ static inline void outb(uint16_t port, uint8_t val) {
     asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 
-// Таймаут и тут — иначе залипший контроллер (бит "input full" не падает)
-// вешает даже запись команды, не только чтение ответа.
+// Таймаут и тут: залипший контроллер (бит "input full" не падает) иначе
+// вешает и запись команды.
 static void ps2_wait_write(void) {
     int timeout = PS2_TIMEOUT_ITERS;
     while (--timeout && (inb(PS2_STATUS_PORT) & 0x02)) {
@@ -67,8 +57,7 @@ static void ps2_flush_output_buffer(void) {
     }
 }
 
-// Возвращает 0 и байт в *out при успехе, -1 по таймауту (контроллер не
-// отвечает вообще — большинство "чисто USB" машин).
+// 0 и байт в *out при успехе, -1 по таймауту (контроллер не отвечает).
 static int ps2_read_controller_data(uint8_t *out) {
     int timeout = PS2_TIMEOUT_ITERS;
     while (--timeout) {
@@ -80,10 +69,9 @@ static int ps2_read_controller_data(uint8_t *out) {
     return -1;
 }
 
-// Как ps2_read_controller_data(), но отбрасывает байты НЕ от AUX-порта
-// (бит 5) — например, залипший байт клавиатуры — и ждёт AUX-байт в рамках
-// ОДНОГО общего таймаута, а не отдельного на каждую попытку (иначе шум от
-// клавиатуры мог бы бесконечно продлевать ожидание).
+// Как ps2_read_controller_data(), но отбрасывает байты не от AUX-порта
+// (бит 5, например залипший байт клавиатуры) в рамках одного общего
+// таймаута, а не отдельного на каждую попытку.
 static int ps2_read_mouse_data(uint8_t *out) {
     int timeout = PS2_TIMEOUT_ITERS;
     while (--timeout) {
@@ -120,7 +108,6 @@ static int mouse_send_command(uint8_t cmd) {
 }
 
 void mouse_init(void) {
-    // Все отладочные printf убраны - статус выводится в kernel.c
     mouse_initialized = 0;
     packet_index = 0;
 
@@ -160,8 +147,7 @@ void mouse_init(void) {
         return;
     }
 
-    // ID байт всё равно нужно прочитать (таймаут тут не критичен -
-    // дальнейшие mouse_send_command() всё равно сами защищены).
+    // ID байт нужно вычитать, таймаут тут не критичен.
     uint8_t id_byte;
     (void)ps2_read_mouse_data(&id_byte);
 
