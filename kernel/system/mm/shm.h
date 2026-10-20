@@ -35,3 +35,11 @@ void shm_release(int id);
 // (не хватило бы OS-битов), поэтому id ищется по месту. До ~4K сравнений
 // (MAX_SHARED_REGIONS*MAX_SHARED_REGION_PAGES), не горячий путь.
 int shm_find_region_by_page(uint64_t phys);
+
+// Именованный shm (SYS_SHM_CREATE/SYS_SHM_ATTACH, syscall.c) — неродственный
+// процесс знает только id (передан ему заранее через control-plane IPC,
+// mailbox.h/driver.h), не сам список страниц; нужен способ прочитать его
+// обратно у реестра, чтобы замаппить те же физические страницы в СВОЁ
+// адресное пространство. Копирует до max_pages страниц в pages_out,
+// *num_pages_out — реальное число страниц у области. 0 успех, -1 неверный id.
+int shm_get_pages(int id, uint64_t *pages_out, uint64_t max_pages, uint64_t *num_pages_out);

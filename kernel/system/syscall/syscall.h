@@ -332,6 +332,98 @@
 // третьим неизменным параметром). Всегда 0.
 #define SYS_NET_CONFIG_SET 76
 
+// ===== Инфраструктура userspace-драйверов (готовится под 0.9.5 — перенос
+// сети/звука из ядра в userspace). См. driver.h про модель привилегий:
+// процесс обязан СНАЧАЛА заявить конкретное PCI-устройство
+// (SYS_DRIVER_CLAIM_DEVICE), и только потом ему доступны остальные syscall'ы
+// ниже — и только в границах заявленного устройства, не "любому root". =====
+
+// SYS_DRIVER_CLAIM_DEVICE (77): vendor_id, device_id, out_ptr
+// (lufira_pci_device_t*). Ищет первое ещё не заявленное PCI-устройство с
+// таким vendor/device id, заявляет его за вызывающим и копирует в out_ptr
+// (включая все 6 BAR — отдельный syscall на BAR не нужен). Root-only.
+// Возврат: 0 успех; -EPERM не root; -EFAULT плохой указатель; -ENOENT нет ни
+// одного подходящего незанятого устройства; -EAGAIN таблица заявок
+// переполнена (driver.h: MAX_DRIVER_CLAIMS на всю систему).
+#define SYS_DRIVER_CLAIM_DEVICE 77
+
+// SYS_DRIVER_RELEASE_DEVICE (78): bdf_packed = (bus<<16)|(device<<8)|function.
+// Снимает собственную заявку (отдельно от автоматического снятия при
+// завершении процесса, process_exit()). 0 успех, -EPERM не владелец/нет
+// такой заявки.
+#define SYS_DRIVER_RELEASE_DEVICE 78
+
+// SYS_PCI_CONFIG_READ (79): bdf_offset_packed = (bus<<24)|(device<<16)|
+// (function<<8)|offset, width (1/2/4 байта), out_ptr (uint32_t*). Читает
+// config space ЗАЯВЛЕННОГО вызывающим устройства. 0 успех (значение в
+// *out_ptr), -EPERM устройство не заявлено этим процессом, -EINVAL
+// неверный width, -EFAULT плохой указатель.
+#define SYS_PCI_CONFIG_READ 79
+
+// SYS_PCI_CONFIG_WRITE (80): bdf_offset_packed (как выше), width, value.
+// Пишет в config space заявленного устройства. 0 успех, -EPERM/-EINVAL —
+// как у чтения.
+#define SYS_PCI_CONFIG_WRITE 80
+
+// SYS_IO_IN (81): port, width (1/2/4), out_ptr (uint32_t*). Порт обязан
+// попадать в I/O BAR устройства, заявленного вызывающим (driver_owns_device()
+// + сверка диапазона — syscall.c). 0 успех, -EPERM порт вне заявленных I/O
+// BAR, -EINVAL неверный width, -EFAULT плохой указатель.
+#define SYS_IO_IN 81
+
+// SYS_IO_OUT (82): port, width, value. Симметрично SYS_IO_IN. 0 успех,
+// -EPERM/-EINVAL — как у чтения.
+#define SYS_IO_OUT 82
+
+// SYS_MMAP_MMIO (83): phys_addr, length. [phys_addr, phys_addr+length)
+// обязан целиком попадать в ОДИН memory BAR устройства, заявленного
+// вызывающим. Маппит его как некэшируемый (PAGE_PCD) regions в адресное
+// пространство процесса — PAGE_MMIO_NOFREE (paging.h), unmap/завершение
+// процесса не пытаются отдать эту физическую память pmm. Возврат: виртуальный
+// адрес, (uint64_t)-1 при ошибке (не заявлено/вне BAR/нет памяти под
+// таблицы страниц).
+#define SYS_MMAP_MMIO 83
+
+// SYS_DMA_ALLOC (84): num_pages, phys_out_ptr (uint64_t*). Выделяет
+// num_pages ФИЗИЧЕСКИ ПОДРЯД идущих страниц (pmm_alloc_contiguous_pages) и
+// маппит их в адресное пространство вызывающего обычной (кэшируемой,
+// read-write) памятью — нужна устройствам без scatter-gather под кольца
+// дескрипторов. Доступен любому процессу с хотя бы одной действующей
+// PCI-заявкой (driver_is_registered()), не привязан к конкретному
+// устройству. Пишет физический адрес первой страницы в *phys_out_ptr.
+// Возврат: виртуальный адрес, (uint64_t)-1 при ошибке.
+#define SYS_DMA_ALLOC 84
+
+// SYS_IRQ_REGISTER (85): irq_line. Закрепляет аппаратную линию за вызывающим
+// — обязан совпадать с PCI_INTERRUPT_LINE устройства, заявленного этим же
+// процессом. 0 успех, -EPERM линия не соответствует ни одному заявленному
+// устройству/уже закреплена за другим процессом, -EINVAL неверный номер.
+#define SYS_IRQ_REGISTER 85
+
+// SYS_IRQ_WAIT (86): irq_line. Блокирует вызывающего до следующего
+// срабатывания закреплённой за ним линии (или сразу возвращает, если уже
+// накопилось). 0 при срабатывании, -EPERM линия не закреплена за этим
+// процессом.
+#define SYS_IRQ_WAIT 86
+
+// SYS_SHM_CREATE (87): num_pages, id_out_ptr (int32_t*). Общий примитив
+// bulk-IPC для НЕродственных процессов (mailbox — только 96 байт на
+// сообщение, этого хватает для управления, не для Ethernet-кадров/PCM) —
+// выделяет и обнуляет num_pages страниц, маппит их в СВОЁ адресное
+// пространство (как MAP_SHARED mmap) и регистрирует в реестре shm.c под
+// новым id, который пишет в *id_out_ptr. Этот id — всё, что нужно сообщить
+// другому процессу (через SYS_IPC_SEND), чтобы тот тоже подключился
+// (SYS_SHM_ATTACH). Возврат: виртуальный адрес, (uint64_t)-1 при ошибке.
+#define SYS_SHM_CREATE 87
+
+// SYS_SHM_ATTACH (88): shm_id (от создателя, см. выше). Маппит те же
+// физические страницы в адресное пространство вызывающего (shm_add_ref()).
+// Снимается обычным SYS_MUNMAP(addr, length) — length обязан быть
+// num_pages*PAGE_SIZE той же области (unmap_page() сам вызовет
+// shm_release() по PAGE_MMAP_SHARED, см. paging.c). Возврат: виртуальный
+// адрес, (uint64_t)-1 при ошибке (неверный id).
+#define SYS_SHM_ATTACH 88
+
 // Флаги для sys_open
 #define O_RDONLY    0
 #define O_WRONLY    1
@@ -494,6 +586,20 @@ typedef struct {
     int32_t events;
     int32_t revents;
 } lufira_pollfd_t;
+
+// Для SYS_DRIVER_CLAIM_DEVICE (77) — копия pci_device_t (pci.h) + все 6 BAR
+// сразу (отдельный syscall на BAR не нужен). bars[i].size==0 — BAR не занят
+// (pci_get_bar() вернул "unused"/ошибку, см. driver.c).
+typedef struct {
+    uint8_t  bus, device, function;
+    uint8_t  interrupt_line;
+    uint16_t vendor_id, device_id;
+    struct {
+        uint64_t address;
+        uint64_t size;
+        uint8_t  is_io;
+    } bars[6];
+} lufira_pci_device_t;
 
 // Потолок длины ЛЮБОЙ NUL-терминированной строки от пользователя (filename
 // для open/exec, path для chdir) — не даёт неверно терминированному буферу

@@ -256,3 +256,7 @@ void pci_enable_bus_master(
 void pci_disable_interrupts(
     const pci_device_t* device
 );
+
+void pci_enable_interrupts(
+    const pci_device_t* device
+);

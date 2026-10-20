@@ -104,6 +104,23 @@ static uint32_t pci_make_address(
  * Config read 32
  * ========================================================= */
 
+// CONFIG_ADDRESS/CONFIG_DATA — ровно два порта на ВСЮ шину PCI (механизм #1),
+// используются последовательно (сначала адрес, потом данные). Без cli/sti
+// любой другой код, тронувший PCI config space между этими двумя outl/inl
+// (например таймерный IRQ, прервавший нас ровно здесь), мог молча подменить
+// CONFIG_ADDRESS — и inl() вернёт данные совсем другого устройства. Подозрение
+// именно на эту гонку — см. анализ зависаний NVMe/xHCI при загрузке.
+static inline uint64_t pci_cli_save(void) {
+    uint64_t flags;
+    asm volatile("pushfq; popq %0" : "=r"(flags) :: "memory");
+    asm volatile("cli");
+    return flags;
+}
+
+static inline void pci_restore(uint64_t flags) {
+    asm volatile("push %0; popfq" : : "r"(flags) : "memory", "cc");
+}
+
 uint32_t pci_config_read32(
     uint8_t bus,
     uint8_t device,
@@ -112,6 +129,7 @@ uint32_t pci_config_read32(
 )
 {
     uint32_t address;
+    uint32_t value;
 
     address = pci_make_address(
         bus,
@@ -120,14 +138,18 @@ uint32_t pci_config_read32(
         offset
     );
 
+    uint64_t flags = pci_cli_save();
     outl(
         PCI_CONFIG_ADDRESS,
         address
     );
 
-    return inl(
+    value = inl(
         PCI_CONFIG_DATA
     );
+    pci_restore(flags);
+
+    return value;
 }
 
 /* =========================================================
@@ -207,6 +229,7 @@ void pci_config_write32(
         offset
     );
 
+    uint64_t flags = pci_cli_save();
     outl(
         PCI_CONFIG_ADDRESS,
         address
@@ -216,6 +239,7 @@ void pci_config_write32(
         PCI_CONFIG_DATA,
         value
     );
+    pci_restore(flags);
 }
 
 /* =========================================================
@@ -1080,6 +1104,28 @@ void pci_disable_interrupts(
     command = pci_get_command(dev);
 
     command |= PCI_COMMAND_INT_DISABLE;
+
+    pci_set_command(
+        dev,
+        command
+    );
+}
+
+/* =========================================================
+ * Re-enable legacy INTx interrupts (userspace driver processes,
+ * driver.h/SYS_IRQ_REGISTER — в отличие от остальных драйверов ядра, которые
+ * сознательно остаются на поллинге)
+ * ========================================================= */
+
+void pci_enable_interrupts(
+    const pci_device_t* dev
+)
+{
+    uint16_t command;
+
+    command = pci_get_command(dev);
+
+    command &= ~PCI_COMMAND_INT_DISABLE;
 
     pci_set_command(
         dev,

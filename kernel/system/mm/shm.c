@@ -62,6 +62,17 @@ void shm_release(int id) {
     r->num_pages = 0;
 }
 
+int shm_get_pages(int id, uint64_t *pages_out, uint64_t max_pages, uint64_t *num_pages_out) {
+    if (id < 0 || id >= MAX_SHARED_REGIONS || !g_regions[id].in_use) return -1;
+
+    shared_region_t *r = &g_regions[id];
+    uint64_t n = r->num_pages;
+    if (n > max_pages) n = max_pages;
+    for (uint64_t i = 0; i < n; i++) pages_out[i] = r->pages[i];
+    if (num_pages_out) *num_pages_out = r->num_pages;
+    return 0;
+}
+
 int shm_find_region_by_page(uint64_t phys) {
     for (int i = 0; i < MAX_SHARED_REGIONS; i++) {
         if (!g_regions[i].in_use) continue;

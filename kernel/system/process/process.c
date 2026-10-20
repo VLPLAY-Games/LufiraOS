@@ -12,6 +12,7 @@
 #include "system/klog/klog.h"
 #include "fs/lufirafs/lufirafs.h"
 #include "system/ipc/wm_protocol.h"
+#include "system/driver/driver.h"
 
 #ifndef PAGE_PS
 #define PAGE_PS 0x80    // Page size (2MB/1GB) — как и в elf.c
@@ -858,6 +859,11 @@ void process_exit(int exit_code) {
     exiting_process->exit_code = exit_code;
     exiting_process->state = PROCESS_TERMINATED;
 
+    // Снимает все PCI-заявки и IRQ-регистрации (driver.h) — иначе умерший
+    // userspace-драйвер навечно держит устройство недоступным для следующего
+    // запуска netd/soundd.
+    driver_release_process(exiting_process->pid);
+
     if (exiting_process->pid == foreground_pid)
         foreground_pid = 0;
 
@@ -1347,6 +1353,9 @@ static int terminate_process_by_signal(process_t *p, int sig) {
     // Как и в настоящих шеллах: $? для процесса, убитого сигналом, — 128+sig.
     p->exit_code = 128 + sig;
     p->state = PROCESS_TERMINATED;
+
+    // См. тот же приём и комментарий в process_exit() выше.
+    driver_release_process(p->pid);
 
     // Это нужно сделать ДО возможного switch_to_process()/schedule() ниже
     // (когда p — сам current_process, этот вызов может никогда не

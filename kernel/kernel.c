@@ -7,6 +7,7 @@
 #include "system/mm/heap.h"
 #include "system/mm/shm.h"
 #include "drivers/pci/pci.h"
+#include "system/driver/driver.h"
 #include "drivers/keyboard/keyboard.h"
 #include "drivers/mouse/mouse.h"
 #include "drivers/console/console.h"
@@ -340,6 +341,7 @@ void _start(BootInfo* bi) {
     // pcspeaker_init();
 
     pci_init();
+    driver_init(); // таблица заявок userspace-драйверов на PCI-устройства (driver.h)
 
     asm volatile("sti");
     irq_enable(0);  // таймер

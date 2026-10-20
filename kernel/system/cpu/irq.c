@@ -3,6 +3,7 @@
 #include "drivers/keyboard/keyboard.h"
 #include "drivers/mouse/mouse.h"
 #include "system/timer/pit.h"
+#include "system/driver/driver.h"
 
 // Прямая работа с портами PIC
 static inline uint8_t inb(uint16_t port) {
@@ -53,6 +54,10 @@ void irq_handler(uint64_t vector, interrupt_frame_t *frame) {
             mouse_irq_handler();
             break;
         default:
+            // Любая линия без зашитого в ядро обработчика — возможно,
+            // закреплена за userspace-драйвером (driver.h/SYS_IRQ_REGISTER).
+            // Не делает ничего, если никто её не регистрировал.
+            driver_irq_notify(irq);
             break;
     }
 }

@@ -247,12 +247,16 @@ void unmap_page(uint64_t virt) {
     
     uint64_t phys = *pte & 0x000FFFFFFFFFF000ULL;
     if (phys) {
-        // PAGE_MMAP_SHARED — страница общая через MAP_SHARED (shm.h);
-        // pmm_free_page() внутри shm_release() происходит только когда её
-        // отпустит ПОСЛЕДНИЙ процесс. Если область ещё не зарегистрирована
-        // (sys_mmap() откатился до shm_create()), shm_find_region_by_page()
-        // вернёт -1 — тогда освобождаем как обычно.
-        if (*pte & PAGE_MMAP_SHARED) {
+        // PAGE_MMIO_NOFREE — см. комментарий в paging.h: физический адрес не
+        // из pmm, освобождать его через pmm_free_page() нельзя вообще.
+        if (*pte & PAGE_MMIO_NOFREE) {
+            // ничего не делаем — только снять маппинг (ниже)
+        } else if (*pte & PAGE_MMAP_SHARED) {
+            // PAGE_MMAP_SHARED — страница общая через MAP_SHARED (shm.h);
+            // pmm_free_page() внутри shm_release() происходит только когда её
+            // отпустит ПОСЛЕДНИЙ процесс. Если область ещё не зарегистрирована
+            // (sys_mmap() откатился до shm_create()), shm_find_region_by_page()
+            // вернёт -1 — тогда освобождаем как обычно.
             int id = shm_find_region_by_page(phys);
             if (id >= 0) shm_release(id);
             else pmm_free_page(phys);
@@ -426,6 +430,11 @@ void free_user_address_space(uint64_t pml4_phys) {
                     if (pt[pt_idx] & PAGE_IDENTITY_SHARED) continue;
 
                     uint64_t leaf_phys = pt[pt_idx] & 0x000FFFFFFFFFF000ULL;
+                    // PAGE_MMIO_NOFREE — см. тот же комментарий в unmap_page()
+                    // выше: физический адрес не из pmm, пропускаем целиком.
+                    if (pt[pt_idx] & PAGE_MMIO_NOFREE) {
+                        continue;
+                    }
                     // PAGE_MMAP_SHARED — см. тот же комментарий в unmap_page()
                     // выше (v0.8-мост, пункт 4): освобождаем через
                     // refcount-реестр shm.c, а не напрямую.

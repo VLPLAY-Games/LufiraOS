@@ -30,6 +30,8 @@
 #include "net/icmp.h"
 #include "drivers/net/rtl8139.h"
 #include "drivers/sound/sound.h"
+#include "drivers/pci/pci.h"
+#include "system/driver/driver.h"
 #include "version.h"
 
 extern lufirafs_t lufirafs;
@@ -1942,6 +1944,376 @@ static uint64_t sys_net_fetch(uint64_t url_ptr, uint64_t out_buf_ptr, uint64_t o
     return (uint64_t)(int64_t)n;
 }
 
+// ===== Инфраструктура userspace-драйверов (driver.h) — см. подробные
+// комментарии у каждого SYS_DRIVER_*/SYS_PCI_*/SYS_IO_*/SYS_MMAP_MMIO/
+// SYS_DMA_ALLOC/SYS_IRQ_*/SYS_SHM_* в syscall.h. =====
+
+static void bdf_from_packed(uint64_t packed, uint8_t *bus, uint8_t *device, uint8_t *function) {
+    *bus = (uint8_t)(packed >> 16);
+    *device = (uint8_t)(packed >> 8);
+    *function = (uint8_t)packed;
+}
+
+static void bdf_offset_from_packed(uint64_t packed, uint8_t *bus, uint8_t *device,
+                                   uint8_t *function, uint8_t *offset) {
+    *bus = (uint8_t)(packed >> 24);
+    *device = (uint8_t)(packed >> 16);
+    *function = (uint8_t)(packed >> 8);
+    *offset = (uint8_t)packed;
+}
+
+// SYS_DRIVER_CLAIM_DEVICE (77).
+static uint64_t sys_driver_claim_device(uint64_t vendor_id, uint64_t device_id, uint64_t out_ptr,
+                                        uint64_t unused3, uint64_t unused4) {
+    (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (current_process->uid != 0) return (uint64_t)-EPERM;
+    if (!is_user_range_valid(current_process->page_table, out_ptr, sizeof(lufira_pci_device_t), 1))
+        return (uint64_t)-EFAULT;
+
+    pci_device_t dev;
+    int rc = driver_claim_device(current_process->pid, (uint16_t)vendor_id, (uint16_t)device_id, &dev);
+    if (rc == -2) return (uint64_t)-EAGAIN;
+    if (rc != 0) return (uint64_t)-ENOENT;
+
+    lufira_pci_device_t out;
+    memset(&out, 0, sizeof(out));
+    out.bus = dev.bus; out.device = dev.device; out.function = dev.function;
+    out.interrupt_line = dev.interrupt_line;
+    out.vendor_id = dev.vendor_id; out.device_id = dev.device_id;
+    for (int i = 0; i < 6; i++) {
+        pci_bar_t bar;
+        if (pci_get_bar(&dev, (uint8_t)i, &bar) == 0) {
+            out.bars[i].address = bar.address;
+            out.bars[i].size = bar.size;
+            out.bars[i].is_io = bar.is_io;
+        }
+    }
+    memcpy((void *)out_ptr, &out, sizeof(out));
+    return 0;
+}
+
+// SYS_DRIVER_RELEASE_DEVICE (78).
+static uint64_t sys_driver_release_device(uint64_t bdf_packed, uint64_t unused1, uint64_t unused2,
+                                          uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+
+    uint8_t bus, device, function;
+    bdf_from_packed(bdf_packed, &bus, &device, &function);
+    if (driver_release_device(current_process->pid, bus, device, function) != 0)
+        return (uint64_t)-EPERM;
+    return 0;
+}
+
+// SYS_PCI_CONFIG_READ (79).
+static uint64_t sys_pci_config_read(uint64_t bdf_offset_packed, uint64_t width, uint64_t out_ptr,
+                                    uint64_t unused3, uint64_t unused4) {
+    (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (!is_user_range_valid(current_process->page_table, out_ptr, sizeof(uint32_t), 1))
+        return (uint64_t)-EFAULT;
+
+    uint8_t bus, device, function, offset;
+    bdf_offset_from_packed(bdf_offset_packed, &bus, &device, &function, &offset);
+    if (!driver_owns_device(current_process->pid, bus, device, function))
+        return (uint64_t)-EPERM;
+
+    uint32_t value;
+    switch (width) {
+        case 1: value = pci_config_read8(bus, device, function, offset); break;
+        case 2: value = pci_config_read16(bus, device, function, offset); break;
+        case 4: value = pci_config_read32(bus, device, function, offset); break;
+        default: return (uint64_t)-EINVAL;
+    }
+    *(uint32_t *)out_ptr = value;
+    return 0;
+}
+
+// SYS_PCI_CONFIG_WRITE (80).
+static uint64_t sys_pci_config_write(uint64_t bdf_offset_packed, uint64_t width, uint64_t value,
+                                     uint64_t unused3, uint64_t unused4) {
+    (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+
+    uint8_t bus, device, function, offset;
+    bdf_offset_from_packed(bdf_offset_packed, &bus, &device, &function, &offset);
+    if (!driver_owns_device(current_process->pid, bus, device, function))
+        return (uint64_t)-EPERM;
+
+    switch (width) {
+        case 1: pci_config_write8(bus, device, function, offset, (uint8_t)value); break;
+        case 2: pci_config_write16(bus, device, function, offset, (uint16_t)value); break;
+        case 4: pci_config_write32(bus, device, function, offset, (uint32_t)value); break;
+        default: return (uint64_t)-EINVAL;
+    }
+    return 0;
+}
+
+// SYS_IO_IN (81).
+static uint64_t sys_io_in(uint64_t port, uint64_t width, uint64_t out_ptr,
+                          uint64_t unused3, uint64_t unused4) {
+    (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (width != 1 && width != 2 && width != 4) return (uint64_t)-EINVAL;
+    if (port > 0xFFFF) return (uint64_t)-EINVAL;
+    if (!is_user_range_valid(current_process->page_table, out_ptr, sizeof(uint32_t), 1))
+        return (uint64_t)-EFAULT;
+    if (!driver_io_port_allowed(current_process->pid, (uint16_t)port, (uint8_t)width))
+        return (uint64_t)-EPERM;
+
+    uint32_t value;
+    switch (width) {
+        case 1: { uint8_t v; asm volatile("inb %1, %0" : "=a"(v) : "Nd"((uint16_t)port)); value = v; break; }
+        case 2: { uint16_t v; asm volatile("inw %1, %0" : "=a"(v) : "Nd"((uint16_t)port)); value = v; break; }
+        default: { uint32_t v; asm volatile("inl %1, %0" : "=a"(v) : "Nd"((uint16_t)port)); value = v; break; }
+    }
+    *(uint32_t *)out_ptr = value;
+    return 0;
+}
+
+// SYS_IO_OUT (82).
+static uint64_t sys_io_out(uint64_t port, uint64_t width, uint64_t value,
+                           uint64_t unused3, uint64_t unused4) {
+    (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (width != 1 && width != 2 && width != 4) return (uint64_t)-EINVAL;
+    if (port > 0xFFFF) return (uint64_t)-EINVAL;
+    if (!driver_io_port_allowed(current_process->pid, (uint16_t)port, (uint8_t)width))
+        return (uint64_t)-EPERM;
+
+    switch (width) {
+        case 1: asm volatile("outb %0, %1" : : "a"((uint8_t)value), "Nd"((uint16_t)port)); break;
+        case 2: asm volatile("outw %0, %1" : : "a"((uint16_t)value), "Nd"((uint16_t)port)); break;
+        default: asm volatile("outl %0, %1" : : "a"((uint32_t)value), "Nd"((uint16_t)port)); break;
+    }
+    return 0;
+}
+
+// SYS_MMAP_MMIO (83). Переиспользует mmap_regions[]/next_mmap_addr — те же
+// слоты, что sys_mmap()/sys_dma_alloc()/sys_shm_create(), поэтому
+// SYS_MUNMAP(base, length) позже корректно снимет маппинг без утечки VA
+// (тот же механизм, что уже используется для обычного MAP_ANONYMOUS).
+static uint64_t sys_mmap_mmio(uint64_t phys_addr, uint64_t length, uint64_t unused2,
+                              uint64_t unused3, uint64_t unused4) {
+    (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process || length == 0) return (uint64_t)-1;
+    if (!driver_mmio_allowed(current_process->pid, phys_addr, length)) return (uint64_t)-1;
+
+    int slot = -1;
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (current_process->mmap_regions[i].length == 0) { slot = i; break; }
+    }
+    if (slot < 0) return (uint64_t)-1;
+
+    uint64_t phys_page = phys_addr & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t phys_offset = phys_addr - phys_page;
+    uint64_t map_len = (phys_offset + length + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t num_pages = map_len / PAGE_SIZE;
+
+    uint64_t base = current_process->next_mmap_addr;
+    uint64_t pml4_phys = current_process->page_table;
+    uint64_t page_flags = PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_PCD | PAGE_MMIO_NOFREE;
+
+    for (uint64_t i = 0; i < num_pages; i++) {
+        if (map_page_in_pml4(pml4_phys, base + i * PAGE_SIZE, phys_page + i * PAGE_SIZE, page_flags) != 0) {
+            for (uint64_t j = 0; j < i; j++) unmap_page(base + j * PAGE_SIZE);
+            return (uint64_t)-1;
+        }
+    }
+
+    current_process->next_mmap_addr += map_len;
+    current_process->mmap_regions[slot].addr = base;
+    current_process->mmap_regions[slot].length = map_len;
+    current_process->mmap_regions[slot].shared_id = -1;
+
+    return base + phys_offset;
+}
+
+// SYS_DMA_ALLOC (84).
+#define MAX_DMA_ALLOC_PAGES 4096 // 16MB — с большим запасом над любым кольцом дескрипторов
+
+static uint64_t sys_dma_alloc(uint64_t num_pages, uint64_t phys_out_ptr, uint64_t unused2,
+                              uint64_t unused3, uint64_t unused4) {
+    (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process || num_pages == 0 || num_pages > MAX_DMA_ALLOC_PAGES) return (uint64_t)-1;
+    if (!driver_is_registered(current_process->pid)) return (uint64_t)-1;
+    if (!is_user_range_valid(current_process->page_table, phys_out_ptr, sizeof(uint64_t), 1))
+        return (uint64_t)-1;
+
+    int slot = -1;
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (current_process->mmap_regions[i].length == 0) { slot = i; break; }
+    }
+    if (slot < 0) return (uint64_t)-1;
+
+    uint64_t phys_base = pmm_alloc_contiguous_pages((uint32_t)num_pages);
+    if (!phys_base) return (uint64_t)-1;
+
+    uint64_t base = current_process->next_mmap_addr;
+    uint64_t pml4_phys = current_process->page_table;
+    uint64_t page_flags = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+
+    uint64_t mapped;
+    for (mapped = 0; mapped < num_pages; mapped++) {
+        uint64_t virt = base + mapped * PAGE_SIZE;
+        if (map_page_in_pml4(pml4_phys, virt, phys_base + mapped * PAGE_SIZE, page_flags) != 0)
+            break;
+        memset((void *)virt, 0, PAGE_SIZE);
+    }
+    if (mapped < num_pages) {
+        // [0, mapped) уже замаплены обычной (не shared, не MMIO) памятью —
+        // unmap_page() корректно освободит их через pmm_free_page(). Страницы
+        // [mapped, num_pages) ещё НЕ замаплены вообще — их нужно освободить
+        // напрямую, по одной (так же, как их выделил pmm_alloc_contiguous_pages(),
+        // см. pmm.h).
+        for (uint64_t i = 0; i < mapped; i++) unmap_page(base + i * PAGE_SIZE);
+        for (uint64_t i = mapped; i < num_pages; i++) pmm_free_page(phys_base + i * PAGE_SIZE);
+        return (uint64_t)-1;
+    }
+
+    current_process->next_mmap_addr += num_pages * PAGE_SIZE;
+    current_process->mmap_regions[slot].addr = base;
+    current_process->mmap_regions[slot].length = num_pages * PAGE_SIZE;
+    current_process->mmap_regions[slot].shared_id = -1;
+
+    *(uint64_t *)phys_out_ptr = phys_base;
+    return base;
+}
+
+// SYS_IRQ_REGISTER (85).
+static uint64_t sys_irq_register(uint64_t irq_line, uint64_t unused1, uint64_t unused2,
+                                 uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+
+    // Вызывающий обязан владеть устройством, чей PCI_INTERRUPT_LINE равен
+    // irq_line — иначе любой зарегистрированный драйвер мог бы подписаться
+    // на чужую линию (например линию диска, который остаётся в ядре).
+    int matches = 0;
+    uint32_t count = pci_get_device_count();
+    for (uint32_t i = 0; i < count && !matches; i++) {
+        const pci_device_t *dev = pci_get_device(i);
+        if (dev && dev->interrupt_line == (uint8_t)irq_line &&
+            driver_owns_device(current_process->pid, dev->bus, dev->device, dev->function))
+            matches = 1;
+    }
+    if (!matches) return (uint64_t)-EPERM;
+
+    int rc = driver_irq_register(current_process->pid, (uint8_t)irq_line);
+    if (rc == -1) return (uint64_t)-EINVAL;
+    if (rc == -2) return (uint64_t)-EPERM;
+    return 0;
+}
+
+// SYS_IRQ_WAIT (86).
+static uint64_t sys_irq_wait(uint64_t irq_line, uint64_t unused1, uint64_t unused2,
+                             uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (driver_irq_wait(current_process->pid, (uint8_t)irq_line) != 0)
+        return (uint64_t)-EPERM;
+    return 0;
+}
+
+// SYS_SHM_CREATE (87).
+static uint64_t sys_shm_create(uint64_t num_pages, uint64_t id_out_ptr, uint64_t unused2,
+                               uint64_t unused3, uint64_t unused4) {
+    (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process || num_pages == 0 || num_pages > MAX_SHARED_REGION_PAGES)
+        return (uint64_t)-1;
+    if (!is_user_range_valid(current_process->page_table, id_out_ptr, sizeof(int32_t), 1))
+        return (uint64_t)-1;
+
+    int slot = -1;
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (current_process->mmap_regions[i].length == 0) { slot = i; break; }
+    }
+    if (slot < 0) return (uint64_t)-1;
+
+    uint64_t pages[MAX_SHARED_REGION_PAGES];
+    uint64_t base = current_process->next_mmap_addr;
+    uint64_t pml4_phys = current_process->page_table;
+    uint64_t page_flags = PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_MMAP_SHARED;
+
+    uint64_t mapped;
+    for (mapped = 0; mapped < num_pages; mapped++) {
+        uint64_t phys = pmm_alloc_page();
+        if (!phys) break;
+        uint64_t virt = base + mapped * PAGE_SIZE;
+        if (map_page_in_pml4(pml4_phys, virt, phys, page_flags) != 0) {
+            pmm_free_page(phys);
+            break;
+        }
+        memset((void *)virt, 0, PAGE_SIZE);
+        pages[mapped] = phys;
+    }
+    if (mapped < num_pages) {
+        // shm_create() ещё не звали — unmap_page() корректно откатится на
+        // pmm_free_page() (тот же приём, что у sys_mmap(), см. его комментарий).
+        for (uint64_t i = 0; i < mapped; i++) unmap_page(base + i * PAGE_SIZE);
+        return (uint64_t)-1;
+    }
+
+    int shm_id = shm_create(pages, num_pages);
+    if (shm_id < 0) {
+        for (uint64_t i = 0; i < num_pages; i++) unmap_page(base + i * PAGE_SIZE);
+        return (uint64_t)-1;
+    }
+
+    uint64_t len = num_pages * PAGE_SIZE;
+    current_process->next_mmap_addr += len;
+    current_process->mmap_regions[slot].addr = base;
+    current_process->mmap_regions[slot].length = len;
+    current_process->mmap_regions[slot].shared_id = shm_id;
+
+    *(int32_t *)id_out_ptr = shm_id;
+    return base;
+}
+
+// SYS_SHM_ATTACH (88).
+static uint64_t sys_shm_attach(uint64_t shm_id, uint64_t unused1, uint64_t unused2,
+                               uint64_t unused3, uint64_t unused4) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-1;
+
+    uint64_t pages[MAX_SHARED_REGION_PAGES];
+    uint64_t num_pages = 0;
+    if (shm_get_pages((int)shm_id, pages, MAX_SHARED_REGION_PAGES, &num_pages) != 0 || num_pages == 0)
+        return (uint64_t)-1;
+
+    int slot = -1;
+    for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+        if (current_process->mmap_regions[i].length == 0) { slot = i; break; }
+    }
+    if (slot < 0) return (uint64_t)-1;
+
+    uint64_t base = current_process->next_mmap_addr;
+    uint64_t pml4_phys = current_process->page_table;
+    uint64_t page_flags = PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_MMAP_SHARED;
+
+    for (uint64_t i = 0; i < num_pages; i++) {
+        if (map_page_in_pml4(pml4_phys, base + i * PAGE_SIZE, pages[i], page_flags) != 0) {
+            for (uint64_t j = 0; j < i; j++) unmap_page(base + j * PAGE_SIZE);
+            return (uint64_t)-1;
+        }
+        // +1 за КАЖДУЮ реально замапленную страницу, сразу по месту — не
+        // единой пачкой в конце: refcount считается постранично (shm.h), и
+        // при частичном откате выше unmap_page() должен видеть ровно тот же
+        // счётчик, что сам же и выставил, иначе отпустит чужую ссылку
+        // (создателя региона), которую эта попытка attach ещё не брала.
+        shm_add_ref((int)shm_id);
+    }
+
+    uint64_t len = num_pages * PAGE_SIZE;
+    current_process->next_mmap_addr += len;
+    current_process->mmap_regions[slot].addr = base;
+    current_process->mmap_regions[slot].length = len;
+    current_process->mmap_regions[slot].shared_id = (int)shm_id;
+
+    return base;
+}
+
 // ========== ТАБЛИЦА СИСТЕМНЫХ ВЫЗОВОВ ==========
 
 static syscall_fn_t syscall_table[256] = {
@@ -2019,6 +2391,18 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_OS_VERSION] = sys_os_version,
     [SYS_NET_CONFIG_GET] = sys_net_config_get,
     [SYS_NET_CONFIG_SET] = sys_net_config_set,
+    [SYS_DRIVER_CLAIM_DEVICE] = sys_driver_claim_device,
+    [SYS_DRIVER_RELEASE_DEVICE] = sys_driver_release_device,
+    [SYS_PCI_CONFIG_READ] = sys_pci_config_read,
+    [SYS_PCI_CONFIG_WRITE] = sys_pci_config_write,
+    [SYS_IO_IN] = sys_io_in,
+    [SYS_IO_OUT] = sys_io_out,
+    [SYS_MMAP_MMIO] = sys_mmap_mmio,
+    [SYS_DMA_ALLOC] = sys_dma_alloc,
+    [SYS_IRQ_REGISTER] = sys_irq_register,
+    [SYS_IRQ_WAIT] = sys_irq_wait,
+    [SYS_SHM_CREATE] = sys_shm_create,
+    [SYS_SHM_ATTACH] = sys_shm_attach,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
