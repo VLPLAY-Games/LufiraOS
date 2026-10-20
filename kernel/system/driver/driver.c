@@ -120,6 +120,31 @@ int driver_io_port_allowed(uint32_t pid, uint16_t port, uint8_t width) {
     return 0;
 }
 
+int driver_claim_device_by_class(uint32_t pid, uint8_t class_code, uint8_t subclass,
+                                  pci_device_t *out) {
+    if (!out) return -1;
+
+    uint32_t count = pci_get_device_count();
+    for (uint32_t i = 0; i < count; i++) {
+        const pci_device_t *dev = pci_get_device(i);
+        if (!dev || dev->class_code != class_code || dev->subclass != subclass) continue;
+        if (find_claim_slot(dev->bus, dev->device, dev->function) >= 0) continue;
+
+        int slot = -1;
+        for (int s = 0; s < MAX_DRIVER_CLAIMS; s++) {
+            if (!g_claims[s].in_use) { slot = s; break; }
+        }
+        if (slot < 0) return -2;
+
+        g_claims[slot].in_use = 1;
+        g_claims[slot].owner_pid = pid;
+        g_claims[slot].dev = *dev;
+        *out = *dev;
+        return 0;
+    }
+    return -1;
+}
+
 int driver_release_device(uint32_t pid, uint8_t bus, uint8_t device, uint8_t function) {
     int slot = find_claim_slot(bus, device, function);
     if (slot < 0 || g_claims[slot].owner_pid != pid) return -1;

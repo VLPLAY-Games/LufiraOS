@@ -884,6 +884,17 @@ void process_exit(int exit_code) {
         mailbox_send(g_wm_pid, WM_SENDER_KERNEL, &notify, sizeof(notify));
     }
 
+    // netd/soundd — см. комментарий у g_netd_pid/g_soundd_pid в process.h:
+    // нет клиентского состояния на стороне демона, снимать регистрацию
+    // достаточно (клиенты, уже заблокированные в service_call() на умершем
+    // демоне, остаются заблокированы навсегда — то же известное ограничение,
+    // что и у WM выше).
+    if (exiting_process->pid == g_netd_pid) g_netd_pid = 0;
+    if (exiting_process->pid == g_soundd_pid) {
+        g_soundd_pid = 0;
+        sound_ring_clear(); // иначе перезапущенный soundd сразу получил бы старую очередь
+    }
+
     respawn_shell_if_needed(exiting_process);
 
     process_t *waiter = wake_waiting_parent(exiting_process);
@@ -1377,6 +1388,12 @@ static int terminate_process_by_signal(process_t *p, int sig) {
         mailbox_send(g_wm_pid, WM_SENDER_KERNEL, &notify, sizeof(notify));
     }
 
+    if (p->pid == g_netd_pid) g_netd_pid = 0;
+    if (p->pid == g_soundd_pid) {
+        g_soundd_pid = 0;
+        sound_ring_clear();
+    }
+
     // Тем же поводом (может не вернуться сюда обычным путём, если p ==
     // current_process): если убитый процесс был is_shell (exec когда-то
     // "надел" его образ поверх шелла), система осталась бы вообще без
@@ -1493,6 +1510,44 @@ uint32_t process_get_wm_pid(void) {
 int process_wm_unregister(uint32_t pid) {
     if (g_wm_pid != pid) return -1;
     g_wm_pid = 0;
+    return 0;
+}
+
+// См. комментарий у g_netd_pid/g_soundd_pid в process.h. Root-проверка —
+// дело syscall.c (sys_netd_register()/sys_soundd_register()), не этого слоя.
+volatile uint32_t g_netd_pid = 0;
+
+int process_netd_register(uint32_t pid) {
+    if (g_netd_pid != 0) return -1;
+    g_netd_pid = pid;
+    return 0;
+}
+
+uint32_t process_get_netd_pid(void) {
+    return g_netd_pid;
+}
+
+int process_netd_unregister(uint32_t pid) {
+    if (g_netd_pid != pid) return -1;
+    g_netd_pid = 0;
+    return 0;
+}
+
+volatile uint32_t g_soundd_pid = 0;
+
+int process_soundd_register(uint32_t pid) {
+    if (g_soundd_pid != 0) return -1;
+    g_soundd_pid = pid;
+    return 0;
+}
+
+uint32_t process_get_soundd_pid(void) {
+    return g_soundd_pid;
+}
+
+int process_soundd_unregister(uint32_t pid) {
+    if (g_soundd_pid != pid) return -1;
+    g_soundd_pid = 0;
     return 0;
 }
 

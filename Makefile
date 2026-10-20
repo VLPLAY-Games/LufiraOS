@@ -44,7 +44,6 @@ $(shell mkdir -p $(BUILD_DIR) \
     $(BUILD_DIR)/kernel/drivers/console \
     $(BUILD_DIR)/kernel/drivers/serial \
     $(BUILD_DIR)/kernel/drivers/keyboard \
-	$(BUILD_DIR)/kernel/drivers/sound \
     $(BUILD_DIR)/kernel/drivers/mouse \
     $(BUILD_DIR)/kernel/drivers/disk \
 	$(BUILD_DIR)/kernel/drivers/usb \
@@ -105,9 +104,6 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/drivers/disk/disk.c \
 	$(KERNEL_DIR)/drivers/disk/ahci.c \
 	$(KERNEL_DIR)/drivers/disk/nvme.c \
-	$(KERNEL_DIR)/drivers/sound/ac97.c \
-	$(KERNEL_DIR)/drivers/sound/hda.c \
-	$(KERNEL_DIR)/drivers/sound/sound.c \
 	$(KERNEL_DIR)/drivers/usb/xhci.c \
 	$(KERNEL_DIR)/drivers/usb/usb_hid.c \
 	$(KERNEL_DIR)/drivers/input/input.c \
@@ -135,7 +131,6 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/shell/commands/system.c \
     $(KERNEL_DIR)/shell/commands/colors.c \
     $(KERNEL_DIR)/shell/commands/filesystem.c \
-	$(KERNEL_DIR)/shell/commands/sound.c \
 	$(KERNEL_DIR)/shell/commands/users.c \
 	$(KERNEL_DIR)/shell/commands/usb.c \
 	$(KERNEL_DIR)/shell/commands/mount.c \

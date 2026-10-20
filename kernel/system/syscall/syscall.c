@@ -29,12 +29,17 @@
 #include "net/net.h"
 #include "net/icmp.h"
 #include "drivers/net/rtl8139.h"
-#include "drivers/sound/sound.h"
+#include "system/ipc/soundd_protocol.h"
 #include "drivers/pci/pci.h"
 #include "system/driver/driver.h"
 #include "version.h"
 
 extern lufirafs_t lufirafs;
+
+// Вперёд-объявление — полное определение и разбор см. у wm_call() ниже;
+// нужно уже здесь, в SYS_SOUND_*, которые идут раньше по файлу.
+static int service_call(uint32_t service_pid, const void *req, uint32_t req_len,
+                        void *reply, uint32_t reply_len);
 
 // Открывает filename через VFS, читает целиком и заменяет текущий процесс
 // через elf_exec_replace() (execve()). Используется и шеллом ("exec"), и
@@ -992,10 +997,113 @@ static uint64_t sys_rtc_gettime(uint64_t buf_ptr, uint64_t unused1, uint64_t unu
     return 0;
 }
 
-// SYS_SOUND_INFO (68): buf_ptr -> lufira_sound_info_t. Тот же стиль, что
-// SYS_RTC_GETTIME выше — вся работа уже сделана sound.c (диспетчер HDA/
-// AC'97), здесь только проверка user-указателя, сборка структуры и
-// копирование. "Звука нет" — валидный ответ (available=0), а не -EIO.
+// ===== v0.9.5: звук вынесен из ядра в userspace-демон soundd — см.
+// подробный разбор архитектуры у SYS_SOUNDD_REGISTER/SYS_SOUND_CONSUME в
+// syscall.h. INFO/SET_VOLUME/STOP ниже релеят control-plane запрос через
+// service_call() (soundd_protocol.h); PLAY_PCM/CONSUME — через кольцо ниже
+// (control-plane 96-байтный mailbox для PCM-данных не годится). =====
+
+// Кольцо фреймов между ЛЮБЫМ клиентом (производитель, SYS_SOUND_PLAY_PCM) и
+// soundd (единственный потребитель, SYS_SOUND_CONSUME). ~5.7с запаса при
+// 48кГц — в штатной работе soundd вычитывает непрерывно и кольцо не
+// переполняется; производитель НЕ блокируется (пишет сколько влезло и
+// возвращает это число — тот же компромисс, что у pipe-записи без
+// блокировки), потребитель блокируется честно, пока кольцо пусто (тот же
+// cli/sti+PROCESS_BLOCKED приём, что mailbox_recv()/driver_irq_wait()).
+#define SOUND_RING_FRAMES (256u * 1024u)
+// kmalloc(), не статический массив: ~1MB для стерео interleaved-буфера в
+// .bss раздул бы РАЗМЕР ФАЙЛА kernel.bin на столько же — линкер-скрипт
+// (linker.ld) кладёt .bss как обычную секцию без NOLOAD, objcopy -O binary
+// материализует её нулями в самом бинарнике. Выделяется один раз в
+// syscall_init().
+static int16_t *g_sound_ring = NULL;
+static uint32_t g_sound_ring_head = 0, g_sound_ring_tail = 0, g_sound_ring_count = 0;
+static process_t *g_sound_ring_waiter = NULL; // soundd, заблокирован в SYS_SOUND_CONSUME
+
+static inline uint64_t sound_ring_lock(void) {
+    uint64_t flags;
+    asm volatile("pushfq; popq %0" : "=r"(flags) :: "memory");
+    asm volatile("cli");
+    return flags;
+}
+static inline void sound_ring_unlock(uint64_t flags) {
+    asm volatile("push %0; popfq" : : "r"(flags) : "memory", "cc");
+}
+
+static uint32_t sound_ring_write(const int16_t *samples, uint32_t frames) {
+    if (!g_sound_ring) return 0; // kmalloc() в syscall_init() не удался — звук недоступен
+
+    uint64_t flags = sound_ring_lock();
+    uint32_t free_space = SOUND_RING_FRAMES - g_sound_ring_count;
+    uint32_t n = frames < free_space ? frames : free_space;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t slot = (g_sound_ring_tail + i) % SOUND_RING_FRAMES;
+        g_sound_ring[slot * 2]     = samples[i * 2];
+        g_sound_ring[slot * 2 + 1] = samples[i * 2 + 1];
+    }
+    g_sound_ring_tail = (g_sound_ring_tail + n) % SOUND_RING_FRAMES;
+    g_sound_ring_count += n;
+    process_t *waiter = g_sound_ring_waiter;
+    g_sound_ring_waiter = NULL;
+    sound_ring_unlock(flags);
+
+    if (waiter) waiter->state = PROCESS_READY; // вне критической секции — как mailbox_send()
+    return n;
+}
+
+// timeout_ms — тот же трёхвариантный приём, что mailbox_recv() (mailbox.h):
+// <0 ждать неограниченно (настоящая блокировка), 0 вернуть 0 немедленно если
+// пусто, >0 короткий опрос с шагом в тик. soundd мультиплексирует этим PCM
+// (кольцо) и control-plane (mailbox, SOUNDD_OP_*) одним циклом — короткий
+// таймаут здесь, а не вечная блокировка, иначе SYS_SOUND_SET_VOLUME/INFO/
+// STOP зависли бы, пока не придёт следующий кадр PCM.
+static uint32_t sound_ring_consume(int16_t *out, uint32_t max_frames, int64_t timeout_ms) {
+    uint64_t elapsed_ms = 0;
+    for (;;) {
+        uint64_t flags = sound_ring_lock();
+        if (g_sound_ring_count > 0) {
+            uint32_t n = g_sound_ring_count < max_frames ? g_sound_ring_count : max_frames;
+            for (uint32_t i = 0; i < n; i++) {
+                uint32_t slot = (g_sound_ring_head + i) % SOUND_RING_FRAMES;
+                out[i * 2]     = g_sound_ring[slot * 2];
+                out[i * 2 + 1] = g_sound_ring[slot * 2 + 1];
+            }
+            g_sound_ring_head = (g_sound_ring_head + n) % SOUND_RING_FRAMES;
+            g_sound_ring_count -= n;
+            sound_ring_unlock(flags);
+            return n;
+        }
+
+        if (timeout_ms == 0) {
+            sound_ring_unlock(flags);
+            return 0;
+        }
+
+        if (timeout_ms > 0) {
+            sound_ring_unlock(flags);
+            if (elapsed_ms >= (uint64_t)timeout_ms) return 0;
+            process_sleep(10);
+            elapsed_ms += 10;
+            continue;
+        }
+
+        // timeout_ms < 0 — настоящая блокировка, без опроса. Тот же приём,
+        // что mailbox_recv()/driver_irq_wait() (не отпускаем cli перед
+        // schedule(), см. их же комментарий).
+        g_sound_ring_waiter = current_process;
+        current_process->state = PROCESS_BLOCKED;
+        schedule();
+    }
+}
+
+void sound_ring_clear(void) {
+    uint64_t flags = sound_ring_lock();
+    g_sound_ring_head = g_sound_ring_tail = g_sound_ring_count = 0;
+    sound_ring_unlock(flags);
+}
+
+// SYS_SOUND_INFO (68): buf_ptr -> lufira_sound_info_t. "Звука нет"/"soundd
+// не запущен" — валидный ответ (available=0), а не -EIO.
 static uint64_t sys_sound_info(uint64_t buf_ptr, uint64_t unused1, uint64_t unused2,
                                 uint64_t unused3, uint64_t unused4) {
     (void)unused1; (void)unused2; (void)unused3; (void)unused4;
@@ -1006,56 +1114,85 @@ static uint64_t sys_sound_info(uint64_t buf_ptr, uint64_t unused1, uint64_t unus
 
     lufira_sound_info_t out;
     memset(&out, 0, sizeof(out));
-    out.available = (uint8_t)sound_is_available();
-    out.volume = out.available ? sound_get_volume() : 0;
-    out.sample_rate = out.available ? sound_get_sample_rate() : 0;
-    const char *name = sound_driver_name();
-    size_t i = 0;
-    for (; name[i] && i < sizeof(out.driver) - 1; i++) out.driver[i] = name[i];
-    out.driver[i] = '\0';
+
+    uint32_t soundd_pid = process_get_soundd_pid();
+    if (soundd_pid) {
+        soundd_request_t req; memset(&req, 0, sizeof(req));
+        req.opcode = SOUNDD_OP_INFO;
+        soundd_reply_t reply;
+        if (service_call(soundd_pid, &req, sizeof(req), &reply, sizeof(reply)) == 0) {
+            out.available = (uint8_t)reply.result;
+            out.volume = (uint8_t)reply.a[0];
+            out.sample_rate = (uint32_t)reply.a[1];
+            size_t i = 0;
+            for (; reply.str[i] && i < sizeof(out.driver) - 1; i++) out.driver[i] = reply.str[i];
+            out.driver[i] = '\0';
+        }
+    }
 
     memcpy((void *)buf_ptr, &out, sizeof(out));
     return 0;
 }
 
-// SYS_SOUND_SET_VOLUME (69): volume (0-100). sound_set_volume() сама
-// обрезает значения выше 100 — не дублируем клэмп здесь.
+// SYS_SOUND_SET_VOLUME (69): volume (0-100) — soundd сам обрезает значения
+// выше 100, не дублируем клэмп здесь.
 static uint64_t sys_sound_set_volume(uint64_t volume, uint64_t unused1, uint64_t unused2,
                                       uint64_t unused3, uint64_t unused4) {
     (void)unused1; (void)unused2; (void)unused3; (void)unused4;
 
-    if (!sound_is_available()) return (uint64_t)-1;
-    sound_set_volume((uint8_t)volume);
-    return 0;
+    uint32_t soundd_pid = process_get_soundd_pid();
+    if (!soundd_pid) return (uint64_t)-1;
+
+    soundd_request_t req; memset(&req, 0, sizeof(req));
+    req.opcode = SOUNDD_OP_SET_VOLUME;
+    req.a[0] = (int32_t)volume;
+    soundd_reply_t reply;
+    if (service_call(soundd_pid, &req, sizeof(req), &reply, sizeof(reply)) != 0) return (uint64_t)-1;
+    return (uint64_t)reply.result;
 }
 
 // SYS_SOUND_PLAY_PCM (70): (buf_ptr, frames) — см. комментарий в syscall.h.
 // frames*4 байт (int16_t стерео, interleaved) — та же проверка диапазона,
-// что и везде на буферы фиксированного размера (is_user_range_valid()),
-// плюс явный предохранитель от integer-overflow в frames*4 на 32-битной
-// арифметике ниже (16МБ с лихвой перекрывает один ~28мс-слайс doom-порта).
+// что и везде на буферы фиксированного размера, плюс явный предохранитель
+// от integer-overflow в frames*4 на 32-битной арифметике ниже (16МБ с лихвой
+// перекрывает один ~28мс-слайс doom-порта).
 #define SOUND_PLAY_PCM_MAX_FRAMES (16u * 1024u * 1024u / 4u)
 
 static uint64_t sys_sound_play_pcm(uint64_t buf_ptr, uint64_t frames, uint64_t unused1,
                                     uint64_t unused2, uint64_t unused3) {
     (void)unused1; (void)unused2; (void)unused3;
 
-    if (!sound_is_available()) return (uint64_t)-1;
+    if (!process_get_soundd_pid()) return (uint64_t)-1;
     if (frames == 0 || frames > SOUND_PLAY_PCM_MAX_FRAMES) return (uint64_t)-EINVAL;
     if (!current_process ||
         !is_user_range_valid(current_process->page_table, buf_ptr, (size_t)frames * 4, 0))
         return (uint64_t)-EFAULT;
 
-    // IF маскируется на входе в любой syscall и ничто до этого места его не
-    // возвращает. HDA-путь (hda_run_buffer(), drivers/sound/hda.c) ждёт BCIS
-    // через pit_wait_ms(), а pit_ticks растёт только из таймерного IRQ,
-    // который не может быть доставлен при IF=0 — без sti здесь HDA-бэкенд
-    // зависал бы навсегда на первом кадре звука. AC'97-путь
-    // (ac97_play_pcm_stereo()) не зависит от прерываний (крутит `pause` на
-    // статус-регистре напрямую), поэтому не проявляет эту проблему.
-    asm volatile("sti");
+    uint32_t written = sound_ring_write((const int16_t *)buf_ptr, (uint32_t)frames);
+    return written > 0 ? 0 : (uint64_t)-1;
+}
 
-    return (uint64_t)sound_play_pcm_stereo((const int16_t *)buf_ptr, (uint32_t)frames);
+// SYS_SOUNDD_REGISTER (89) — root-only, см. syscall.h.
+static uint64_t sys_soundd_register(uint64_t unused0, uint64_t unused1, uint64_t unused2,
+                                     uint64_t unused3, uint64_t unused4) {
+    (void)unused0; (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (current_process->uid != 0) return (uint64_t)-EPERM;
+    if (process_soundd_register(current_process->pid) != 0) return (uint64_t)-1;
+    return 0;
+}
+
+// SYS_SOUND_CONSUME (90) — только зарегистрированному soundd, см. syscall.h.
+static uint64_t sys_sound_consume(uint64_t out_ptr, uint64_t max_frames, uint64_t timeout_ms,
+                                   uint64_t unused3, uint64_t unused4) {
+    (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (current_process->pid != process_get_soundd_pid()) return (uint64_t)-EPERM;
+    if (max_frames == 0 || max_frames > SOUND_PLAY_PCM_MAX_FRAMES) return (uint64_t)-EINVAL;
+    if (!is_user_range_valid(current_process->page_table, out_ptr, (size_t)max_frames * 4, 1))
+        return (uint64_t)-EFAULT;
+
+    return (uint64_t)sound_ring_consume((int16_t *)out_ptr, (uint32_t)max_frames, (int64_t)timeout_ms);
 }
 
 // SYS_PSLIST (30): buf_ptr -> lufira_ps_entry_t[max_count], max_count —
@@ -1520,20 +1657,37 @@ typedef struct __attribute__((packed)) {
     int32_t key_or_button;
 } lufira_gui_event_t;
 
-// Общая часть любого SYS_WIN_*: отправить req зарегистрированному WM pid и
-// заблокированно дождаться ответа. -EFAULT если WM не зарегистрирован или
-// mailbox_send()/mailbox_recv() не удались. sender_pid ответа не проверяется
-// явно — в mailbox этого процесса пишет либо ядро, либо WM в ответ на запрос.
+// Общий синхронный RPC поверх mailbox.h — отправить req service_pid и
+// заблокированно дождаться ОТВЕТА ИМЕННО ОТ НЕГО. Используется и для WM
+// (wm_call() ниже), и для soundd (v0.9.5, service_call(g_soundd_pid, ...)
+// у SYS_SOUND_INFO/SET_VOLUME/STOP) — любой будущий демон этого же вида
+// получает фикс бесплатно.
+//
+// БЕЗОПАСНОСТЬ: любой процесс может вызвать SYS_IPC_SEND с произвольным
+// dest_pid (mailbox_send() не проверяет владение) — без проверки
+// msg.sender_pid здесь атакующий мог бы прислать жертве, заблокированной в
+// этом вызове, поддельный "ответ" раньше настоящего сервиса. Несовпадающие
+// sender_pid тихо отбрасываются и ожидание продолжается: у обычного
+// клиентского процесса в любой момент ровно один вызов в полёте, новых
+// легитимных сообщений от кого-то ещё в этом окне быть не должно.
+static int service_call(uint32_t service_pid, const void *req, uint32_t req_len,
+                        void *reply, uint32_t reply_len) {
+    if (!service_pid) return -1;
+    if (mailbox_send(service_pid, current_process->pid, req, req_len) != 0) return -1;
+
+    for (;;) {
+        lufira_ipc_msg_t msg;
+        if (mailbox_recv(&msg, -1) != 0) return -1; // ждать ответа неограниченно
+        if (msg.sender_pid != service_pid) continue; // подмена — см. разбор выше
+        if (msg.len != reply_len) return -1;
+        memcpy(reply, msg.payload, reply_len);
+        return 0;
+    }
+}
+
 static int wm_call(const wm_request_t *req, wm_reply_t *reply) {
     uint32_t wm_pid = process_get_wm_pid();
-    if (!wm_pid) return -1;
-    if (mailbox_send(wm_pid, current_process->pid, req, sizeof(*req)) != 0) return -1;
-
-    lufira_ipc_msg_t msg;
-    if (mailbox_recv(&msg, -1) != 0) return -1; // ждать ответа WM неограниченно
-    if (msg.len != sizeof(wm_reply_t)) return -1;
-    memcpy(reply, msg.payload, sizeof(wm_reply_t));
-    return 0;
+    return service_call(wm_pid, req, sizeof(*req), reply, sizeof(*reply));
 }
 
 // SYS_WIN_CREATE (50): x, y, w, h, title_ptr.
@@ -1711,11 +1865,23 @@ static uint64_t sys_wm_unregister(uint64_t unused0, uint64_t unused1, uint64_t u
     return (process_wm_unregister(current_process->pid) == 0) ? 0 : (uint64_t)-1;
 }
 
-// SYS_SOUND_STOP (72) — см. syscall.h.
+// SYS_SOUND_STOP (72) — см. syscall.h. Сбрасывает и кольцо (иначе
+// отложенные кадры заиграли бы при следующем SYS_SOUND_PLAY_PCM/при
+// перезапуске soundd), и просит сам демон остановить аппаратный поток —
+// порядок (кольцо сначала) не важен для корректности, оба независимы.
 static uint64_t sys_sound_stop(uint64_t unused0, uint64_t unused1, uint64_t unused2,
                                uint64_t unused3, uint64_t unused4) {
     (void)unused0; (void)unused1; (void)unused2; (void)unused3; (void)unused4;
-    sound_stop();
+
+    sound_ring_clear();
+
+    uint32_t soundd_pid = process_get_soundd_pid();
+    if (soundd_pid) {
+        soundd_request_t req; memset(&req, 0, sizeof(req));
+        req.opcode = SOUNDD_OP_STOP;
+        soundd_reply_t reply;
+        service_call(soundd_pid, &req, sizeof(req), &reply, sizeof(reply));
+    }
     return 0;
 }
 
@@ -1962,6 +2128,21 @@ static void bdf_offset_from_packed(uint64_t packed, uint8_t *bus, uint8_t *devic
     *offset = (uint8_t)packed;
 }
 
+static void fill_lufira_pci_device(const pci_device_t *dev, lufira_pci_device_t *out) {
+    memset(out, 0, sizeof(*out));
+    out->bus = dev->bus; out->device = dev->device; out->function = dev->function;
+    out->interrupt_line = dev->interrupt_line;
+    out->vendor_id = dev->vendor_id; out->device_id = dev->device_id;
+    for (int i = 0; i < 6; i++) {
+        pci_bar_t bar;
+        if (pci_get_bar(dev, (uint8_t)i, &bar) == 0) {
+            out->bars[i].address = bar.address;
+            out->bars[i].size = bar.size;
+            out->bars[i].is_io = bar.is_io;
+        }
+    }
+}
+
 // SYS_DRIVER_CLAIM_DEVICE (77).
 static uint64_t sys_driver_claim_device(uint64_t vendor_id, uint64_t device_id, uint64_t out_ptr,
                                         uint64_t unused3, uint64_t unused4) {
@@ -1977,18 +2158,27 @@ static uint64_t sys_driver_claim_device(uint64_t vendor_id, uint64_t device_id, 
     if (rc != 0) return (uint64_t)-ENOENT;
 
     lufira_pci_device_t out;
-    memset(&out, 0, sizeof(out));
-    out.bus = dev.bus; out.device = dev.device; out.function = dev.function;
-    out.interrupt_line = dev.interrupt_line;
-    out.vendor_id = dev.vendor_id; out.device_id = dev.device_id;
-    for (int i = 0; i < 6; i++) {
-        pci_bar_t bar;
-        if (pci_get_bar(&dev, (uint8_t)i, &bar) == 0) {
-            out.bars[i].address = bar.address;
-            out.bars[i].size = bar.size;
-            out.bars[i].is_io = bar.is_io;
-        }
-    }
+    fill_lufira_pci_device(&dev, &out);
+    memcpy((void *)out_ptr, &out, sizeof(out));
+    return 0;
+}
+
+// SYS_DRIVER_CLAIM_DEVICE_BY_CLASS (91).
+static uint64_t sys_driver_claim_device_by_class(uint64_t class_code, uint64_t subclass, uint64_t out_ptr,
+                                                 uint64_t unused3, uint64_t unused4) {
+    (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (current_process->uid != 0) return (uint64_t)-EPERM;
+    if (!is_user_range_valid(current_process->page_table, out_ptr, sizeof(lufira_pci_device_t), 1))
+        return (uint64_t)-EFAULT;
+
+    pci_device_t dev;
+    int rc = driver_claim_device_by_class(current_process->pid, (uint8_t)class_code, (uint8_t)subclass, &dev);
+    if (rc == -2) return (uint64_t)-EAGAIN;
+    if (rc != 0) return (uint64_t)-ENOENT;
+
+    lufira_pci_device_t out;
+    fill_lufira_pci_device(&dev, &out);
     memcpy((void *)out_ptr, &out, sizeof(out));
     return 0;
 }
@@ -2403,6 +2593,9 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_IRQ_WAIT] = sys_irq_wait,
     [SYS_SHM_CREATE] = sys_shm_create,
     [SYS_SHM_ATTACH] = sys_shm_attach,
+    [SYS_SOUNDD_REGISTER] = sys_soundd_register,
+    [SYS_SOUND_CONSUME] = sys_sound_consume,
+    [SYS_DRIVER_CLAIM_DEVICE_BY_CLASS] = sys_driver_claim_device_by_class,
 };
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
@@ -2432,6 +2625,11 @@ void syscall_init(void) {
     efer |= 1;
     asm volatile("wrmsr" : : "c"(0xC0000080), "a"((uint32_t)efer),
                  "d"((uint32_t)(efer >> 32)));
+
+    // SYS_SOUND_PLAY_PCM/SYS_SOUND_CONSUME — см. комментарий у g_sound_ring
+    // выше про то, почему не статический массив.
+    g_sound_ring = (int16_t *)kmalloc((size_t)SOUND_RING_FRAMES * 2 * sizeof(int16_t));
+    if (g_sound_ring) memset(g_sound_ring, 0, (size_t)SOUND_RING_FRAMES * 2 * sizeof(int16_t));
     
     // Число не выводится из syscall.h автоматически (нет единого SYS_COUNT —
     // номера SYS_* просто #define'ы) — бумить вручную при добавлении нового

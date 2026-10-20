@@ -315,14 +315,10 @@ void execute_command(void) {
     } else if (strcmp(cmd_lower, "edit") == 0) {
         if (*args == '\0' || is_help_flag(args)) printf("\nUsage: edit <filename> <text>\n");
         else command_edit(args);
-    } else if (strcmp(cmd_lower, "beep") == 0) {
-        command_beep();
-    } else if (strcmp(cmd_lower, "mixer") == 0) {
-        // command_mixer() сама печатает "Usage: mixer [0-100]" на любой
-        // нечисловой аргумент, включая -help — отдельная проверка не нужна.
-        command_mixer(args);
-    } else if (strcmp(cmd_lower, "music") == 0) {
-        command_music();
+    // beep/mixer/music — v0.9.5: звук переехал в userspace-демон soundd,
+    // kernel-native commands/sound.c удалён; те же имена уже существуют как
+    // обычные пакеты (user/beep.c и т.д., поверх SYS_SOUND_*) — run_external_command()
+    // ниже находит и запускает их как /bin/<name>.elf, как и остальные packages.
     } else if (strcmp(cmd_lower, "ps") == 0) {
         process_ps();
     } else if (strcmp(cmd_lower, "runbg") == 0) {

@@ -327,6 +327,28 @@ int process_wm_register(uint32_t pid);
 int process_wm_unregister(uint32_t pid);
 uint32_t process_get_wm_pid(void);
 
+// PID зарегистрированных userspace-демонов сети (netd) и звука (soundd) —
+// v0.9.5, перенос сети/звука из ядра в userspace. Тот же паттерн, что
+// g_wm_pid: единственная связь ядра с демоном — этот pid (куда syscall.c
+// релеит SYS_NET_FETCH/PING/NET_CONFIG_*/SYS_SOUND_* через service_call(),
+// syscall.c). В отличие от WM — регистрация root-only (sys_netd_register()/
+// sys_soundd_register(), syscall.c): любой незарегистрированный процесс не
+// должен иметь возможность подменить собой системный сетевой/звуковой
+// демон и перехватить чужой трафик. Обнуляется только когда сам демон
+// завершается (process_exit()/terminate_process_by_signal(), как и
+// g_wm_pid) — у netd/soundd нет аналога WM_NOTIFY_PROCESS_EXIT: они не
+// держат постоянного состояния на клиента, только отвечают на один
+// запрос за раз.
+extern volatile uint32_t g_netd_pid;
+int process_netd_register(uint32_t pid);
+int process_netd_unregister(uint32_t pid);
+uint32_t process_get_netd_pid(void);
+
+extern volatile uint32_t g_soundd_pid;
+int process_soundd_register(uint32_t pid);
+int process_soundd_unregister(uint32_t pid);
+uint32_t process_get_soundd_pid(void);
+
 // 1, если следующий вызов shell_task() — пересоздание после того, как
 // exec() подменил процесс "shell", а подменившая программа завершилась/
 // была убита (см. respawn_shell_if_needed(), process.c). shell_task()

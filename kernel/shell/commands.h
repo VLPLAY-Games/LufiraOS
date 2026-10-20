@@ -62,11 +62,6 @@ void command_exec(const char* filename);
 void command_kill(const char* args);
 void command_wait(const char* args);
 
-// Звук
-void command_beep(void);
-void command_mixer(const char* args);
-void command_music(void);
-
 // Пользователи/группы
 void command_whoami(void);
 void command_chmod(const char* args);

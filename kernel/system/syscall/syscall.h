@@ -424,6 +424,41 @@
 // адрес, (uint64_t)-1 при ошибке (неверный id).
 #define SYS_SHM_ATTACH 88
 
+// ===== v0.9.5: звук вынесен из ядра в userspace-демон soundd (аналог WM —
+// см. g_soundd_pid/process_soundd_register() в process.h). SYS_SOUND_INFO/
+// SET_VOLUME/STOP (68/69/72, уже существуют) теперь релеят запрос через
+// service_call() (syscall.c — тот же паттерн, что wm_call(), но с починенной
+// проверкой sender_pid ответа) вместо прямого вызова sound.c; сигнатуры и
+// семантика для вызывающего НЕ изменились. SYS_SOUND_PLAY_PCM (70) — особый
+// случай: PCM-данные (килобайты за вызов) не умещаются в 96-байтный payload
+// mailbox'а, поэтому вместо RPC-релея пишет напрямую в общий кольцевой
+// буфер ядра (sound_ring_write(), syscall.c) — soundd вычитывает его новым
+// SYS_SOUND_CONSUME ниже. =====
+
+// SYS_SOUNDD_REGISTER (89): без аргументов. Делает вызывающего единственным
+// звуковым демоном системы — root-only (в отличие от SYS_WM_REGISTER:
+// soundd — системный сервис, которому доверяют SYS_SOUND_*, а не графический
+// сервер, которым может быть любой пользовательский процесс). 0 успех,
+// -EPERM не root, -1 уже зарегистрирован.
+#define SYS_SOUNDD_REGISTER 89
+
+// SYS_SOUND_CONSUME (90): out_ptr (int16_t[max_frames*2], стерео
+// interleaved), max_frames, timeout_ms (signed, как у SYS_IPC_RECV: <0 —
+// ждать неограниченно, 0 — вернуть 0 немедленно если пусто, >0 — не больше
+// стольки мс). Только зарегистрированному soundd (иначе -EPERM). soundd
+// мультиплексирует этим PCM-кольцо и control-plane mailbox (SOUNDD_OP_*) —
+// короткий таймаут, а не вечная блокировка, иначе SYS_SOUND_SET_VOLUME/
+// INFO/STOP зависли бы до следующего кадра PCM. Возвращает число реально
+// скопированных фреймов (0, если пусто и срок истёк, иначе 1..max_frames).
+#define SYS_SOUND_CONSUME 90
+
+// SYS_DRIVER_CLAIM_DEVICE_BY_CLASS (91): class_code, subclass, out_ptr
+// (lufira_pci_device_t*). Как SYS_DRIVER_CLAIM_DEVICE (77), но ищет по
+// PCI-классу/подклассу — нужен soundd (AC'97 — 0x04/0x01, HDA — 0x04/0x03):
+// класс стабилен между вендорами/эмуляциями, в отличие от vendor/device id.
+// Коды возврата — те же, что у SYS_DRIVER_CLAIM_DEVICE.
+#define SYS_DRIVER_CLAIM_DEVICE_BY_CLASS 91
+
 // Флаги для sys_open
 #define O_RDONLY    0
 #define O_WRONLY    1
@@ -614,6 +649,12 @@ uint64_t syscall_handler(uint64_t syscall_num, uint64_t arg1,
                          uint64_t arg2, uint64_t arg3,
                          uint64_t arg4, uint64_t arg5,
                          uint64_t frame_ptr);
+
+// Сбрасывает кольцо SYS_SOUND_PLAY_PCM/SYS_SOUND_CONSUME (syscall.c) —
+// вызывается process.c при остановке (SYS_SOUND_STOP) и при завершении
+// soundd (иначе перезапущенный демон сразу получил бы старую, давно
+// неактуальную очередь кадров).
+void sound_ring_clear(void);
 
 // Открывает filename и заменяет им текущий процесс (execve()-подобно).
 // Используется SYS_EXEC и командой shell "exec". Забирает владение

@@ -12,7 +12,6 @@
 #include "drivers/mouse/mouse.h"
 #include "drivers/console/console.h"
 #include "drivers/serial/serial.h"
-#include "drivers/sound/sound.h"
 #include "drivers/disk/disk.h"
 #include "drivers/usb/xhci.h"
 #include "net/net.h"
@@ -194,6 +193,72 @@ static process_t *spawn_shell_process(void) {
     kfree(buf);
     proc->is_shell = 1;
     return proc;
+}
+
+// v0.9.5: звук (позже — сеть) вынесены из ядра в userspace-демоны — лёгкая
+// версия spawn_shell_process() выше: фоновый root-процесс, запускаемый один
+// раз при загрузке, без watermark/respawn/is_shell. Вызывается ДО
+// spawn_shell_process(), пока current_process ещё NULL — process_create()
+// сама даёт новому процессу uid=0 именно в этом случае (см. её комментарий,
+// process.c), поэтому SYS_DRIVER_CLAIM_DEVICE/SYS_SOUNDD_REGISTER (root-only)
+// проходят без отдельной настройки. Отсутствие файла не фатально (урезанный
+// набор пакетов на раннем этапе сборки) — просто предупреждение, система
+// продолжает грузиться без этого демона (SYS_SOUND_* деградируют до "нет
+// звука", как и сегодня при отсутствии контроллера).
+static void spawn_daemon_process(const char *name, const char *path) {
+    uint32_t ino;
+    if (lufirafs_lookup(&lufirafs, lufirafs.sb.root_inode, path, &ino) != 0) {
+        printf("[KERNEL] %s not found, skipping\n", path);
+        return;
+    }
+
+    lufirafs_inode_t inode;
+    if (lufirafs_read_inode(&lufirafs, ino, &inode) != 0 || inode.size == 0) {
+        printf("[KERNEL] %s unreadable, skipping\n", path);
+        return;
+    }
+
+    uint8_t *buf = (uint8_t *)kmalloc(inode.size);
+    if (!buf) {
+        printf("[KERNEL] out of memory loading %s\n", path);
+        return;
+    }
+    if (lufirafs_read(&lufirafs, ino, 0, buf, inode.size) != (int)inode.size) {
+        printf("[KERNEL] short read on %s\n", path);
+        kfree(buf);
+        return;
+    }
+
+    process_t *proc = process_create(name, NULL);
+    if (!proc) {
+        printf("[KERNEL] process_create failed for %s\n", name);
+        kfree(buf);
+        return;
+    }
+
+    void *entry = elf_load_to_process(buf, inode.size, proc, name);
+    if (!entry) {
+        printf("[KERNEL] failed to load %s\n", path);
+        proc->state = PROCESS_TERMINATED;
+        kfree(buf);
+        return;
+    }
+    proc->context.rip = (uint64_t)entry;
+
+    uint64_t new_rsp, argv_addr, envp_addr;
+    if (build_exec_stack(proc->page_table, proc->stack_base, NULL, NULL,
+                          &new_rsp, &argv_addr, &envp_addr) != 0) {
+        printf("[KERNEL] build_exec_stack failed for %s\n", name);
+        proc->state = PROCESS_TERMINATED;
+        kfree(buf);
+        return;
+    }
+    proc->context.rsp = new_rsp;
+    proc->context.rdi = 0;
+    proc->context.rsi = argv_addr;
+    proc->context.rdx = envp_addr;
+
+    kfree(buf);
 }
 
 __attribute__((section(".text.prologue")))
@@ -406,15 +471,12 @@ void _start(BootInfo* bi) {
         }
     }
 
-    // Пробует HDA (hda.c) первым, затем AC'97 (ac97.c) — тот же диспетчер,
-    // что у AHCI/NVMe выше (см. sound.c). Требует тикающего таймера
-    // (pit_wait_ms() в CORB/RIRB-обмене и сбросе контроллера), поэтому
-    // вызывается после sti — см. разбор в hda.c.
-    if (sound_init() == 0) {
-        DLOG("[ OK ] Audio ready (%s)\n", sound_driver_name());
-    } else {
-        printf("[WARN] No audio controller available\n");
-    }
+    // v0.9.5: звук больше не инициализируется в ядре — soundd.elf сам
+    // заявляет HDA/AC'97 через SYS_DRIVER_CLAIM_DEVICE_BY_CLASS (пробует HDA
+    // первым, затем AC'97 — тот же порядок предпочтения, что раньше был в
+    // sound.c) и регистрируется как единственный звуковой демон
+    // (SYS_SOUNDD_REGISTER). SYS_SOUND_* (syscall.c) релеят запросы ему.
+    spawn_daemon_process("soundd", "/bin/soundd.elf");
 
     if (devmode_is_enabled()) {
         printf("\n");

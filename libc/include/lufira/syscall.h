@@ -93,6 +93,24 @@
 #define SYS_NET_CONFIG_GET 75
 #define SYS_NET_CONFIG_SET 76
 
+// v0.9.5: инфраструктура userspace-драйверов (driver.h) + демоны netd/
+// soundd — см. подробные комментарии у каждого в kernel-side syscall.h.
+#define SYS_DRIVER_CLAIM_DEVICE 77
+#define SYS_DRIVER_RELEASE_DEVICE 78
+#define SYS_PCI_CONFIG_READ 79
+#define SYS_PCI_CONFIG_WRITE 80
+#define SYS_IO_IN 81
+#define SYS_IO_OUT 82
+#define SYS_MMAP_MMIO 83
+#define SYS_DMA_ALLOC 84
+#define SYS_IRQ_REGISTER 85
+#define SYS_IRQ_WAIT 86
+#define SYS_SHM_CREATE 87
+#define SYS_SHM_ATTACH 88
+#define SYS_SOUNDD_REGISTER 89
+#define SYS_SOUND_CONSUME 90
+#define SYS_DRIVER_CLAIM_DEVICE_BY_CLASS 91
+
 // Флаги sys_open().
 #define O_RDONLY  0
 #define O_WRONLY  1
@@ -321,6 +339,92 @@ static inline long sys_sound_play_pcm(const short *samples, unsigned int frames)
 // играл) — вызывать на выходе, иначе звук продолжит крутиться по кругу.
 static inline long sys_sound_stop(void) {
     return __syscall5(SYS_SOUND_STOP, 0, 0, 0, 0, 0);
+}
+
+// ===== v0.9.5: инфраструктура userspace-драйверов (kernel/system/driver/
+// driver.h) + демоны netd/soundd. Используются только самими демонами
+// (lufira-packages/daemons/) — обычные программы этих обёрток не видят. =====
+
+// Мирроит lufira_pci_device_t (kernel-side syscall.h) байт-в-байт — для
+// SYS_DRIVER_CLAIM_DEVICE(_BY_CLASS). bars[i].size==0 — BAR не занят.
+struct lufira_pci_device {
+    uint8_t  bus, device, function;
+    uint8_t  interrupt_line;
+    uint16_t vendor_id, device_id;
+    struct {
+        uint64_t address;
+        uint64_t size;
+        uint8_t  is_io;
+    } bars[6];
+};
+
+static inline long sys_driver_claim_device(uint16_t vendor_id, uint16_t device_id,
+                                            struct lufira_pci_device *out) {
+    return __syscall5(SYS_DRIVER_CLAIM_DEVICE, vendor_id, device_id, (long)out, 0, 0);
+}
+static inline long sys_driver_claim_device_by_class(uint8_t class_code, uint8_t subclass,
+                                                     struct lufira_pci_device *out) {
+    return __syscall5(SYS_DRIVER_CLAIM_DEVICE_BY_CLASS, class_code, subclass, (long)out, 0, 0);
+}
+static inline long sys_driver_release_device(uint8_t bus, uint8_t device, uint8_t function) {
+    long bdf = ((long)bus << 16) | ((long)device << 8) | function;
+    return __syscall5(SYS_DRIVER_RELEASE_DEVICE, bdf, 0, 0, 0, 0);
+}
+
+static inline long sys_pci_config_read(uint8_t bus, uint8_t device, uint8_t function,
+                                        uint8_t offset, unsigned int width, uint32_t *out) {
+    long packed = ((long)bus << 24) | ((long)device << 16) | ((long)function << 8) | offset;
+    return __syscall5(SYS_PCI_CONFIG_READ, packed, width, (long)out, 0, 0);
+}
+static inline long sys_pci_config_write(uint8_t bus, uint8_t device, uint8_t function,
+                                         uint8_t offset, unsigned int width, uint32_t value) {
+    long packed = ((long)bus << 24) | ((long)device << 16) | ((long)function << 8) | offset;
+    return __syscall5(SYS_PCI_CONFIG_WRITE, packed, width, value, 0, 0);
+}
+
+static inline long sys_io_in(uint16_t port, unsigned int width, uint32_t *out) {
+    return __syscall5(SYS_IO_IN, port, width, (long)out, 0, 0);
+}
+static inline long sys_io_out(uint16_t port, unsigned int width, uint32_t value) {
+    return __syscall5(SYS_IO_OUT, port, width, value, 0, 0);
+}
+
+// Возврат: виртуальный адрес (с учётом смещения внутри первой страницы,
+// если phys_addr не выровнен), (long)-1 при ошибке.
+static inline long sys_mmap_mmio(uint64_t phys_addr, uint64_t length) {
+    return __syscall5(SYS_MMAP_MMIO, (long)phys_addr, (long)length, 0, 0, 0);
+}
+
+// Выделяет num_pages ФИЗИЧЕСКИ ПОДРЯД идущих страниц, пишет физический
+// адрес первой в *phys_out. Возврат: виртуальный адрес, (long)-1 при ошибке.
+static inline long sys_dma_alloc(uint64_t num_pages, uint64_t *phys_out) {
+    return __syscall5(SYS_DMA_ALLOC, (long)num_pages, (long)phys_out, 0, 0, 0);
+}
+
+static inline long sys_irq_register(unsigned int irq_line) {
+    return __syscall5(SYS_IRQ_REGISTER, irq_line, 0, 0, 0, 0);
+}
+// Блокирует до следующего срабатывания закреплённой линии.
+static inline long sys_irq_wait(unsigned int irq_line) {
+    return __syscall5(SYS_IRQ_WAIT, irq_line, 0, 0, 0, 0);
+}
+
+static inline long sys_shm_create(uint64_t num_pages, int32_t *id_out) {
+    return __syscall5(SYS_SHM_CREATE, (long)num_pages, (long)id_out, 0, 0, 0);
+}
+static inline long sys_shm_attach(int32_t shm_id) {
+    return __syscall5(SYS_SHM_ATTACH, shm_id, 0, 0, 0, 0);
+}
+
+// 0 успех, -EPERM не root, -1 уже зарегистрирован — см. kernel-side syscall.h.
+static inline long sys_soundd_register(void) {
+    return __syscall5(SYS_SOUNDD_REGISTER, 0, 0, 0, 0, 0);
+}
+// timeout_ms: <0 ждать неограниченно, 0 вернуть немедленно, >0 не больше
+// стольки мс (как у sys_ipc_recv()). Только зарегистрированному soundd.
+// Возврат: число фреймов (0..max_frames).
+static inline long sys_sound_consume(short *out, unsigned int max_frames, long timeout_ms) {
+    return __syscall5(SYS_SOUND_CONSUME, (long)out, max_frames, timeout_ms, 0, 0);
 }
 
 // Один ICMP Echo Request + блокирующее ожидание ответа. Возврат: RTT в мс

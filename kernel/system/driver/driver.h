@@ -28,6 +28,13 @@ void driver_init(void);
 int driver_claim_device(uint32_t pid, uint16_t vendor_id, uint16_t device_id,
                          pci_device_t *out);
 
+// Как driver_claim_device(), но ищет по PCI-классу/подклассу, не
+// vendor/device id — нужен звуковым/сетевым контроллерам: класс (0x04
+// Multimedia/0x01 Audio для AC'97, 0x04/0x03 для HDA) стабилен между
+// вендорами и эмуляциями, в отличие от конкретных vendor/device id.
+int driver_claim_device_by_class(uint32_t pid, uint8_t class_code, uint8_t subclass,
+                                  pci_device_t *out);
+
 // Снимает заявку pid на bus:device:function. 0 успех, -1 такой заявки у pid нет.
 int driver_release_device(uint32_t pid, uint8_t bus, uint8_t device, uint8_t function);
 
