@@ -14,8 +14,6 @@
 #include "drivers/serial/serial.h"
 #include "drivers/disk/disk.h"
 #include "drivers/usb/xhci.h"
-#include "net/net.h"
-#include "net/dhcp.h"
 #include "system/cpu/gdt.h"
 #include "system/cpu/idt.h"
 #include "system/cpu/tss.h"
@@ -453,23 +451,13 @@ void _start(BootInfo* bi) {
     irq_enable(12); // мышь (PS/2)
     LOG_DONE_OK("Mouse %s", mouse_is_initialized() ? "ready" : "not found");
 
-    // net_init() (RTL8139/E1000/E1000E + статическая настройка IP как
-    // фоллбэк) — по той же причине, что и xhci_init(), требует уже
-    // тикающих таймерных прерываний.
-    net_init();
-
-    // Пробуем получить DHCP-аренду (IP/маска/шлюз/DNS), если в сети есть
-    // сервер (включая QEMU SLIRP); при неудаче net_get_config() остаётся на
-    // статическом дефолте из net.c — тот же принцип деградации, что и у
-    // остального сетевого стека. ~4с бюджет короче HTTP_TOTAL_BUDGET_TICKS
-    // (http_client.c), чтобы не раздувать время загрузки без DHCP-сервера.
-    if (net_found()) {
-        if (dhcp_start(4000) == 0) {
-            DLOG("[DHCP] lease applied\n");
-        } else {
-            DLOG("[DHCP] no lease, staying on static default\n");
-        }
-    }
+    // v0.9.5: сеть (RTL8139/E1000/E1000E + стек Ethernet/ARP/IP/TCP/UDP/TLS/
+    // DHCP/DNS/HTTP) больше не инициализируется в ядре — netd.elf сам
+    // заявляет карту через SYS_DRIVER_CLAIM_DEVICE(_BY_CLASS), пытается
+    // получить DHCP-аренду и регистрируется единственным сетевым демоном
+    // (SYS_NETD_REGISTER). SYS_NET_FETCH/SYS_PING/SYS_NET_CONFIG_*
+    // (syscall.c) релеят запросы ему.
+    spawn_daemon_process("netd", "/bin/netd.elf");
 
     // v0.9.5: звук больше не инициализируется в ядре — soundd.elf сам
     // заявляет HDA/AC'97 через SYS_DRIVER_CLAIM_DEVICE_BY_CLASS (пробует HDA

@@ -25,10 +25,7 @@
 #include "system/ipc/mailbox.h"
 #include "system/ipc/wm_protocol.h"
 #include "drivers/input/input.h"
-#include "net/http_client.h"
-#include "net/net.h"
-#include "net/icmp.h"
-#include "drivers/net/rtl8139.h"
+#include "system/ipc/netd_protocol.h"
 #include "system/ipc/soundd_protocol.h"
 #include "drivers/pci/pci.h"
 #include "system/driver/driver.h"
@@ -357,7 +354,17 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     if (!(prot & PROT_EXEC)) page_flags |= PAGE_NX;
     if (want_shared) page_flags |= PAGE_MMAP_SHARED;
 
-    uint64_t shared_pages[MAX_SHARED_REGION_PAGES];
+    // kmalloc(), не стековый массив: MAX_SHARED_REGION_PAGES — 4096 (v0.9.5,
+    // см. shm.h) ради SYS_NET_FETCH, 32KB на кернел-стеке (KERNEL_STACK_SIZE,
+    // process.h — всего 16KB) переполнили бы его на КАЖДЫЙ sys_mmap(), даже
+    // без MAP_SHARED. Выделяем только когда реально нужно и ровно под
+    // num_pages, не под весь потолок.
+    uint64_t *shared_pages = NULL;
+    if (want_shared) {
+        shared_pages = (uint64_t *)kmalloc(num_pages * sizeof(uint64_t));
+        if (!shared_pages) return (uint64_t)-1;
+    }
+
     uint64_t mapped;
     for (mapped = 0; mapped < num_pages; mapped++) {
         uint64_t phys = pmm_alloc_page();
@@ -383,12 +390,14 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         for (uint64_t i = 0; i < mapped; i++) {
             unmap_page(base + i * PAGE_SIZE);
         }
+        if (shared_pages) kfree(shared_pages);
         return (uint64_t)-1;
     }
 
     int shared_id = -1;
     if (want_shared) {
         shared_id = shm_create(shared_pages, num_pages);
+        kfree(shared_pages); // shm_create() уже скопировало всё, что нужно, в свой реестр
         if (shared_id < 0) {
             // Реестр shm.c переполнен — то же самое, что "некуда записать
             // новый регион" чуть выше, только обнаруживается позже (после
@@ -1182,6 +1191,16 @@ static uint64_t sys_soundd_register(uint64_t unused0, uint64_t unused1, uint64_t
     return 0;
 }
 
+// SYS_NETD_REGISTER (92) — root-only, см. syscall.h.
+static uint64_t sys_netd_register(uint64_t unused0, uint64_t unused1, uint64_t unused2,
+                                   uint64_t unused3, uint64_t unused4) {
+    (void)unused0; (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (current_process->uid != 0) return (uint64_t)-EPERM;
+    if (process_netd_register(current_process->pid) != 0) return (uint64_t)-1;
+    return 0;
+}
+
 // SYS_SOUND_CONSUME (90) — только зарегистрированному soundd, см. syscall.h.
 static uint64_t sys_sound_consume(uint64_t out_ptr, uint64_t max_frames, uint64_t timeout_ms,
                                    uint64_t unused3, uint64_t unused4) {
@@ -1885,32 +1904,28 @@ static uint64_t sys_sound_stop(uint64_t unused0, uint64_t unused1, uint64_t unus
     return 0;
 }
 
-// SYS_PING (73) — см. syscall.h.
+// SYS_PING (73) — см. syscall.h. Релей через netd (NETD_OP_PING) —
+// icmp_ping_send()/icmp_ping_wait() теперь исполняются внутри netd, не
+// здесь; эта функция только пакует аргументы и ждёт ответа.
 static uint64_t sys_ping(uint64_t dst_ip, uint64_t id, uint64_t seq, uint64_t timeout_ms,
                          uint64_t unused4) {
     (void)unused4;
 
-    if (!rtl8139_found()) return (uint64_t)-2;
+    uint32_t netd_pid = process_get_netd_pid();
+    if (!netd_pid) return (uint64_t)-2;
 
-    // icmp_ping_wait() меряет таймаут через pit_get_ticks(), которому нужны
-    // тикающие прерывания таймера — недоставимые при IF=0 (FMASK маскирует
-    // IF на входе в любой syscall). См. подробный разбор у SYS_NET_FETCH
-    // ниже по файлу.
-    asm volatile("sti");
+    netd_request_t req; memset(&req, 0, sizeof(req));
+    req.opcode = NETD_OP_PING;
+    req.a[0] = (int32_t)dst_ip;
+    req.a[1] = (int32_t)id;
+    req.a[2] = (int32_t)seq;
+    req.a[3] = (int32_t)timeout_ms;
 
-    if (net_lock_acquire(5000) != 0) return (uint64_t)-4;
+    netd_reply_t reply;
+    if (service_call(netd_pid, &req, sizeof(req), &reply, sizeof(reply)) != 0)
+        return (uint64_t)-4;
 
-    if (icmp_ping_send((uint32_t)dst_ip, (uint16_t)id, (uint16_t)seq) != 0) {
-        net_lock_release();
-        return (uint64_t)-3;
-    }
-
-    uint32_t rtt_ms = 0;
-    int wait_rc = icmp_ping_wait((uint32_t)timeout_ms, &rtt_ms);
-    net_lock_release();
-
-    if (wait_rc != 0) return (uint64_t)-1;
-    return (uint64_t)rtt_ms;
+    return (uint64_t)(int64_t)reply.result;
 }
 
 // SYS_OS_VERSION (74) — см. syscall.h.
@@ -1933,7 +1948,8 @@ static uint64_t sys_os_version(uint64_t buf_ptr, uint64_t unused1, uint64_t unus
     return 0;
 }
 
-// SYS_NET_CONFIG_GET (75) — см. syscall.h.
+// SYS_NET_CONFIG_GET (75) — см. syscall.h. "Карты нет"/"netd не запущен" —
+// валидный ответ (link_up=0), а не -EIO (тот же стиль, что у SYS_SOUND_INFO).
 static uint64_t sys_net_config_get(uint64_t buf_ptr, uint64_t unused1, uint64_t unused2,
                                    uint64_t unused3, uint64_t unused4) {
     (void)unused1; (void)unused2; (void)unused3; (void)unused4;
@@ -1944,14 +1960,21 @@ static uint64_t sys_net_config_get(uint64_t buf_ptr, uint64_t unused1, uint64_t 
 
     lufira_net_config_t out;
     memset(&out, 0, sizeof(out));
-    out.link_up = (uint8_t)rtl8139_found();
-    if (out.link_up) memcpy(out.mac, rtl8139_get_mac(), 6);
 
-    const net_config_t *cfg = net_get_config();
-    out.our_ip = cfg->our_ip;
-    out.netmask = cfg->netmask;
-    out.gateway = cfg->gateway;
-    out.dns_server = cfg->dns_server;
+    uint32_t netd_pid = process_get_netd_pid();
+    if (netd_pid) {
+        netd_request_t req; memset(&req, 0, sizeof(req));
+        req.opcode = NETD_OP_CONFIG_GET;
+        netd_reply_t reply;
+        if (service_call(netd_pid, &req, sizeof(req), &reply, sizeof(reply)) == 0) {
+            out.link_up = (uint8_t)reply.a[0];
+            memcpy(out.mac, reply.mac, 6);
+            out.our_ip = reply.our_ip;
+            out.netmask = reply.netmask;
+            out.gateway = reply.gateway;
+            out.dns_server = reply.dns_server;
+        }
+    }
 
     memcpy((void *)buf_ptr, &out, sizeof(out));
     return 0;
@@ -1961,7 +1984,17 @@ static uint64_t sys_net_config_get(uint64_t buf_ptr, uint64_t unused1, uint64_t 
 static uint64_t sys_net_config_set(uint64_t ip, uint64_t netmask, uint64_t gateway,
                                    uint64_t unused3, uint64_t unused4) {
     (void)unused3; (void)unused4;
-    net_set_config((uint32_t)ip, (uint32_t)netmask, (uint32_t)gateway, net_get_config()->dns_server);
+
+    uint32_t netd_pid = process_get_netd_pid();
+    if (!netd_pid) return 0;
+
+    netd_request_t req; memset(&req, 0, sizeof(req));
+    req.opcode = NETD_OP_CONFIG_SET;
+    req.a[0] = (int32_t)ip;
+    req.a[1] = (int32_t)netmask;
+    req.a[2] = (int32_t)gateway;
+    netd_reply_t reply;
+    service_call(netd_pid, &req, sizeof(req), &reply, sizeof(reply));
     return 0;
 }
 
@@ -2043,6 +2076,18 @@ static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t unused2,
 // HTTP_FETCH_E* уходят в userspace КАК ЕСТЬ: они численно совпадают с
 // NET_FETCH_E* из libc/include/lufira/syscall.h (см. комментарий об этом
 // в net/http_client.h), поэтому перекодировать их не нужно и нельзя.
+// NET_FETCH_E* — должны численно совпадать с libc/include/lufira/syscall.h
+// (dlpg.c сравнивает результат sys_net_fetch() с ними напрямую) и с тем,
+// что теперь возвращает http_fetch() ВНУТРИ netd (daemons/netd/
+// http_client.h) — то же соглашение, что было здесь до переноса в
+// userspace. Только ENODEV нужен прямо в ядре (netd не зарегистрирован);
+// остальные коды просто проходят через reply.result как есть.
+#define NET_FETCH_ENODEV (-7)
+
+// Потолок out_cap — ограничивает, сколько физических страниц уйдёт под
+// shm-область ниже (должен помещаться в MAX_SHARED_REGION_PAGES, shm.h).
+#define NET_FETCH_MAX_CAP (MAX_SHARED_REGION_PAGES * PAGE_SIZE)
+
 static uint64_t sys_net_fetch(uint64_t url_ptr, uint64_t out_buf_ptr, uint64_t out_cap,
                               uint64_t status_ptr, uint64_t unused4) {
     (void)unused4;
@@ -2059,55 +2104,94 @@ static uint64_t sys_net_fetch(uint64_t url_ptr, uint64_t out_buf_ptr, uint64_t o
         !is_user_range_valid(current_process->page_table, status_ptr, sizeof(int), 1))
         return (uint64_t)-EFAULT;
 
-    // Пишем напрямую в буфер пользователя под его же CR3 — тот же приём,
-    // что у sys_readdir()/sys_statfs()/sys_pslist() выше. Безопасно и при
-    // долгом блокирующем http_fetch() внутри: вытеснение по таймеру
-    // срабатывает только когда прерванный код исполнялся в ring3
-    // (frame->cs == 0x33, см. timer_irq_handler() в pit.c), то есть во
-    // время ядерного кода syscall'а CR3 сам по себе не поменяется — но
-    // process_sleep() внутри http_fetch()/tcp.c/dns.c/tls.c (см. ниже)
-    // теперь САМ явно переключает на другой процесс и обратно, так что
-    // буфер остаётся валиден: каждый возврат сюда снова происходит в
-    // контексте current_process == этого же процесса с тем же CR3.
-    //
-    // FMASK (0xC0000084, см. syscall_init()) маскирует IF на входе в ЛЮБОЙ
-    // syscall, и ничто в syscall_entry.S/syscall_handler() не возвращает его
-    // — IF остаётся 0 до iretq в эпилоге. http_fetch()/tcp_connect()/
-    // dns_resolve()/tls.c меряют все свои таймауты через pit_get_ticks(),
-    // который растёт только из таймерного IRQ — недоставимого при IF=0, —
-    // так что без sti() здесь любой deadline сравнивался бы с застывшим
-    // счётчиком и никогда не истекал. Явный cli() перед возвратом не нужен:
-    // iretq безусловно берёт итоговый IF из сохранённых user RFLAGS (r11),
-    // так что финальное состояние (IF=1 в ring3) корректно независимо от
-    // этого sti().
-    //
-    // Отдельно: блокирующие циклы сетевого стека (tcp_*/dns_resolve()/
-    // tls_recv()/arp_resolve()) ждут через process_sleep(1), а не
-    // pit_wait_ms(1), — последний просто делает hlt в ТЕКУЩЕМ процессе без
-    // schedule(), что держало бы CPU занятым и не давало бы кванта другим
-    // READY-процессам на всё время fetch. net_lock_acquire()/release() ниже
-    // — обязательная пара: g_conn/g_ping стека рассчитаны ровно на одно
-    // соединение разом, без лока два параллельных sys_net_fetch() испортили
-    // бы состояние друг друга (см. net_lock_acquire(), net.h).
-    asm volatile("sti");
+    if (out_cap > NET_FETCH_MAX_CAP) return (uint64_t)-EINVAL;
 
-    // Бюджет ожидания лока — тот же порядок, что у http_fetch() на весь
-    // ответ (HTTP_TOTAL_BUDGET_TICKS, http_client.c): ~60с на случай, если
-    // другой процесс уже держит сеть своим собственным долгим fetch'ем.
-    if (net_lock_acquire(60000) != 0) {
+    uint32_t netd_pid = process_get_netd_pid();
+    if (!netd_pid) {
         if (status_ptr != 0) *(int *)status_ptr = 0;
-        return (uint64_t)(int64_t)HTTP_FETCH_EBUSY;
+        return (uint64_t)(int64_t)NET_FETCH_ENODEV;
     }
 
-    int status = 0;
-    int n = http_fetch((const char *)url_ptr, (void *)out_buf_ptr,
-                       (unsigned long)out_cap, &status);
+    // Тело ответа (килобайты-мегабайты) не умещается в 96-байтный payload
+    // mailbox'а — заводим shm-область под out_cap байт: netd сам ATTACH её
+    // (SYS_SHM_ATTACH) и пишет http_fetch() прямо туда; после ответа ядро
+    // читает готовые байты напрямую через phys_to_virt() — универсальный
+    // доступ ядра к любой физической странице, ATTACH с его стороны не
+    // нужен (в отличие от netd, у ядра нет собственных "page tables
+    // пользовательского процесса", только одна общая physmap).
+    uint64_t num_pages = out_cap == 0 ? 0 : (out_cap + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint64_t *pages = NULL;
+    int shm_id = -1;
 
-    net_lock_release();
+    if (num_pages > 0) {
+        pages = (uint64_t *)kmalloc(num_pages * sizeof(uint64_t));
+        if (!pages) return (uint64_t)-1;
+
+        uint64_t allocated;
+        for (allocated = 0; allocated < num_pages; allocated++) {
+            uint64_t phys = pmm_alloc_page();
+            if (!phys) break;
+            pages[allocated] = phys;
+        }
+        if (allocated < num_pages) {
+            for (uint64_t i = 0; i < allocated; i++) pmm_free_page(pages[i]);
+            kfree(pages);
+            return (uint64_t)-1;
+        }
+
+        shm_id = shm_create(pages, num_pages);
+        if (shm_id < 0) {
+            for (uint64_t i = 0; i < num_pages; i++) pmm_free_page(pages[i]);
+            kfree(pages);
+            return (uint64_t)-1;
+        }
+    }
+
+    netd_request_t req; memset(&req, 0, sizeof(req));
+    req.opcode = NETD_OP_FETCH;
+    req.shm_id = (uint32_t)(shm_id >= 0 ? shm_id : 0);
+    req.cap = (uint32_t)out_cap;
+    size_t i = 0;
+    const char *url = (const char *)url_ptr;
+    for (; url[i] && i < sizeof(req.str) - 1; i++) req.str[i] = url[i];
+    req.str[i] = '\0';
+
+    netd_reply_t reply;
+    int rc = service_call(netd_pid, &req, sizeof(req), &reply, sizeof(reply));
+
+    int result;
+    int status = 0;
+    if (rc != 0) {
+        // netd не ответил (умер во время обработки этого самого запроса —
+        // то же известное ограничение, что у wm_call()/service_call()).
+        result = NET_FETCH_ENODEV;
+    } else {
+        result = reply.result;
+        status = reply.a[0];
+        if (result > 0 && pages) {
+            uint32_t remaining = (uint32_t)result;
+            uint32_t off = 0;
+            for (uint64_t p = 0; p < num_pages && remaining > 0; p++) {
+                uint32_t take = remaining < PAGE_SIZE ? remaining : (uint32_t)PAGE_SIZE;
+                memcpy((void *)(out_buf_ptr + off), phys_to_virt(pages[p]), take);
+                off += take;
+                remaining -= take;
+            }
+        }
+    }
+
+    if (shm_id >= 0) {
+        // Снимает "неявную" долю ядра из refcount'а (shm_create() стартует
+        // его с num_pages, представляя РОВНО это — см. комментарий в
+        // shm.h): netd уже снял свою через SYS_MUNMAP (main.c) к моменту
+        // ответа, так что это последнее снятие и реально освобождает
+        // физические страницы через pmm_free_page() внутри shm_release().
+        for (uint64_t i2 = 0; i2 < num_pages; i2++) shm_release(shm_id);
+    }
+    if (pages) kfree(pages);
 
     if (status_ptr != 0) *(int *)status_ptr = status;
-
-    return (uint64_t)(int64_t)n;
+    return (uint64_t)(int64_t)result;
 }
 
 // ===== Инфраструктура userspace-драйверов (driver.h) — см. подробные
@@ -2421,7 +2505,12 @@ static uint64_t sys_shm_create(uint64_t num_pages, uint64_t id_out_ptr, uint64_t
     }
     if (slot < 0) return (uint64_t)-1;
 
-    uint64_t pages[MAX_SHARED_REGION_PAGES];
+    // kmalloc(), не стековый массив — см. комментарий у того же приёма в
+    // sys_mmap() (MAX_SHARED_REGION_PAGES=4096, v0.9.5, не влезает в
+    // 16KB-ный кернел-стек, KERNEL_STACK_SIZE в process.h).
+    uint64_t *pages = (uint64_t *)kmalloc(num_pages * sizeof(uint64_t));
+    if (!pages) return (uint64_t)-1;
+
     uint64_t base = current_process->next_mmap_addr;
     uint64_t pml4_phys = current_process->page_table;
     uint64_t page_flags = PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_MMAP_SHARED;
@@ -2442,10 +2531,12 @@ static uint64_t sys_shm_create(uint64_t num_pages, uint64_t id_out_ptr, uint64_t
         // shm_create() ещё не звали — unmap_page() корректно откатится на
         // pmm_free_page() (тот же приём, что у sys_mmap(), см. его комментарий).
         for (uint64_t i = 0; i < mapped; i++) unmap_page(base + i * PAGE_SIZE);
+        kfree(pages);
         return (uint64_t)-1;
     }
 
     int shm_id = shm_create(pages, num_pages);
+    kfree(pages); // shm_create() уже скопировало всё, что нужно, в свой реестр
     if (shm_id < 0) {
         for (uint64_t i = 0; i < num_pages; i++) unmap_page(base + i * PAGE_SIZE);
         return (uint64_t)-1;
@@ -2467,16 +2558,24 @@ static uint64_t sys_shm_attach(uint64_t shm_id, uint64_t unused1, uint64_t unuse
     (void)unused1; (void)unused2; (void)unused3; (void)unused4;
     if (!current_process) return (uint64_t)-1;
 
-    uint64_t pages[MAX_SHARED_REGION_PAGES];
-    uint64_t num_pages = 0;
-    if (shm_get_pages((int)shm_id, pages, MAX_SHARED_REGION_PAGES, &num_pages) != 0 || num_pages == 0)
+    uint64_t num_pages = shm_get_num_pages((int)shm_id);
+    if (num_pages == 0) return (uint64_t)-1;
+
+    // kmalloc(), не стековый массив — см. тот же приём и комментарий в
+    // sys_mmap()/sys_shm_create(). Ровно num_pages, не весь
+    // MAX_SHARED_REGION_PAGES потолок.
+    uint64_t *pages = (uint64_t *)kmalloc(num_pages * sizeof(uint64_t));
+    if (!pages) return (uint64_t)-1;
+    if (shm_get_pages((int)shm_id, pages, num_pages, &num_pages) != 0) {
+        kfree(pages);
         return (uint64_t)-1;
+    }
 
     int slot = -1;
     for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
         if (current_process->mmap_regions[i].length == 0) { slot = i; break; }
     }
-    if (slot < 0) return (uint64_t)-1;
+    if (slot < 0) { kfree(pages); return (uint64_t)-1; }
 
     uint64_t base = current_process->next_mmap_addr;
     uint64_t pml4_phys = current_process->page_table;
@@ -2485,6 +2584,7 @@ static uint64_t sys_shm_attach(uint64_t shm_id, uint64_t unused1, uint64_t unuse
     for (uint64_t i = 0; i < num_pages; i++) {
         if (map_page_in_pml4(pml4_phys, base + i * PAGE_SIZE, pages[i], page_flags) != 0) {
             for (uint64_t j = 0; j < i; j++) unmap_page(base + j * PAGE_SIZE);
+            kfree(pages);
             return (uint64_t)-1;
         }
         // +1 за КАЖДУЮ реально замапленную страницу, сразу по месту — не
@@ -2494,6 +2594,7 @@ static uint64_t sys_shm_attach(uint64_t shm_id, uint64_t unused1, uint64_t unuse
         // (создателя региона), которую эта попытка attach ещё не брала.
         shm_add_ref((int)shm_id);
     }
+    kfree(pages);
 
     uint64_t len = num_pages * PAGE_SIZE;
     current_process->next_mmap_addr += len;
@@ -2594,6 +2695,7 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_SHM_CREATE] = sys_shm_create,
     [SYS_SHM_ATTACH] = sys_shm_attach,
     [SYS_SOUNDD_REGISTER] = sys_soundd_register,
+    [SYS_NETD_REGISTER] = sys_netd_register,
     [SYS_SOUND_CONSUME] = sys_sound_consume,
     [SYS_DRIVER_CLAIM_DEVICE_BY_CLASS] = sys_driver_claim_device_by_class,
 };

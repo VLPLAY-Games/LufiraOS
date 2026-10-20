@@ -8,7 +8,11 @@
 #include "lib/types.h"
 
 #define MAX_SHARED_REGIONS      16
-#define MAX_SHARED_REGION_PAGES 256 // 1MB на область - с запасом для бридж-целей
+// v0.9.5: SYS_NET_FETCH (syscall.c) гонит тело HTTP-ответа через shm (netd
+// пишет, ядро вычитывает через phys_to_virt()) — пакеты уже перевалили за
+// 1MB (doom.lpg ~4.8MB), отсюда 4096 страниц = 16MB, а не прежний 1MB
+// "с запасом для бридж-целей".
+#define MAX_SHARED_REGION_PAGES 4096
 
 void shm_init(void);
 
@@ -43,3 +47,8 @@ int shm_find_region_by_page(uint64_t phys);
 // адресное пространство. Копирует до max_pages страниц в pages_out,
 // *num_pages_out — реальное число страниц у области. 0 успех, -1 неверный id.
 int shm_get_pages(int id, uint64_t *pages_out, uint64_t max_pages, uint64_t *num_pages_out);
+
+// Число страниц в области (0, если id неверен) — нужен вызывающему, чтобы
+// kmalloc() буфер под shm_get_pages() РОВНО нужного размера, не на все
+// MAX_SHARED_REGION_PAGES разом (см. sys_shm_attach(), syscall.c).
+uint64_t shm_get_num_pages(int id);

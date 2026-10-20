@@ -380,17 +380,10 @@ void execute_command(void) {
         // Сырой input_buffer — текст регистрозависим. "mountwrite " = 11 символов.
         if (input_buffer_index <= 11 || is_help_flag(args)) printf("\nUsage: mountwrite <name> <file> <text>\n");
         else command_mountwrite(input_buffer + 11);
-    } else if (strcmp(cmd_lower, "ifconfig") == 0) {
-        if (is_help_flag(args)) printf("\nUsage: ifconfig [ip] [netmask] [gateway]\nNo arguments shows current configuration.\n");
-        else command_ifconfig(args);
-    } else if (strcmp(cmd_lower, "ping") == 0) {
-        if (*args == '\0' || is_help_flag(args)) printf("\nUsage: ping <ip> [count]\n");
-        else command_ping(args);
-    } else if (strcmp(cmd_lower, "wget") == 0) {
-        // Сырой input_buffer — путь и имя файла регистрозависимы.
-        // "wget " = 5 символов включая пробел.
-        if (input_buffer_index <= 5 || is_help_flag(args)) printf("\nUsage: wget <ip> <path> [output-filename]\n");
-        else command_wget(input_buffer + 5);
+    // ifconfig/ping/wget — v0.9.5: сеть переехала в userspace-демон netd,
+    // kernel-native commands/net.c удалён; те же имена уже существуют как
+    // обычные пакеты (user/ifconfig.c и т.д., поверх SYS_NET_*/SYS_PING) —
+    // run_external_command() ниже находит и запускает их как /bin/<name>.elf.
     } else {
         run_external_command(cmd_lower, args);
     }

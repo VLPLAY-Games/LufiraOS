@@ -48,9 +48,6 @@ $(shell mkdir -p $(BUILD_DIR) \
     $(BUILD_DIR)/kernel/drivers/disk \
 	$(BUILD_DIR)/kernel/drivers/usb \
 	$(BUILD_DIR)/kernel/drivers/input \
-	$(BUILD_DIR)/kernel/drivers/net \
-	$(BUILD_DIR)/kernel/net \
-	$(BUILD_DIR)/kernel/net/crypto \
     $(BUILD_DIR)/kernel/shell \
 	$(BUILD_DIR)/kernel/shell/commands \
     $(BUILD_DIR)/kernel/system/cpu \
@@ -107,26 +104,6 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/drivers/usb/xhci.c \
 	$(KERNEL_DIR)/drivers/usb/usb_hid.c \
 	$(KERNEL_DIR)/drivers/input/input.c \
-	$(KERNEL_DIR)/drivers/net/rtl8139.c \
-	$(KERNEL_DIR)/drivers/net/e1000.c \
-	$(KERNEL_DIR)/drivers/net/e1000e.c \
-	$(KERNEL_DIR)/net/net.c \
-	$(KERNEL_DIR)/net/dhcp.c \
-	$(KERNEL_DIR)/net/eth.c \
-	$(KERNEL_DIR)/net/arp.c \
-	$(KERNEL_DIR)/net/ip.c \
-	$(KERNEL_DIR)/net/icmp.c \
-	$(KERNEL_DIR)/net/tcp.c \
-	$(KERNEL_DIR)/net/udp.c \
-	$(KERNEL_DIR)/net/dns.c \
-	$(KERNEL_DIR)/net/tls.c \
-	$(KERNEL_DIR)/net/http_client.c \
-	$(KERNEL_DIR)/net/crypto/sha256.c \
-	$(KERNEL_DIR)/net/crypto/hmac.c \
-	$(KERNEL_DIR)/net/crypto/aes_gcm.c \
-	$(KERNEL_DIR)/net/crypto/x25519.c \
-	$(KERNEL_DIR)/net/crypto/bignum.c \
-	$(KERNEL_DIR)/net/crypto/rsa_verify.c \
     $(KERNEL_DIR)/shell/shell.c \
     $(KERNEL_DIR)/shell/commands/system.c \
     $(KERNEL_DIR)/shell/commands/colors.c \
@@ -134,7 +111,6 @@ KERNEL_C_SOURCES := \
 	$(KERNEL_DIR)/shell/commands/users.c \
 	$(KERNEL_DIR)/shell/commands/usb.c \
 	$(KERNEL_DIR)/shell/commands/mount.c \
-	$(KERNEL_DIR)/shell/commands/net.c \
     $(KERNEL_DIR)/system/cpu/gdt.c \
     $(KERNEL_DIR)/system/cpu/idt.c \
     $(KERNEL_DIR)/system/cpu/irq.c \

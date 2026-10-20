@@ -80,8 +80,3 @@ void command_unmount(const char* args);
 void command_mountls(const char* args);
 void command_mountcat(const char* args);
 void command_mountwrite(const char* args);
-
-// Сеть
-void command_ifconfig(const char* args);
-void command_ping(const char* args);
-void command_wget(const char* args);

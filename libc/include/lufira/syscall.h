@@ -110,6 +110,7 @@
 #define SYS_SOUNDD_REGISTER 89
 #define SYS_SOUND_CONSUME 90
 #define SYS_DRIVER_CLAIM_DEVICE_BY_CLASS 91
+#define SYS_NETD_REGISTER 92
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -425,6 +426,11 @@ static inline long sys_soundd_register(void) {
 // Возврат: число фреймов (0..max_frames).
 static inline long sys_sound_consume(short *out, unsigned int max_frames, long timeout_ms) {
     return __syscall5(SYS_SOUND_CONSUME, (long)out, max_frames, timeout_ms, 0, 0);
+}
+
+// 0 успех, -EPERM не root, -1 уже зарегистрирован — см. kernel-side syscall.h.
+static inline long sys_netd_register(void) {
+    return __syscall5(SYS_NETD_REGISTER, 0, 0, 0, 0, 0);
 }
 
 // Один ICMP Echo Request + блокирующее ожидание ответа. Возврат: RTT в мс

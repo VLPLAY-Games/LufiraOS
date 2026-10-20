@@ -459,6 +459,25 @@
 // Коды возврата — те же, что у SYS_DRIVER_CLAIM_DEVICE.
 #define SYS_DRIVER_CLAIM_DEVICE_BY_CLASS 91
 
+// ===== v0.9.5: сеть вынесена из ядра в userspace-демон netd — тот же
+// принцип, что soundd (см. SYS_SOUNDD_REGISTER выше). SYS_NET_FETCH(66)/
+// SYS_PING(73)/SYS_NET_CONFIG_GET(75)/SET(76) теперь релеят запрос через
+// service_call() (netd_protocol.h) вместо прямого вызова net/http_client.c;
+// сигнатуры и коды ошибок для вызывающего НЕ изменились. SYS_NET_FETCH —
+// особый случай: тело ответа (килобайты) не умещается в mailbox, поэтому
+// ядро само заводит shm-область под out_cap байт (shm.c) и передаёт её id
+// в запросе — netd аттачит её (SYS_SHM_ATTACH), пишет http_fetch() прямо
+// туда, отмаппит перед ответом; ядро читает готовые байты напрямую через
+// phys_to_virt() (универсальный доступ ядра к любой физической странице,
+// без ATTACH с его стороны). =====
+
+// SYS_NETD_REGISTER (92): без аргументов. Делает вызывающего единственным
+// сетевым демоном системы — root-only (та же причина, что у
+// SYS_SOUNDD_REGISTER: системный сервис, которому доверяют SYS_NET_*, а не
+// процесс, которым может быть кто угодно). 0 успех, -EPERM не root, -1 уже
+// зарегистрирован.
+#define SYS_NETD_REGISTER 92
+
 // Флаги для sys_open
 #define O_RDONLY    0
 #define O_WRONLY    1

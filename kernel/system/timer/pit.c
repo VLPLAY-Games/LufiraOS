@@ -2,7 +2,6 @@
 #include "drivers/console/console.h"
 #include "system/process/process.h"
 #include "drivers/usb/xhci.h"
-#include "net/net.h"
 #include "system/devmode/devmode.h"
 #include "shell/shell.h"
 
@@ -129,7 +128,8 @@ void timer_irq_handler(interrupt_frame_t *frame) {
     console_tick_present(); // v0.8-мост, пункт 2: флашит back buffer, только если "грязный"
 
     usb_poll();
-    net_poll();
+    // net_poll() — v0.9.5: сеть переехала в userspace-демон netd, у него
+    // теперь свой цикл опроса (daemons/netd/main.c), не таймерный тик ядра.
 
     // Собирает зомби, которых никто не process_wait()'ит (runbg без wait,
     // или foreground run/exec — шелл только опрашивает child->state, см.
@@ -139,11 +139,11 @@ void timer_irq_handler(interrupt_frame_t *frame) {
     // не передаёт управление самому idle-циклу, пока жив хоть один READY-
     // процесс (а шелл жив всегда), так что ждать естественного перехода в
     // idle бессмысленно. process_reap() не блокирует и не переключает
-    // контекст — безопасно звать прямо отсюда, как usb_poll()/net_poll().
+    // контекст — безопасно звать прямо отсюда, как usb_poll().
     process_reap();
 
-    // Только ЗДЕСЬ, после того как usb_poll()/net_poll() уже полностью
-    // отработали — см. подробный комментарий у shell_ctrl_c_pending в
+    // Только ЗДЕСЬ, после того как usb_poll() уже полностью
+    // отработал — см. подробный комментарий у shell_ctrl_c_pending в
     // shell.h: shell_handle_ctrl_c() может увести управление насовсем через
     // реальное переключение контекста (если убиваемый foreground-процесс —
     // это current_process, обычный случай), и звать её раньше, прямо
