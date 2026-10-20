@@ -1,0 +1,151 @@
+name: Release assets
+
+# Срабатывает на каждый тег вида vX.Y.Z (с 0.9.0 и далее). Помимо исходников
+# самого LufiraOS, которые GitHub прикладывает к релизу автоматически,
+# собирает и прикладывает:
+#   - исходники lufira-packages, LufiraOS-Builder, lufira-tests (их main на
+#     момент сборки — у них нет собственных версионных тегов, синхронных с
+#     LufiraOS, поэтому берётся актуальный HEAD, а не тег с тем же именем);
+#   - однофайловый Linux-бинарник LufiraOS-Builder (PyInstaller, Ubuntu),
+#     чтобы сборщик можно было запускать не из исходников.
+#
+# Если релиз для тега ещё не существует — создаёт его (заметки — из секции
+# CHANGELOG.md, совпадающей с версией тега, иначе автогенерируемые GitHub'ом).
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  source-archives:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout LufiraOS (для CHANGELOG.md)
+        uses: actions/checkout@v4
+        with:
+          path: LufiraOS
+
+      - name: Checkout lufira-packages
+        uses: actions/checkout@v4
+        with:
+          repository: VLPLAY-Games/lufira-packages
+          path: lufira-packages
+
+      - name: Checkout LufiraOS-Builder
+        uses: actions/checkout@v4
+        with:
+          repository: VLPLAY-Games/LufiraOS-Builder
+          path: LufiraOS-Builder
+
+      - name: Checkout lufira-tests
+        uses: actions/checkout@v4
+        with:
+          repository: VLPLAY-Games/lufira-tests
+          path: lufira-tests
+
+      - name: Archive sources
+        run: |
+          tar --exclude='.git' -czf lufira-packages-source.tar.gz -C lufira-packages .
+          tar --exclude='.git' -czf LufiraOS-Builder-source.tar.gz -C LufiraOS-Builder .
+          tar --exclude='.git' -czf lufira-tests-source.tar.gz -C lufira-tests .
+
+      - name: Extract matching CHANGELOG section (if present)
+        id: notes
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          NOTES_FILE="release-notes.md"
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' LufiraOS/CHANGELOG.md > "$NOTES_FILE"
+          if [ -s "$NOTES_FILE" ]; then
+            echo "has_notes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_notes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload source archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-archives
+          path: |
+            lufira-packages-source.tar.gz
+            LufiraOS-Builder-source.tar.gz
+            lufira-tests-source.tar.gz
+            release-notes.md
+          retention-days: 1
+
+  builder-executable:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout LufiraOS-Builder
+        uses: actions/checkout@v4
+        with:
+          repository: VLPLAY-Games/LufiraOS-Builder
+          path: LufiraOS-Builder
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Tk (needed to bundle gui.py)
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build standalone executable
+        working-directory: LufiraOS-Builder
+        run: |
+          pyinstaller --onefile --name LufiraOS-Builder-linux-x64 \
+            --distpath dist --workpath pyinstaller-build app.py
+
+      - name: Upload builder executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: builder-executable
+          path: LufiraOS-Builder/dist/LufiraOS-Builder-linux-x64
+          retention-days: 1
+
+  publish:
+    needs: [source-archives, builder-executable]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source archives
+        uses: actions/download-artifact@v4
+        with:
+          name: source-archives
+
+      - name: Download builder executable
+        uses: actions/download-artifact@v4
+        with:
+          name: builder-executable
+
+      - name: Make executable
+        run: chmod +x LufiraOS-Builder-linux-x64
+
+      - name: Create release if missing, then upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          REPO="${GITHUB_REPOSITORY}"
+          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            if [ -s release-notes.md ]; then
+              gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file release-notes.md
+            else
+              gh release create "$TAG" --repo "$REPO" --title "$TAG" --generate-notes
+            fi
+          fi
+          gh release upload "$TAG" --repo "$REPO" --clobber \
+            lufira-packages-source.tar.gz \
+            LufiraOS-Builder-source.tar.gz \
+            lufira-tests-source.tar.gz \
+            LufiraOS-Builder-linux-x64
