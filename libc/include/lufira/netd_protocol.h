@@ -14,10 +14,10 @@
 
 struct __attribute__((packed)) netd_request {
     uint32_t opcode;
-    uint32_t shm_id;
+    uint32_t url_shm_id;
+    uint32_t body_shm_id;
     uint32_t cap;
     int32_t  a[4];
-    char str[68];
 };
 
 struct __attribute__((packed)) netd_reply {

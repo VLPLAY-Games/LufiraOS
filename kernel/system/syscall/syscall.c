@@ -2093,8 +2093,8 @@ static uint64_t sys_net_fetch(uint64_t url_ptr, uint64_t out_buf_ptr, uint64_t o
     (void)unused4;
     if (!current_process) return (uint64_t)-EFAULT;
 
-    if (validate_user_string(current_process->page_table, url_ptr, USER_STRING_MAX) < 0)
-        return (uint64_t)-EFAULT;
+    int64_t url_len = validate_user_string(current_process->page_table, url_ptr, USER_STRING_MAX);
+    if (url_len < 0) return (uint64_t)-EFAULT;
 
     if (out_cap > 0 &&
         !is_user_range_valid(current_process->page_table, out_buf_ptr, out_cap, 1))
@@ -2112,20 +2112,37 @@ static uint64_t sys_net_fetch(uint64_t url_ptr, uint64_t out_buf_ptr, uint64_t o
         return (uint64_t)(int64_t)NET_FETCH_ENODEV;
     }
 
-    // Тело ответа (килобайты-мегабайты) не умещается в 96-байтный payload
-    // mailbox'а — заводим shm-область под out_cap байт: netd сам ATTACH её
-    // (SYS_SHM_ATTACH) и пишет http_fetch() прямо туда; после ответа ядро
-    // читает готовые байты напрямую через phys_to_virt() — универсальный
-    // доступ ядра к любой физической странице, ATTACH с его стороны не
-    // нужен (в отличие от netd, у ядра нет собственных "page tables
-    // пользовательского процесса", только одна общая physmap).
+    // URL — отдельная shm-область, ровно одна страница (USER_STRING_MAX ==
+    // PAGE_SIZE, влезает всегда без усечения) — НЕ тесное поле прямо в
+    // netd_request_t, как было раньше: реальные URL пакетного индекса
+    // (".../refs/heads/main/index.json", 89 байт) не влезали в прежние 68,
+    // фетч тихо уходил по обрезанному пути и ловил 404.
+    uint64_t url_phys = pmm_alloc_page();
+    if (!url_phys) return (uint64_t)-1;
+    void *url_virt = phys_to_virt(url_phys);
+    memset(url_virt, 0, PAGE_SIZE); // не отдавать netd чужой огрызок старой страницы за NUL
+    memcpy(url_virt, (const void *)url_ptr, (size_t)url_len + 1);
+
+    int url_shm_id = shm_create(&url_phys, 1);
+    if (url_shm_id < 0) {
+        pmm_free_page(url_phys);
+        return (uint64_t)-1;
+    }
+
+    // Тело ответа (килобайты-мегабайты) — отдельная shm-область под out_cap
+    // байт: netd сам ATTACH её (SYS_SHM_ATTACH) и пишет http_fetch() прямо
+    // туда; после ответа ядро читает готовые байты напрямую через
+    // phys_to_virt() — универсальный доступ ядра к любой физической
+    // странице, ATTACH с его стороны не нужен (в отличие от netd, у ядра
+    // нет собственных "page tables пользовательского процесса", только
+    // одна общая physmap).
     uint64_t num_pages = out_cap == 0 ? 0 : (out_cap + PAGE_SIZE - 1) / PAGE_SIZE;
     uint64_t *pages = NULL;
-    int shm_id = -1;
+    int body_shm_id = -1;
 
     if (num_pages > 0) {
         pages = (uint64_t *)kmalloc(num_pages * sizeof(uint64_t));
-        if (!pages) return (uint64_t)-1;
+        if (!pages) { shm_release(url_shm_id); return (uint64_t)-1; }
 
         uint64_t allocated;
         for (allocated = 0; allocated < num_pages; allocated++) {
@@ -2136,25 +2153,24 @@ static uint64_t sys_net_fetch(uint64_t url_ptr, uint64_t out_buf_ptr, uint64_t o
         if (allocated < num_pages) {
             for (uint64_t i = 0; i < allocated; i++) pmm_free_page(pages[i]);
             kfree(pages);
+            shm_release(url_shm_id);
             return (uint64_t)-1;
         }
 
-        shm_id = shm_create(pages, num_pages);
-        if (shm_id < 0) {
+        body_shm_id = shm_create(pages, num_pages);
+        if (body_shm_id < 0) {
             for (uint64_t i = 0; i < num_pages; i++) pmm_free_page(pages[i]);
             kfree(pages);
+            shm_release(url_shm_id);
             return (uint64_t)-1;
         }
     }
 
     netd_request_t req; memset(&req, 0, sizeof(req));
     req.opcode = NETD_OP_FETCH;
-    req.shm_id = (uint32_t)(shm_id >= 0 ? shm_id : 0);
+    req.url_shm_id = (uint32_t)url_shm_id;
+    req.body_shm_id = (uint32_t)(body_shm_id >= 0 ? body_shm_id : 0);
     req.cap = (uint32_t)out_cap;
-    size_t i = 0;
-    const char *url = (const char *)url_ptr;
-    for (; url[i] && i < sizeof(req.str) - 1; i++) req.str[i] = url[i];
-    req.str[i] = '\0';
 
     netd_reply_t reply;
     int rc = service_call(netd_pid, &req, sizeof(req), &reply, sizeof(reply));
@@ -2180,13 +2196,14 @@ static uint64_t sys_net_fetch(uint64_t url_ptr, uint64_t out_buf_ptr, uint64_t o
         }
     }
 
-    if (shm_id >= 0) {
-        // Снимает "неявную" долю ядра из refcount'а (shm_create() стартует
-        // его с num_pages, представляя РОВНО это — см. комментарий в
-        // shm.h): netd уже снял свою через SYS_MUNMAP (main.c) к моменту
-        // ответа, так что это последнее снятие и реально освобождает
-        // физические страницы через pmm_free_page() внутри shm_release().
-        for (uint64_t i2 = 0; i2 < num_pages; i2++) shm_release(shm_id);
+    // Снимает "неявную" долю ядра из refcount'а каждой области (shm_create()
+    // стартует его с num_pages, представляя РОВНО это — см. shm.h): netd уже
+    // снял свою через SYS_MUNMAP (main.c) к моменту ответа, так что это
+    // последнее снятие и реально освобождает физические страницы через
+    // pmm_free_page() внутри shm_release().
+    shm_release(url_shm_id); // всегда ровно 1 страница
+    if (body_shm_id >= 0) {
+        for (uint64_t i2 = 0; i2 < num_pages; i2++) shm_release(body_shm_id);
     }
     if (pages) kfree(pages);
 
