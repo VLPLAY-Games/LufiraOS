@@ -27,10 +27,10 @@ This document provides comprehensive documentation for the kernel entry point, i
    - [15. Keyboard Driver](#15-keyboard-driver)
    - [16. Mouse Driver](#16-mouse-driver)
    - [17. PCI Bus](#17-pci-bus)
-   - [18. AC'97 Audio](#18-ac97-audio)
+   - [18. Sound Daemon (`soundd`)](#18-sound-daemon-soundd)
    - [19. Enable Interrupts and IRQs](#19-enable-interrupts-and-irqs)
    - [20. xHCI/USB Controller](#20-xhciusb-controller)
-   - [21. Network Stack](#21-network-stack)
+   - [21. Network Daemon (`netd`)](#21-network-daemon-netd)
    - [22. User/Group Database](#22-usergroup-database)
    - [23. Create Shell Process](#23-create-shell-process)
 5. [Main Loop (Idle Loop)](#main-loop-idle-loop)
@@ -464,28 +464,19 @@ The kernel performs the following steps in strict order:
 
 **Result:** The PCI device list is populated.
 
+**As of v0.9.5**, `pci_init()` is immediately followed by `driver_init()` (`kernel/system/driver/driver.c`), which resets the userspace-driver claim table — the privilege model that lets `netd`/`soundd` (steps 18 and 21 below) touch PCI config space, port I/O, MMIO, and IRQs from ring 3 without granting that access to every root process. See [`07_drivers.md`](07_drivers.md#userspace-driver-infrastructure).
+
 ---
 
-### 18. AC'97 Audio
+### 18. Sound Daemon (`soundd`)
 
-**Function:** ac97_init()
+**Before v0.9.5**, this step called `ac97_init()` directly (`drivers/sound/ac97.c`) here, between PCI discovery and enabling interrupts. **As of v0.9.5, there is no kernel-side audio initialisation at all.** `kernel/drivers/sound/` no longer exists. Audio now comes up later in boot (after keyboard/mouse, step 20, once interrupts are enabled and `driver_init()`'s claim table is ready) as an ordinary spawned process:
 
-**Location:** drivers/sound/ac97.c
+**Function:** `spawn_daemon_process("soundd", "/bin/soundd.elf")` (`kernel.c`)
 
-**Purpose:** Initialises the AC'97 audio controller.
+**Purpose:** Starts `/bin/soundd.elf` (`lufira-packages/daemons/soundd.c`) as a normal process and moves on — the kernel does not wait for it to finish initialising. `soundd` itself claims HDA or AC'97 (`SYS_DRIVER_CLAIM_DEVICE_BY_CLASS`, HDA tried first, the preference order `sound_init()` used to have), allocates its own DMA buffers (`SYS_DMA_ALLOC`), sets a default volume/sample rate, and registers as the system's one sound daemon (`SYS_NETD_REGISTER`'s sibling, `SYS_SOUNDD_REGISTER`) — all from inside its own process, asynchronously with the rest of boot.
 
-**Process:**
-1. Find the controller via PCI (class 0x04, subclass 0x01).
-2. Read BAR0 (NAM) and BAR1 (NABM) I/O addresses.
-3. Perform a controller reset (cold reset).
-4. Initialise the codec:
-   - Read vendor ID
-   - Enable Variable Rate Audio
-   - Set sample rate and volume
-5. Allocate DMA buffers (BDL + 32 DMA pages).
-6. Set default volume (80%) and sample rate (48 kHz).
-
-**Result:** Audio is ready for playback.
+**Result:** `SYS_SOUND_INFO`/`SET_VOLUME`/`PLAY_PCM`/`STOP` work once `soundd` finishes its own startup — there's a brief window right after this step where a sound syscall would fail because no daemon has registered yet, the same as any other daemon-backed syscall used too early. See [`07_drivers.md`](07_drivers.md#audio-drivers-ac97--intel-hda) and [`13_syscalls.md`](13_syscalls.md#sound-and-network-daemons-8990-9295).
 
 ---
 
@@ -519,17 +510,15 @@ A persistent flag (`cpu_mark_interrupts_active()`) is set right after this step 
 
 ---
 
-### 21. Network Stack
+### 21. Network Daemon (`netd`)
 
-**Function:** net_init()
+**Before v0.9.5**, this step called `net_init()` directly (`kernel/net/net.c`) here. **As of v0.9.5, there is no kernel-side network initialisation at all.** `kernel/net/` and `kernel/drivers/net/` no longer exist — the whole Ethernet/ARP/IP/TCP/UDP/DNS/TLS/HTTP stack (see [`16_networking.md`](16_networking.md)) moved into a userspace daemon:
 
-**Location:** net/net.c
+**Function:** `spawn_daemon_process("netd", "/bin/netd.elf")` (`kernel.c`)
 
-**Purpose:** Initialises the RTL8139 driver (if a controller is found) and the default static network configuration. See [`16_networking.md`](16_networking.md).
+**Purpose:** Starts `/bin/netd.elf` (`lufira-packages/daemons/netd/`) as a normal process and moves on. `netd` itself claims a NIC (`SYS_DRIVER_CLAIM_DEVICE`, trying RTL8139/e1000/e1000e in turn), attempts a bounded DHCP lease, and registers as the system's one network daemon (`SYS_NETD_REGISTER`) — all from inside its own process, with its own polling loop (no PIT tick involved — see [`16_networking.md`](16_networking.md#overview)) rather than a kernel init step.
 
-**Why after enabling interrupts?** Same reason as xHCI — `net_poll()` and the driver's own reset sequence need the PIT already ticking.
-
-**Result:** `net_poll()` is polled once per timer tick, alongside `usb_poll()`. There is no interactive network shell command anymore (the old kernel-native `ifconfig`/`ping`/`wget` are dead code — see [`16_networking.md`](16_networking.md)); the stack's only present-day userspace consumer is `dlpg sync`/`dlpg upgrade` (package manager, `lufira-packages/base/dlpg.c`) via the `SYS_NET_FETCH` syscall, which goes through DNS, TCP/TLS, and HTTP in one blocking call.
+**Result:** `SYS_NET_FETCH`/`SYS_PING`/`SYS_NET_CONFIG_*` work once `netd` finishes its own startup and registers. There is no interactive network shell command built into the kernel (the old kernel-native `ifconfig`/`ping`/`wget` were already dead code before this release); today's userspace consumers are `ifconfig`/`ping`/`wget` (`lufira-packages`) and `dlpg`'s `sync`/`install`/`update`/`upgrade` (package manager), the last of which also uses the streaming `SYS_NET_FETCH_OPEN`/`_READ`/`_CLOSE` added this release — see [`16_networking.md`](16_networking.md) and [`17_package_manager.md`](17_package_manager.md).
 
 ---
 
@@ -636,6 +625,6 @@ For more details, refer to the source code in kernel.c and the individual subsys
 
 ---
 
-**Document Version:** 1.2
-**Last Updated:** September 2026
+**Document Version:** 1.3
+**Last Updated:** October 2026
 **Project:** LufiraOS

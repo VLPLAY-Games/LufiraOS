@@ -64,6 +64,7 @@ The paging system uses 4-level paging (PML4, PDPT, PD, PT) with 4 KiB pages. Ide
 | `PAGE_USER` | 0x004 | Page is accessible from user mode. |
 | `PAGE_HUGE` | 0x080 | 2 MiB huge page (PD level). |
 | `PAGE_NX` | 0x8000000000000000 | No Execute bit. |
+| `PAGE_MMIO_NOFREE` | *(v0.9.5)* | Marks a page mapped by `SYS_MMAP_MMIO` as backed by device memory, not a PMM-owned frame — `unmap_page()`/process teardown skip `pmm_free_page()` for these pages instead of handing a device's own physical memory back to the allocator. See [`13_syscalls.md`](13_syscalls.md#userspace-driver-infrastructure-7788-91). |
 
 ### Identity Mapping
 
@@ -193,7 +194,22 @@ The heap is initialised by `heap_init()`:
 
 `MMAP_AREA_START` is the same virtual address for every process, which is safe because each process has its own private page table — identical virtual addresses in different processes never physically collide. Its PML4 index (`0x600000000000 / 2^39 = 192`) falls inside the 0–255 range that `process_fork()`/`clone_address_space_deep()` already copies wholesale, and sits well away from both ELF code (`0x400000` upward) and `USER_STACK_AREA_START` (PML4 index 224).
 
-Each `process_t` has its own bump-pointer cursor, `next_mmap_addr`, initialised to `MMAP_AREA_START` and advanced by the aligned length of every successful `mmap()`. **This cursor is never rewound by `munmap()`** — freeing a region only unmaps its pages and clears its tracking slot; the address range itself is not returned to a free list for reuse. A process that repeatedly `mmap()`s and `munmap()`s in a loop will eventually exhaust its mmap address range, even though the underlying physical memory is correctly freed each time. This is a known, documented limitation rather than an oversight.
+Each `process_t` has its own bump-pointer cursor, `next_mmap_addr`, initialised to `MMAP_AREA_START` and advanced by the aligned length of every mapping that can't be satisfied from the free-list below.
+
+**Virtual-address reuse (as of v0.9.5).** Before this release, `next_mmap_addr` was never rewound by `munmap()` — freeing a region only unmapped its pages and cleared its tracking slot; the address range itself was simply lost, and a process that repeatedly `mmap()`d and `munmap()`d in a loop would eventually exhaust its mmap address range even though the underlying physical memory was correctly freed each time. `mmap_alloc_va()`/`mmap_free_va()` (`system/syscall/syscall.c`) fix this with a small per-process free-list:
+
+```c
+typedef struct {
+    uint64_t addr;
+    uint64_t length;
+} mmap_free_range_t;
+
+#define MAX_MMAP_FREE_RANGES 32
+```
+
+`process_t` carries `mmap_free_ranges[MAX_MMAP_FREE_RANGES]` (zeroed on process creation, `exec`, and the idle process's own init; copied wholesale on `fork()`). `mmap_alloc_va(p, length)` does a **first-fit** scan of the free list: a range at least `length` long is split (the unused tail stays on the free list) or consumed exactly, and only falls back to bumping `next_mmap_addr` forward if nothing on the free list fits. `mmap_free_va(p, addr, length)` pushes the freed range into the first empty slot — there is **no coalescing** of adjacent free ranges, so a pathological alternating alloc/free pattern can still fragment the list down to `MAX_MMAP_FREE_RANGES` (32) entries, after which further frees are simply dropped (the address range becomes unrecoverable, same failure mode as before this fix, just much harder to reach in practice).
+
+This same pair of helpers backs **every** virtual-address-allocating syscall, not just `SYS_MMAP`/`SYS_MUNMAP` — `SYS_MMAP_MMIO`, `SYS_DMA_ALLOC`, `SYS_SHM_CREATE`, and `SYS_SHM_ATTACH` all draw their address range from the same per-process free-list/bump-pointer pair (see [`13_syscalls.md`](13_syscalls.md#userspace-driver-infrastructure-7788-91)), and `SYS_MUNMAP` returns the range to the free list regardless of which of those syscalls originally allocated it.
 
 ### Region Tracking
 
@@ -235,6 +251,14 @@ The fix sets `PAGE_USER` on intermediate tables too, both when a table is newly 
 
 ---
 
+## Shared Memory (`SYS_SHM_CREATE` / `SYS_SHM_ATTACH`)
+
+`system/mm/shm.c` (v0.9.5) is a small registry of named shared regions, built for bulk IPC between **unrelated** processes — the generic mailbox (`SYS_IPC_SEND`/`RECV`, see [`18_gui_wm.md`](18_gui_wm.md#mailbox-ipc)) caps a message at 96 bytes, nowhere near enough for an Ethernet frame or a slice of PCM. `SYS_SHM_CREATE(num_pages, &id)` allocates and zeroes `num_pages` pages, maps them into the creator's own address space via the same `mmap_alloc_va()`/`map_page_in_pml4()` pair `SYS_MMAP` uses, and registers the physical pages under a fresh id. The creator hands that id to another process (typically over `SYS_IPC_SEND`); `SYS_SHM_ATTACH(id)` maps the *same* physical pages into the caller's own address space and bumps a reference count (`shm_add_ref()`). Either side detaches with an ordinary `SYS_MUNMAP(addr, length)` — `unmap_page()` recognizes a `PAGE_MMAP_SHARED` page and calls `shm_release()` instead of freeing the physical frame outright, so the underlying memory survives until every attacher (not just the creator) has detached.
+
+**`MAX_SHARED_REGION_PAGES`** was raised from a much smaller figure to **4096** (16 MiB) this release specifically for `SYS_NET_FETCH`'s shared response buffer (see [`13_syscalls.md`](13_syscalls.md#hardware--sound--network-6776)) — real package downloads already exceed 1 MiB. Raising it exposed three places that had sized a *stack* array to the old (small) limit; all three — including `shm.c` itself — were converted to `kmalloc()`/`kfree()`, since a 16 MiB stack array would have both blown the kernel's 16 KiB per-process kernel stack and bloated `kernel.bin` by half a megabyte if left `static`.
+
+---
+
 ## Dependencies
 
 | Component | Depends On | Purpose |
@@ -242,7 +266,8 @@ The fix sets `PAGE_USER` on intermediate tables too, both when a table is newly 
 | PMM | BootInfo (Memory Map) | Physical memory tracking |
 | Paging | PMM | Page table allocation |
 | Heap | Paging, PMM | Pre-mapping heap pages |
-| mmap/munmap | Paging, PMM, Process Manager | Anonymous user-space memory mapping |
+| mmap/munmap | Paging, PMM, Process Manager | Anonymous user-space memory mapping, with VA reuse via a per-process free-list (v0.9.5) |
+| Shared Memory (`shm.c`) | Paging, PMM, Heap | `SYS_SHM_CREATE`/`SYS_SHM_ATTACH`, and `SYS_NET_FETCH`'s kernel-brokered response buffer |
 
 ---
 
@@ -254,6 +279,6 @@ For more details, refer to the source code in `system/mm/`.
 
 ---
 
-**Document Version:** 2.0  
-**Last Updated:** September 2026  
+**Document Version:** 2.1  
+**Last Updated:** October 2026  
 **Project:** LufiraOS

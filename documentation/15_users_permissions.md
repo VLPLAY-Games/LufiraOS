@@ -277,6 +277,16 @@ Eight syscalls expose identity/permission operations to userspace. Full signatur
 
 `SYS_SU`/`SYS_USERADD`/`SYS_GROUPADD`/`SYS_PASSWD` were added later than `SYS_CHMOD`/`SYS_CHOWN`/`SYS_GETUID`/`SYS_GETGID` (v0.7 "bridge" plan) specifically to replace the equivalent kernel-native shell commands (`kernel/shell/commands/users.c`), which are now dead code — see [Shell Commands](#shell-commands).
 
+### Ownership Checks Beyond the Filesystem (v0.9.5)
+
+Everything above is about LufiraFS inode permissions. Three syscalls outside the filesystem gained their own `uid`-based ownership check this release, closing real gaps in the same "root or matching identity" spirit as [Bit Selection Algorithm](#bit-selection-algorithm) above, even though none of them touch an inode:
+
+- **`SYS_KILL` (17)** — previously any process could signal (including `SIGKILL`) any other pid; now requires the caller to be root or share the target's `uid`, the same ownership model `SYS_CHMOD` already has for files. See [`13_syscalls.md`](13_syscalls.md#process-operations).
+- **`SYS_USB_READ` (43)** — raw block reads from a USB Mass Storage device bypass the filesystem permission model entirely (they don't go through `lufirafs_check_access()` at all), so an unprivileged process could previously read data off a device mounted elsewhere under someone else's permissions. Now root-only, like `SYS_USB_WRITE` already was. See [`13_syscalls.md`](13_syscalls.md#usb-mass-storage-4144).
+- **`SYS_WM_REGISTER` / `SYS_NETD_REGISTER` / `SYS_SOUNDD_REGISTER`** — registering as the system's window manager, network daemon, or sound daemon is now root-only for all three; previously only `SYS_WM_REGISTER` existed and guarded only against a *second* registration, not an untrusted first one, letting an unprivileged process hijack the WM role by winning a startup race. See [`18_gui_wm.md`](18_gui_wm.md#gui-syscalls) and [`13_syscalls.md`](13_syscalls.md#sound-and-network-daemons-8990-9295).
+
+None of these add a new *concept* to the model described in this document — they're the same "root bypasses everything, everyone else needs matching identity" rule from [Bit Selection Algorithm](#bit-selection-algorithm), just applied to process signals and privileged daemon/driver registration instead of file bits.
+
 ---
 
 ## Shell Commands
@@ -316,6 +326,6 @@ For more details, refer to the source code in `kernel/system/users/`, `kernel/sh
 
 ---
 
-**Document Version:** 1.0
-**Last Updated:** September 2026
+**Document Version:** 1.1
+**Last Updated:** October 2026
 **Project:** LufiraOS

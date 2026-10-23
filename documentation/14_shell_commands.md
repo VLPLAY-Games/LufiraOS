@@ -338,7 +338,7 @@ See [`15_users_permissions.md`](15_users_permissions.md) for the full on-disk fo
 
 ### Networking and Audio
 
-`ifconfig`/`ping`/`wget` wrap `SYS_NET_CONFIG_GET`/`SYS_NET_CONFIG_SET`/`SYS_PING`/`SYS_NET_FETCH` over the kernel's network stack — see [`16_networking.md`](16_networking.md), which also covers the RTL8139/e1000/e1000e NIC drivers and the DHCP client these commands sit on top of. `beep`/`music`/`mixer` wrap `SYS_SOUND_INFO`/`SYS_SOUND_SET_VOLUME`/`SYS_SOUND_PLAY_PCM`/`SYS_SOUND_STOP` over whichever sound driver (AC'97 or Intel HDA) `sound_init()` found at boot — see [`07_drivers.md`](07_drivers.md). Both command groups were missing from `lufira-packages` since the 0.8.0 userspace split, and for good reason until now: `SYS_NET_CONFIG_GET`/`SET`, `SYS_PING`, and all four `SYS_SOUND_*` syscalls are new in v0.9.0 (see [`13_syscalls.md`](13_syscalls.md)) — there was no syscall for any of this before, so there was nothing for a userspace package to wrap.
+`ifconfig`/`ping`/`wget` wrap `SYS_NET_CONFIG_GET`/`SYS_NET_CONFIG_SET`/`SYS_PING`/`SYS_NET_FETCH`, which (as of v0.9.5) relay to the userspace `netd` daemon rather than a kernel-resident network stack — see [`16_networking.md`](16_networking.md), which also covers the RTL8139/e1000/e1000e NIC drivers and the DHCP client these commands sit on top of. `beep`/`music`/`mixer` wrap `SYS_SOUND_INFO`/`SYS_SOUND_SET_VOLUME`/`SYS_SOUND_PLAY_PCM`/`SYS_SOUND_STOP`, which likewise relay to `soundd` (AC'97 or Intel HDA, whichever that daemon found) rather than calling a kernel driver directly — see [`07_drivers.md`](07_drivers.md). Both command groups were missing from `lufira-packages` since the 0.8.0 userspace split, and for good reason until v0.9.0: `SYS_NET_CONFIG_GET`/`SET`, `SYS_PING`, and all four `SYS_SOUND_*` syscalls are new in v0.9.0 (see [`13_syscalls.md`](13_syscalls.md)) — there was no syscall for any of this before, so there was nothing for a userspace package to wrap.
 
 ---
 
@@ -350,6 +350,6 @@ For more details, refer to the source code in this repository's `kernel/system/s
 
 ---
 
-**Document Version:** 3.0
+**Document Version:** 3.1
 **Last Updated:** October 2026
 **Project:** LufiraOS

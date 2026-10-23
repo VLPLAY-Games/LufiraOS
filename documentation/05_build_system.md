@@ -18,6 +18,7 @@ Before v0.7 this was all one Makefile (`make run`/`make debug`/`make monitor`, a
    - [Build Process](#build-process)
 3. [The Sibling Repository: `LufiraOS-Builder`](#the-sibling-repository-lufiraos-builder)
    - [What It Does](#what-it-does)
+   - [Driver Selection](#driver-selection)
    - [Where Packages Come From](#where-packages-come-from)
    - [Disk Image Assembly](#disk-image-assembly)
    - [Running in QEMU](#running-in-qemu)
@@ -77,7 +78,7 @@ There is no `make run`, `make debug`, `make monitor`, `make disk`, or `make chec
 
 **Bootloader compilation** (unchanged from earlier versions): each `boot/*.c` file is compiled with GNU-EFI flags (`-fpic -ffreestanding -fno-stack-protector -fshort-wchar -mno-red-zone -std=gnu11`), linked against `-lefi -lgnuefi` with the EFI linker script, then `objcopy`'d to `efi-app-x86_64` format.
 
-**Kernel compilation:** every file in `KERNEL_C_SOURCES`/`KERNEL_ASM_SOURCES` (`Makefile`, kept in sync by hand with the actual `kernel/` tree — this now includes `kernel/net/{udp,dns,tls,http_client}.c` and `kernel/net/crypto/*.c`, `kernel/system/elf/dynlink.c`, and `kernel/system/ipc/mailbox.c`, none of which existed in earlier releases) is compiled with `-m64 -ffreestanding -fno-stack-protector -fno-stack-check -fno-asynchronous-unwind-tables -fno-builtin -mno-red-zone -mgeneral-regs-only -std=gnu11`, linked statically (`-static -nostdlib -z max-page-size=0x1000 -z separate-code --gc-sections`) against the custom `kernel/linker.ld` script, then `objcopy`'d to a raw binary and truncated to the size computed from the linker-defined `__kernel_end` symbol.
+**Kernel compilation:** every file in `KERNEL_C_SOURCES`/`KERNEL_ASM_SOURCES` (`Makefile`, kept in sync by hand with the actual `kernel/` tree — this includes `kernel/system/elf/dynlink.c` and `kernel/system/ipc/mailbox.c`, and, as of v0.9.5, `kernel/system/driver/driver.c` for the userspace-driver claim model; it no longer includes `kernel/net/` or `kernel/drivers/net/`/`sound/` at all, since v0.9.5 moved all of that into the `netd`/`soundd` userspace daemons — see [`07_drivers.md`](07_drivers.md#userspace-driver-infrastructure)) is compiled with `-m64 -ffreestanding -fno-stack-protector -fno-stack-check -fno-asynchronous-unwind-tables -fno-builtin -mno-red-zone -mgeneral-regs-only -std=gnu11`, linked statically (`-static -nostdlib -z max-page-size=0x1000 -z separate-code --gc-sections`) against the custom `kernel/linker.ld` script, then `objcopy`'d to a raw binary and truncated to the size computed from the linker-defined `__kernel_end` symbol.
 
 `kernel/shell/shell.c` and `kernel/shell/commands/*.c` are still listed in `KERNEL_C_SOURCES` and still compiled into `kernel.bin` — they are dead code (unreachable since the shell moved to userspace, see [`14_shell_commands.md`](14_shell_commands.md)), not something the build system special-cases.
 
@@ -111,15 +112,21 @@ Useful flags (full list: `python3 build.py <subcommand> --help`):
 | `--package PATH.lpg` | Install one extra `.lpg` during image assembly (repeatable). |
 | `--no-default-packages` | Don't install the default package set (`shell.elf`/`libc.so` are still staged — not optional, the kernel loads `shell.elf` directly on every boot). |
 | `--only-package NAME` | Install only the named default package(s), instead of all of them. |
+| `--driver NAME` | *(v0.9.5)* Install only the named userspace driver daemon(s) — `netd` and/or `soundd` (`lufira_builder/config.py`'s `DRIVER_PACKAGES`) — instead of both. Independent of `--only-package`/`--no-default-packages`: the two selections are applied separately, so excluding a daemon from one doesn't require repeating it in the other. See [Driver Selection](#driver-selection) below. |
+| `--no-drivers` | *(v0.9.5)* Don't install either driver daemon — an image with no networking or sound at all, e.g. for a minimal/offline build. |
 | `--build-packages-from-source` | Build `lufira-packages` locally instead of downloading its prebuilt release. |
 | `--legacy-bios` | Also embed the legacy BIOS boot chain (`boot_legacy/` in `LufiraOS` — `stage1.bin`/`stage2.bin`/`legacy_main.bin`, built via `make bootloader-bios`, which needs `nasm`) into `disk.img` alongside the UEFI path — one image, bootable both ways. See [`01_bootloader.md`](01_bootloader.md#legacy-bios-boot-boot_legacy). |
 | `--boot-mode uefi\|bios` | Which firmware `run`/`debug`/`monitor` launch QEMU with (default `uefi`); `bios` only works on an image built with `--legacy-bios` (QEMU then falls back to its built-in SeaBIOS instead of `-bios <OVMF>`). |
-| `--audio ac97\|hda\|none` | Which audio controller `run`/`debug`/`monitor` attach (default `ac97`) — exercises `kernel/drivers/sound/ac97.c` or `hda.c` in the guest; `none` omits an audio device entirely. |
-| `--net-device rtl8139\|e1000\|e1000e\|none` | Which NIC `run`/`debug`/`monitor` attach (default `rtl8139`) — exercises `kernel/drivers/net/rtl8139.c`, `e1000.c` or `e1000e.c`; `none` omits a NIC entirely. |
+| `--audio ac97\|hda\|none` | Which audio controller `run`/`debug`/`monitor` attach (default `ac97`) — exercises the AC'97 or HDA code path inside the `soundd` userspace daemon (`lufira-packages/daemons/soundd.c`, moved out of `kernel/drivers/sound/` in v0.9.5 — see [`07_drivers.md`](07_drivers.md#audio-drivers-ac97--intel-hda)) in the guest; `none` omits an audio device entirely. Has no effect if `soundd` itself wasn't built onto the image (see `--driver`/`--no-drivers` above). |
+| `--net-device rtl8139\|e1000\|e1000e\|none` | Which NIC `run`/`debug`/`monitor` attach (default `rtl8139`) — exercises the matching driver inside the `netd` userspace daemon (`lufira-packages/daemons/netd/`, moved out of `kernel/drivers/net/` in v0.9.5 — see [`07_drivers.md`](07_drivers.md#network-drivers-rtl8139--e1000--e1000e)); `none` omits a NIC entirely. Has no effect if `netd` itself wasn't built onto the image. |
 | `--disk-mode ide\|ahci\|nvme` | Which controller `run`/`debug`/`monitor` attach `disk.img` through (default `ide`, legacy ATA) — `ahci`/`nvme` exercise `kernel/drivers/disk/ahci.c` or `nvme.c` instead. |
 | `--bios-path PATH` | Override the auto-detected OVMF firmware path (see Troubleshooting below). |
 
-A thin Tkinter GUI, `gui.py`, sits on top of the same CLI — every button runs the corresponding `build.py` subcommand as a subprocess and streams its output, so it can never drift from the CLI's own behavior.
+A thin Tkinter GUI, `gui.py`, sits on top of the same CLI — every button runs the corresponding `build.py` subcommand as a subprocess and streams its output, so it can never drift from the CLI's own behavior. As of v0.9.5, the GUI has a dedicated "Userspace drivers" section (modeled on the existing "Boot firmware"/"Emulated devices" panels) with one checkbox per daemon — `netd`/`soundd` are removed from the general package tree so they aren't offered twice.
+
+### Driver Selection
+
+*(v0.9.5)* `lufira_builder/config.py`'s `DRIVER_PACKAGES = ("netd", "soundd")` is the single source of truth both the CLI and GUI read from. `--driver NAME` (repeatable) and `--no-drivers` work the same way `--only-package`/`--no-default-packages` already did for ordinary packages, but as an **independent** selection — a build can, say, include every default package *and* exclude `soundd`, or vice versa, without the two controls interfering with each other. This exists because `netd`/`soundd` are privileged daemons (see [`07_drivers.md`](07_drivers.md#userspace-driver-infrastructure)), not ordinary coreutils-style packages, so picking them deserves its own clearly-labeled control rather than being buried in the general package list.
 
 ### Where Packages Come From
 
@@ -243,6 +250,6 @@ For more details, refer to the source in this repository's `Makefile`, and in `L
 
 ---
 
-**Document Version:** 2.0
+**Document Version:** 2.1
 **Last Updated:** October 2026
 **Project:** LufiraOS

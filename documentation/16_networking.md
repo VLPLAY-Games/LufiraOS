@@ -1,6 +1,8 @@
 # Networking
 
-This document describes the network stack of LufiraOS: a from-scratch, fully polled Ethernet/ARP/IPv4/ICMP/TCP/UDP/DNS/TLS 1.2/HTTP(S) implementation living in `kernel/net/`, built on top of one of three interchangeable Ethernet NIC drivers — RTL8139 (`kernel/drivers/net/rtl8139.c`) and the Intel e1000/e1000e family (`kernel/drivers/net/e1000.c`, `e1000e.c`), all documented in [`07_drivers.md`](07_drivers.md). IP configuration can come from a DHCP lease (`kernel/net/dhcp.c`) or fall back to a static default — see [DHCP](#dhcp). The shell commands built on the lower layers (`ifconfig`/`ping`/`wget`) are documented in [`14_shell_commands.md`](14_shell_commands.md); the package manager's use of the HTTP(S) client is documented in [`17_package_manager.md`](17_package_manager.md). This document covers the stack itself.
+This document describes LufiraOS's network stack: a from-scratch, fully polled Ethernet/ARP/IPv4/ICMP/TCP/UDP/DNS/TLS 1.2/HTTP(S) implementation, built on top of one of three interchangeable Ethernet NIC drivers — RTL8139 and the Intel e1000/e1000e family, all documented at the hardware level in [`07_drivers.md`](07_drivers.md). IP configuration can come from a DHCP lease or fall back to a static default — see [DHCP](#dhcp). The shell commands built on the lower layers (`ifconfig`/`ping`/`wget`) are documented in [`14_shell_commands.md`](14_shell_commands.md); the package manager's use of the HTTP(S) client is documented in [`17_package_manager.md`](17_package_manager.md). This document covers the stack itself.
+
+**As of v0.9.5, none of this runs in the kernel.** The entire stack — NIC drivers, Ethernet through TLS/HTTP, and all of its crypto — was ported, logic intact, into a single userspace daemon, `netd` (`lufira-packages/daemons/netd/`), running on top of the PCI-device-claim privilege model introduced the same release (`SYS_DRIVER_CLAIM_DEVICE`/`SYS_MMAP_MMIO`/`SYS_IO_IN`/`OUT`/`SYS_DMA_ALLOC` — see [`07_drivers.md`](07_drivers.md#userspace-driver-infrastructure)). `kernel/net/` and `kernel/drivers/net/` no longer exist. Every file path below refers to `lufira-packages/daemons/netd/<name>` unless stated otherwise — the filenames themselves (`eth.c`, `tcp.c`, `dns.c`, `tls.c`, `http_client.c`, `crypto/`, …) are unchanged from the kernel-resident version, only their location and how they reach the hardware changed. `SYS_NET_FETCH`/`SYS_PING`/`SYS_NET_CONFIG_GET`/`SET` now relay to this daemon via `service_call()` instead of calling a kernel-resident function directly; see [HTTP(S) Client and `SYS_NET_FETCH`](#https-client-and-sys_net_fetch) and [`13_syscalls.md`](13_syscalls.md#sound-and-network-daemons-8990-9295).
 
 ---
 
@@ -17,28 +19,30 @@ This document describes the network stack of LufiraOS: a from-scratch, fully pol
 9. [UDP](#udp)
 10. [DNS](#dns)
 11. [TLS 1.2](#tls-12)
-12. [HTTP(S) Client and `SYS_NET_FETCH`](#https-client-and-sys_net_fetch)
-13. [Byte Order and Checksum Helpers](#byte-order-and-checksum-helpers)
-14. [Dependencies](#dependencies)
-15. [Known Limitations](#known-limitations)
-16. [Conclusion](#conclusion)
+12. [Randomness (`netrand`)](#randomness-netrand)
+13. [HTTP(S) Client and `SYS_NET_FETCH`](#https-client-and-sys_net_fetch)
+14. [Byte Order and Checksum Helpers](#byte-order-and-checksum-helpers)
+15. [Dependencies](#dependencies)
+16. [Known Limitations](#known-limitations)
+17. [Conclusion](#conclusion)
 
 ---
 
 ## Overview
 
-`kernel/net/` is a full, if deliberately narrow, stack: Ethernet up through a real HTTPS client, with DNS in between.
+`daemons/netd/` is a full, if deliberately narrow, stack: Ethernet up through a real HTTPS client, with DNS in between.
 
-- **Ethernet** (`eth.c`/`.h`) – frame construction and ethertype dispatch, sitting on top of whichever NIC driver was found at boot: RTL8139, or one of the two Intel families, e1000 (`drivers/net/e1000.c`) and e1000e (`drivers/net/e1000e.c`) — see [Ethernet Layer](#ethernet-layer).
-- **DHCP** (`dhcp.c`/`.h`) – an optional DHCPv4 client tried once at boot to replace the static IP default with a real lease; see [DHCP](#dhcp).
+- **Ethernet** (`eth.c`/`.h`) – frame construction and ethertype dispatch, sitting on top of whichever NIC driver was found at boot: RTL8139, or one of the two Intel families, e1000 (`e1000.c`) and e1000e (`e1000e.c`) — see [Ethernet Layer](#ethernet-layer).
+- **DHCP** (`dhcp.c`/`.h`) – an optional DHCPv4 client tried once at `netd` startup to replace the static IP default with a real lease; see [DHCP](#dhcp).
 - **ARP** (`arp.c`/`.h`) – address resolution with a small round-robin cache and a blocking-poll resolve call.
 - **IPv4** (`ip.c`/`.h`) – header handling, checksum, next-hop routing, protocol dispatch.
 - **ICMP** (`icmp.c`/`.h`) – echo request/reply, driving the `ping` command.
-- **TCP** (`tcp.c`/`.h`) – a single-connection client with real stop-and-wait retransmission and an honest advertised receive window.
+- **TCP** (`tcp.c`/`.h`) – a single-connection client with real stop-and-wait retransmission, an honest advertised receive window, and (v0.9.5) a randomized initial sequence number — see [Randomness (`netrand`)](#randomness-netrand).
 - **UDP** (`udp.c`/`.h`) – send/receive datagrams; the transport underneath DNS.
-- **DNS** (`dns.c`/`.h`) – a minimal resolver (one in-flight A-record query at a time).
+- **DNS** (`dns.c`/`.h`) – a minimal resolver (one in-flight A-record query at a time), with a randomized transaction ID and source port as of v0.9.5.
 - **TLS 1.2** (`tls.c`/`.h`, `crypto/`) – a from-scratch client: ECDHE X25519, AES-128-GCM, SNI, RSA signature verification of the server's key exchange.
-- **HTTP(S) client** (`http_client.c`/`.h`) – `http_fetch()`, a one-call "download this URL" helper over TCP or TLS, exposed to userspace as `SYS_NET_FETCH` (see [`13_syscalls.md`](13_syscalls.md#miscellaneous-65-66)).
+- **HTTP(S) client** (`http_client.c`/`.h`) – `http_fetch()`, a one-call "download this URL" helper over TCP or TLS, exposed to userspace as `SYS_NET_FETCH`; as of v0.9.5, also `http_fetch_open()`/`_read()`/`_close()`, a streaming variant exposed as `SYS_NET_FETCH_OPEN`/`_READ`/`_CLOSE` (see [`13_syscalls.md`](13_syscalls.md#sound-and-network-daemons-8990-9295)).
+- **`netrand`** (`netrand.c`/`.h`, v0.9.5) – a shared entropy-mixing helper used by both TCP and DNS; see [Randomness (`netrand`)](#randomness-netrand).
 
 **Explicitly still not implemented:**
 - **DHCP is one-shot, not a full client** – `dhcp_start()` is tried once at boot (see [DHCP](#dhcp)); there is no background lease renewal/rebinding timer and no `DHCPDECLINE`/`DHCPRELEASE` support. If no DHCP server answers within its boot-time budget, the stack falls back to the static compile-time default, same as before — still changeable at any time via the `ifconfig` shell command.
@@ -48,7 +52,7 @@ This document describes the network stack of LufiraOS: a from-scratch, fully pol
 - **Single connection/resolve/ping/DNS-query at a time** – one global ARP cache, one global `tcp_conn_t`, one global "ping in flight" state, one DNS query in flight. There is no per-socket abstraction and no userspace socket API — everything above TCP is consumed through the one `SYS_NET_FETCH` syscall.
 
 **Design Philosophy:**
-- **Polled, not interrupt-driven** – `net_poll()` runs once per PIT tick (100 Hz), called from `timer_irq_handler()` right after `usb_poll()` (`kernel/system/timer/pit.c`). This matches the rest of this kernel's driver architecture (see [`07_drivers.md`](07_drivers.md) for USB/AC'97, which follow the same pattern).
+- **Polled, not interrupt-driven** – `net_poll()` is still called on every pass, but, as of v0.9.5, from `netd`'s own `main()` loop (`daemons/netd/main.c`) rather than from the kernel's `timer_irq_handler()`: wait up to 100 ms on `sys_ipc_recv()` for a relayed client request, handle it if one arrived, then poll the NIC — no PIT tick is involved at all now that `netd` is an ordinary userspace process with no kernel-side hook. Still fully polled underneath, matching this project's driver architecture generally (see [`07_drivers.md`](07_drivers.md)), just driven by the daemon's own loop cadence instead of a 100 Hz interrupt.
 - **Correctness over completeness** – every layer implements only the subset of its protocol the kernel's actual use cases exercise, and says so in source comments.
 - **Blocking, synchronous calls all the way up** – `arp_resolve()`, `icmp_ping_wait()`, `tcp_connect()`, `dns_resolve()`, `tls_connect()`, and `http_fetch()` all block the caller with an internal bounded poll loop (the same "spin, poll the device, check a real-PIT-tick timeout" pattern used throughout this kernel), rather than exposing asynchronous/callback-based networking. `SYS_NET_FETCH` inherits this: the calling process (and, since the syscall runs with interrupts briefly re-enabled — see its own doc comment in `syscall.h` — the rest of the system too, cooperatively) is blocked for the whole fetch.
 
@@ -56,7 +60,7 @@ This document describes the network stack of LufiraOS: a from-scratch, fully pol
 
 ## Network Configuration
 
-The stack ships with a static default matching QEMU's user-mode networking (SLIRP) subnet, defined in `kernel/net/net.c`. This default is what's active if no DHCP server answers at boot (see [DHCP](#dhcp)) — a real lease, when one is obtained, overwrites all four fields below via the same `net_set_config()`-equivalent path `ifconfig` uses:
+The stack ships with a static default matching QEMU's user-mode networking (SLIRP) subnet, defined in `net.c`. This default is what's active if no DHCP server answers at boot (see [DHCP](#dhcp)) — a real lease, when one is obtained, overwrites all four fields below via the same `net_set_config()`-equivalent path `ifconfig` uses:
 
 | Setting | Default Value |
 |---------|----------------|
@@ -80,8 +84,8 @@ All fields are stored as `uint32_t` in **host byte order** (`a.b.c.d == (a<<24)|
 
 | Function | Description |
 |----------|-------------|
-| `void net_init(void)` | Tries each driver in `g_nic_drivers[]` in turn — RTL8139, then e1000, then e1000e — and keeps the first one whose `found()` reports a card present (see [Ethernet Layer](#ethernet-layer)); logs readiness via `klog()`. Safe to call with no card present. |
-| `void net_poll(void)` | Polls the active NIC for received frames and runs them through the whole stack (`eth_receive()` → `arp`/`ip` → `icmp`/`tcp`/`udp`). Called once per PIT tick. |
+| `void net_init(void)` | Tries each driver in `g_nic_drivers[]` in turn — RTL8139, then e1000, then e1000e — and keeps the first one whose `found()` reports a card present (see [Ethernet Layer](#ethernet-layer)); logs readiness via `printf()`. Safe to call with no card present. |
+| `void net_poll(void)` | Polls the active NIC for received frames and runs them through the whole stack (`eth_receive()` → `arp`/`ip` → `icmp`/`tcp`/`udp`). Called once per `netd` main-loop iteration (v0.9.5 — see [Design Philosophy](#overview) above; before that, once per PIT tick from the kernel). |
 | `void net_set_config(uint32_t ip, uint32_t netmask, uint32_t gateway, uint32_t dns_server)` | Overwrites all four fields of the single global `net_config_t`. `dhcp_start()` (see [DHCP](#dhcp)) is the only caller that ever changes `dns_server`; `ifconfig` always passes `net_get_config()->dns_server` straight back through, so in practice it still only changes `our_ip`/`netmask`/`gateway`. |
 | `const net_config_t *net_get_config(void)` | Returns a pointer to the current configuration. |
 
@@ -105,9 +109,9 @@ All fields are stored as `uint32_t` in **host byte order** (`a.b.c.d == (a<<24)|
 
 | Driver | File | PCI vendor:device(s) | Notes |
 |--------|------|----------------------|-------|
-| RTL8139 | `drivers/net/rtl8139.c` | Realtek | I/O-port BAR0, the original driver (see [`07_drivers.md`](07_drivers.md)). |
-| e1000 | `drivers/net/e1000.c` | `0x8086`, classic 8254x family (82540EM/82544/82545/82546) | MMIO BAR0, legacy 16-byte TX/RX descriptor rings. QEMU's `-device e1000` emulates the 82540EM (`0x100E`), the primary target this driver was checked against. |
-| e1000e | `drivers/net/e1000e.c` | `0x8086`, PCIe 8257x/8258x family (82571–82583/ICH8-10) | Structurally near-identical to `e1000.c` — same register map, same descriptor format, different PCI device-id table. QEMU's `-device e1000e` emulates the 82574L (`0x10D3`). |
+| RTL8139 | `rtl8139.c` | Realtek | I/O-port BAR0, the original driver (see [`07_drivers.md`](07_drivers.md)). |
+| e1000 | `e1000.c` | `0x8086`, classic 8254x family (82540EM/82544/82545/82546) | MMIO BAR0, legacy 16-byte TX/RX descriptor rings. QEMU's `-device e1000` emulates the 82540EM (`0x100E`), the primary target this driver was checked against. |
+| e1000e | `e1000e.c` | `0x8086`, PCIe 8257x/8258x family (82571–82583/ICH8-10) | Structurally near-identical to `e1000.c` — same register map, same descriptor format, different PCI device-id table. QEMU's `-device e1000e` emulates the 82574L (`0x10D3`). |
 
 All three expose the same `nic_driver_t` shape (`init`/`found`/`get_mac`/`send`/`poll`) and, like RTL8139, are polled rather than interrupt-driven — `e1000_poll()`/`e1000e_poll()` check each descriptor's own Descriptor-Done bit directly, the same pattern as every other driver in this kernel (see [`07_drivers.md`](07_drivers.md)).
 
@@ -187,6 +191,8 @@ This is what moved networking in this kernel from "edit a compile-time constant 
 
 `tcp.c`/`.h` implement a single-connection TCP **client**, blocking at every call. Exactly one connection exists at a time, in a global `tcp_conn_t`.
 
+**Randomized ISN and local port (v0.9.5).** `tcp_connect()` previously picked the initial sequence number from `sys_gettick() * 65537 + 12345` and the local port from a plain incrementing counter (`g_next_local_port++`, starting at 49152) — both fully predictable to an off-path attacker who can guess or observe one connection, which matters for TCP because an attacker who can predict the ISN and local port of a *future* connection can inject spoofed segments into it without ever seeing the real traffic. Both now come from `netrand_u32()`/`netrand_u16()` (see [Randomness (`netrand`)](#randomness-netrand)) — `snd_next = netrand_u32()`, `local_port = 49152 + (netrand_u16() & 0x3FFF)`.
+
 **Retransmission (send side):** stop-and-wait — one unacknowledged segment at a time, resent on a fixed 300 ms RTO (`TCP_RTO_TICKS`) up to 5 times (`TCP_MAX_RETRIES`) before the connection gives up and closes. No adaptive RTT estimation, no congestion window.
 
 **Receive queue and flow control:** an in-order byte queue (`rx_fifo`, 8 KB) that *appends* newly-arrived in-order data rather than evicting what's already queued, and a real advertised receive window (`tcp_rx_window()`, capped at 4×MSS ≈ 5840 bytes — sized so a full window's worth of frames fits and drains within one `rtl8139_poll()` pass of the NIC's own RX ring) sent in every outgoing segment, including bare ACKs. The peer is told, honestly, how much room is left; it isn't expected to self-limit by guesswork. Out-of-order segments are still not buffered (no reassembly) and are simply not accepted — but they do get an immediate duplicate ACK, so the peer learns where to resume quickly rather than waiting out a retransmission timer.
@@ -230,13 +236,15 @@ Like TCP, this is a single-outstanding-exchange model — no socket table, no co
 
 `int dns_resolve(const char *hostname, uint32_t *out_ip)` builds a standard DNS query (one question, type A, class IN), sends it via `udp_send()` to `net_get_config()->dns_server` on port 53, and polls for a matching response (by transaction ID) for up to ~3000 ms. It parses just enough of the response — skipping the echoed question section and each answer record's (possibly compressed) name — to find the first `A`/`IN` record and return its address. Returns `0` on success, `-1` on timeout, `NXDOMAIN`, a non-zero RCODE, or an answer section with no usable `A` record (e.g. a bare `CNAME` with no "glue" address).
 
+**Randomized transaction ID and source port (v0.9.5).** The transaction ID previously came from a plain incrementing counter (`g_next_dns_txn_id++`, starting at 1), and the local UDP port was derived from it (`50000 + (txn_id % 10000)`) — so learning or guessing one revealed the other, and both were fully predictable to an off-path attacker trying to spoof a response before the real DNS server's reply arrives. Both are now independently drawn from `netrand_u16()` (see [Randomness (`netrand`)](#randomness-netrand)): `txn_id = netrand_u16()`, `local_port = 49152 + (netrand_u16() & 0x3FFF)` — the same local-port formula TCP now uses, drawn from a separate call so the two don't correlate.
+
 This is what lets `dlpg sync`/`upgrade` (and, in principle, any future `SYS_NET_FETCH` caller) address a real hostname like `raw.githubusercontent.com` instead of a literal IP.
 
 ---
 
 ## TLS 1.2
 
-`tls.c`/`.h`, plus `kernel/net/crypto/` (`sha256`, `hmac`, `aes_gcm`, `x25519`, `bignum`, `rsa_verify`) — a TLS 1.2 client written from scratch, with no dependency on any external crypto library (none exists anywhere in this freestanding kernel).
+`tls.c`/`.h`, plus `crypto/` (`sha256`, `hmac`, `aes_gcm`, `x25519`, `bignum`, `rsa_verify`) — a TLS 1.2 client written from scratch, with no dependency on any external crypto library (none exists anywhere in this project).
 
 **Scope, deliberately narrow:**
 - TLS 1.2 only — no 1.3, no session resumption/tickets, no renegotiation, no client certificates.
@@ -259,9 +267,24 @@ The record/handshake-message layer reassembles across however many `tcp_recv_pol
 
 ---
 
+## Randomness (`netrand`)
+
+`netrand.c`/`.h` (v0.9.5) is a small shared entropy-mixing module used independently by TCP (ISN and local port — see [TCP](#tcp)) and DNS (transaction ID and local port — see [DNS](#dns)), replacing the predictable counters both previously used. It's the same technique `tls.c`'s own `tls_gather_random()` already used for handshake randomness — `rdtsc`, a PIT-tick read, and a per-call counter, all mixed through a SHA-256-based pool — reimplemented as its own module rather than shared state with TLS's pool, so a DNS or TCP connection's randomness draw never has side effects on (or depends on) whatever state the TLS layer happens to be in.
+
+```c
+uint32_t netrand_u32(void);
+uint16_t netrand_u16(void);
+```
+
+**What this fixes.** Before v0.9.5, TCP derived its initial sequence number from `sys_gettick() * 65537 + 12345` and its local port from a bare incrementing counter; DNS derived its transaction ID from a bare incrementing counter and its local port *from that same counter* (`50000 + (txn_id % 10000)`). All of these are predictable to an attacker who can observe or guess even one prior connection/query — which matters because TCP and DNS both authenticate a response only by a handful of values an off-path attacker could otherwise forge (sequence number plus ports for TCP; transaction ID plus ports for DNS). An attacker able to guess the next value could inject spoofed segments or a spoofed DNS answer before the real reply arrives, without ever being positioned to intercept the real traffic.
+
+**What this does not fix.** Same caveat as `tls.c`'s own randomness (see [TLS 1.2](#tls-12)): there is no hardware random number generator anywhere in this project, so `netrand`'s entropy is only as unpredictable as `rdtsc`/PIT timing actually is — genuinely hard to predict on real hardware, much less so under deterministic emulation (QEMU/TCG). This closes the "trivially predictable, no guessing required" class of weakness, not "cryptographically unguessable under all conditions."
+
+---
+
 ## HTTP(S) Client and `SYS_NET_FETCH`
 
-`http_client.c`/`.h` implements `http_fetch()` — "download this URL into a buffer," the thing that actually backs `SYS_NET_FETCH` (syscall 66, see [`13_syscalls.md`](13_syscalls.md#miscellaneous-65-66)).
+`http_client.c`/`.h` implements `http_fetch()` — "download this URL into a buffer," the thing that actually backs `SYS_NET_FETCH`.
 
 ```c
 int http_fetch(const char *url, void *out_buf, unsigned long out_cap, int *status_out);
@@ -273,7 +296,11 @@ Parses `scheme://host[:port][/path]` (`http://` or `https://` only — no userin
 
 Return value: body length (`>= 0`, always `<= out_cap`) on success; `*status_out` (if non-`NULL`) gets the HTTP status code whenever parsing got as far as the status line — **a 404 is a successful fetch of a 404 body, not an error**. Negative values are `HTTP_FETCH_EBADURL`/`EDNS`/`ECONNECT`/`ETLS`/`EHTTP`/`ENOSPC`/`ENODEV` (`http_client.h`) — these numeric values are load-bearing: they must stay in sync with `NET_FETCH_E*` in `libc/include/lufira/syscall.h`, since `sys_net_fetch()` passes `http_fetch()`'s return straight through to userspace unchanged.
 
-`dlpg sync`/`dlpg upgrade` (see [`17_package_manager.md`](17_package_manager.md)) are the only callers today.
+**Reaching the kernel (as of v0.9.5).** `netd` runs as an ordinary userspace process, so `SYS_NET_FETCH`'s caller and `http_fetch()`'s actual execution are now in two different address spaces. The kernel relays the request to `netd` via `service_call()` (a `mailbox_send()`/`mailbox_recv()` pair with a fixed sender-pid check — see below) and brokers the response body through a shared-memory region (`shm.c`, sized to the caller's `out_cap`, see [`11_memory_management.md`](11_memory_management.md#shared-memory-sys_shm_create--sys_shm_attach)): `netd` attaches it (`SYS_SHM_ATTACH`), writes `http_fetch()`'s output directly into it, detaches, and replies; the kernel then reads the finished bytes straight out of the shared physical pages. `SYS_PING`/`SYS_NET_CONFIG_GET`/`SET` relay the same way, just without a shared-memory step (their payloads fit the ordinary 96-byte mailbox). **`service_call()`'s sender-pid check** (`syscall.c`) is itself a v0.9.5 fix: the relay now verifies that a reply actually came back from the pid the kernel sent the request *to*, closing a spoofing gap where another process could have raced in and answered on `netd`'s behalf.
+
+**Streaming (`SYS_NET_FETCH_OPEN`/`_READ`/`_CLOSE`, v0.9.5).** `http_fetch_open()`/`http_fetch_read()`/`http_fetch_close()` (`http_client.h`) split the same connect/request/parse logic into three calls instead of one: `_open` does everything through parsing the response headers but does **not** read the body, reporting `Content-Length` if the server sent one; `_read` returns the next chunk of the body (up to the caller's buffer size) and can be called repeatedly; `_close` tears the connection down (idempotent — safe after a clean EOF, an error, or even if `_open` was never called). The TCP/TLS connection is kept open by `netd` *between* `_read` calls specifically so a caller reading in small chunks doesn't pay for a fresh TLS handshake on every call — this is what lets `dlpg install`/`update` stream a `.lpg` to disk in bounded-size chunks regardless of the package's real size (see [`17_package_manager.md`](17_package_manager.md)). Chunked transfer-encoding is rejected in streaming mode (`HTTP_FETCH_ECHUNKED`/`NET_FETCH_ECHUNKED`) — only the whole-body `http_fetch()`/`SYS_NET_FETCH` path decodes it. Full syscall contract in [`13_syscalls.md`](13_syscalls.md#sound-and-network-daemons-8990-9295).
+
+`dlpg sync`/`dlpg install`/`dlpg update`/`dlpg upgrade` (see [`17_package_manager.md`](17_package_manager.md)) are the callers today — `sync` (fetching the small `index.json`) still uses the whole-body `SYS_NET_FETCH`; the others use the streaming variant for the actual `.lpg` download.
 
 ---
 
@@ -289,13 +316,14 @@ Because x86-64 is little-endian and all network wire formats are big-endian, `ne
 
 | Component | Depends On | Purpose |
 |-----------|------------|---------|
-| Networking (`kernel/net/`) | One of RTL8139/e1000/e1000e (`drivers/net/rtl8139.c`, `e1000.c`, `e1000e.c`) | Actual frame transmit/receive, whichever driver `net_init()` found first. |
-| RTL8139/e1000/e1000e drivers | PCI, PMM | Card/BAR discovery; contiguous pages for the RX/TX descriptor rings. |
-| Networking | PIT (`system/timer/pit.c`) | `net_poll()` is driven from the timer tick; every blocking call (ARP/DHCP/ping/TCP/DNS/TLS/HTTP) measures its bounded timeout in real PIT ticks. |
-| DHCP (`dhcp.c`) | UDP (`udp.c`), Networking | One blocking `dhcp_start()` call at boot (`kernel.c`, right after `net_init()`), broadcasting over the same UDP layer DNS uses. |
-| TLS/crypto (`kernel/net/crypto/`) | Networking only | No external crypto library — SHA-256/HMAC/AES-GCM/X25519/bignum-RSA are all implemented from scratch in this kernel. |
-| `SYS_NET_FETCH` | `http_client.c`, user-pointer validation (`syscall.c`) | Validates the URL string and output buffer, then calls `http_fetch()` directly, writing the result into the caller's buffer under its own page table. |
-| `wget`/`ping`/`ifconfig` (userspace, `lufira-packages`) | `13_syscalls.md`'s file/process syscalls | These commands are ordinary userspace packages now, not kernel-native — they reach the kernel's networking only indirectly, through whatever plain file/process syscalls their implementation uses; the lower network stack itself has no direct syscall surface of its own except `SYS_NET_FETCH`. |
+| `netd` (`lufira-packages/daemons/netd/`) | Userspace Driver Infrastructure (`SYS_DRIVER_CLAIM_DEVICE`, `SYS_MMAP_MMIO`, `SYS_IO_IN`/`OUT`, `SYS_DMA_ALLOC` — [`07_drivers.md`](07_drivers.md#userspace-driver-infrastructure)) | Claims a NIC and reaches its registers/DMA buffers, since v0.9.5 this stack no longer runs in the kernel and has no direct hardware access of its own. |
+| RTL8139/e1000/e1000e drivers (inside `netd`) | `netd`'s own claim on the device | Actual frame transmit/receive, whichever driver `net_init()` found first — see [`07_drivers.md`](07_drivers.md#network-drivers-rtl8139--e1000--e1000e). |
+| Networking | `netd`'s own `main()` loop | `net_poll()` is driven from this loop's own cadence (v0.9.5), not a kernel timer tick; every blocking call (ARP/DHCP/ping/TCP/DNS/TLS/HTTP) still measures its bounded timeout against `sys_gettick()`. |
+| DHCP (`dhcp.c`) | UDP (`udp.c`), Networking | One blocking `dhcp_start()` call at `netd` startup (`main.c`), broadcasting over the same UDP layer DNS uses. |
+| TCP/DNS (`tcp.c`/`dns.c`) | `netrand.c` | Randomized ISN/local port and transaction ID/local port — see [Randomness (`netrand`)](#randomness-netrand). |
+| TLS/crypto (`crypto/`) | Networking only | No external crypto library — SHA-256/HMAC/AES-GCM/X25519/bignum-RSA are all implemented from scratch, now inside `netd` rather than the kernel. |
+| `SYS_NET_FETCH`/`_OPEN`/`_READ`/`_CLOSE`, `SYS_PING`, `SYS_NET_CONFIG_GET`/`SET` | `service_call()` relay to `netd` (`syscall.c`), `shm.c` for the response body | Validates the caller's pointers, relays the request to `netd` over the mailbox, and for `SYS_NET_FETCH`/`_OPEN`/`_READ` brokers the actual data through a kernel-created shared-memory region — see [HTTP(S) Client and `SYS_NET_FETCH`](#https-client-and-sys_net_fetch). |
+| `wget`/`ping`/`ifconfig` (userspace, `lufira-packages`) | `13_syscalls.md`'s file/process syscalls | These commands are ordinary userspace packages, talking only to the syscalls above — none of them call into `netd` directly or know it exists. |
 
 ---
 
@@ -307,20 +335,21 @@ Because x86-64 is little-endian and all network wire formats are big-endian, `ne
 - **No TCP congestion control** — flow control (the receive window) exists; congestion avoidance does not.
 - **Single connection/resolve/ping/DNS-query/TLS-session at a time** — no socket table, no concurrency.
 - **In-order-only TCP/UDP receive** — no reassembly of out-of-order data.
-- **`SYS_NET_FETCH` blocks the whole system for the duration of the fetch** — same synchronous, single-flight model the rest of this stack has always had.
-- **Fully polled, no interrupts** — throughput/latency bounded by the 100 Hz PIT tick rate.
+- **`SYS_NET_FETCH` blocks the calling process for the duration of the fetch** — same synchronous, single-flight model the rest of this stack has always had (streaming via `SYS_NET_FETCH_OPEN`/`_READ` changes *when* the blocking happens, not *whether* it does).
+- **Fully polled, no interrupts** — as of v0.9.5, driven by `netd`'s own main-loop cadence rather than the kernel's PIT tick (see [Dependencies](#dependencies)), but no NIC interrupt is ever serviced either way.
+- **Exactly one `netd` process at a time** — `SYS_NETD_REGISTER` is root-only and rejects a second registration, the same single-daemon model `SYS_WM_REGISTER`/`SYS_SOUNDD_REGISTER` use (see [`13_syscalls.md`](13_syscalls.md#sound-and-network-daemons-8990-9295)).
 - **Untested on real hardware** — only exercised against QEMU's SLIRP networking (including, for the TLS/HTTP client, genuine live internet access through it).
 
 ---
 
 ## Conclusion
 
-LufiraOS's network stack now runs the full path from Ethernet frames to an HTTPS GET: Ethernet/ARP/IPv4/ICMP/TCP/UDP/DNS, a from-scratch TLS 1.2 client, and an HTTP(S) client exposed to userspace as one syscall. It is still narrow by design — one connection at a time, blocking calls throughout, no congestion control, and, most importantly, no certificate chain validation — but it is no longer limited to literal IP addresses and plain HTTP, and the package manager's `dlpg sync`/`upgrade` now depend on it reaching a real server on the real internet, not just a local QEMU link. It also no longer requires a single specific NIC or a hand-set static IP: RTL8139, e1000, and e1000e are all interchangeable at the `eth.c` layer, and `dhcp_start()` tries to get a real lease before falling back to the old static default.
+LufiraOS's network stack runs the full path from Ethernet frames to an HTTPS GET: Ethernet/ARP/IPv4/ICMP/TCP/UDP/DNS, a from-scratch TLS 1.2 client, and an HTTP(S) client exposed to userspace as both a one-shot and a streaming syscall pair. It is still narrow by design — one connection at a time, blocking calls throughout, no congestion control, and, most importantly, no certificate chain validation — but it is no longer limited to literal IP addresses and plain HTTP, and the package manager's `dlpg` subcommands depend on it reaching a real server on the real internet, not just a local QEMU link. It also no longer requires a single specific NIC or a hand-set static IP: RTL8139, e1000, and e1000e are all interchangeable at the `eth.c` layer, and `dhcp_start()` tries to get a real lease before falling back to the old static default. **As of v0.9.5**, none of this runs in the kernel at all — the entire stack moved into the `netd` userspace daemon on top of the new PCI-device-claim privilege model (see [`07_drivers.md`](07_drivers.md#userspace-driver-infrastructure)), with randomized TCP/DNS values (`netrand`, see [Randomness (`netrand`)](#randomness-netrand)) and a streaming fetch API (`SYS_NET_FETCH_OPEN`/`_READ`/`_CLOSE`) added in the same release.
 
-For more details, refer to the source code in `kernel/net/` (including `kernel/net/crypto/` and `kernel/net/dhcp.c`) and `kernel/drivers/net/` (`rtl8139.c`, `e1000.c`, `e1000e.c`).
+For more details, refer to the source code in `lufira-packages/daemons/netd/` (including `crypto/`, `dhcp.c`, and `netrand.c`).
 
 ---
 
-**Document Version:** 2.0
+**Document Version:** 3.0
 **Last Updated:** October 2026
 **Project:** LufiraOS

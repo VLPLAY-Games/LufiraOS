@@ -347,6 +347,8 @@ This was **not** a second VFS mount point back when FAT was the only mountable f
 
 **Writing back.** `fat_flush()`/`fat_sync()` (in `fat.c`) hardcode the ATA disk driver (`disk_read_sectors()`/`disk_write_sectors()`) — they write to the disk holding LufiraFS, not to the USB device — so they are **not** used by the mount/unmount write-back path. Instead, `command_unmount()` walks FAT's own dirty-sector bitmap (`fs->dirty_map`, marked by `fat_mark_sector_dirty()` on every write) and writes each changed sector back to the USB device directly through `xhci_msd_write_block()` (also documented at the driver level in [`07_drivers.md`](07_drivers.md)).
 
+**Bounds checking (v0.9.5).** `get_fat_entry()`/`set_fat_entry()` (`fat.c`) now reject a cluster number past the actual FAT table size before computing an offset into it — previously a cluster-chain pointer read straight off a corrupted or crafted FAT table could drive the next lookup arbitrarily far past the end of the resident image buffer. Live-tested after the fix: `mount`/`ls`/`cat`/`write`/`rm` on a FAT image showed no regression.
+
 **Still dead code.** `kernel/fs/fat/fat_vfs.c` exists in the source tree but is still **not** compiled into the kernel — it is not listed in `KERNEL_C_SOURCES` in the `Makefile` (only `fat.c` is, for `mount`/`unmount` above). It remains a placeholder for real VFS multi-mount integration that does not exist yet.
 
 The UEFI ESP partition (see [Disk Layout](#disk-layout)) is still FAT12, but it continues to be read exclusively by UEFI firmware and the bootloader's own FAT reader — never by this kernel driver or by `mount`/`unmount`.
@@ -369,6 +371,8 @@ Not supported — and refused outright at mount time rather than risking silent 
 
 `ext2_mount.c` mirrors `fat_mount.c`'s architecture (whole image resident in RAM, direct pointer access) but without FAT's root-only restriction — ext2's native inode tree supports real nested-directory lookup. `EXT2_MOUNT_MAX` caps concurrent ext2 mounts at 2, and `MOUNT_MAX_IMAGE_BYTES` (8 MiB) applies here too — the same RAM-headroom reasoning as FAT's identical limit (see [Loading the image](#fat-and-usb-mass-storage-mounting) above).
 
+**Bounds checking (v0.9.5).** `ext2.c`'s block/group/inode-pointer helpers (which translate a raw on-disk block/group/inode number — nearly always sourced straight from an inode's `i_block[]`/extent tree, or from dividing a block/inode number by the group size — into a pointer into the resident image buffer) now check the index against `s_blocks_count`/`groups_count`/`s_inodes_count` before dereferencing, falling back to a zeroed `fs->trap_block` buffer instead of reading or writing out of bounds on a corrupted or crafted image. `s_blocks_count`/`s_inode_size` are themselves sanity-checked at mount time. Cheaper and clearer than fixing every call site individually, since every caller already treats the trap buffer's contents as "this entry doesn't exist."
+
 ### exFAT (`kernel/fs/exfat/exfat.c`, `exfat_mount.c`)
 
 exFAT supports real nested directories of arbitrary depth (unlike FAT's root-directory-only limitation), which rules out FAT's "just cache the root" shortcut. Instead, a small registry of directory caches (`EXFAT_DIR_CACHE_SLOTS`, 8 slots, LRU eviction) is keyed by each directory's first cluster; the volume root is an ordinary entry in that same registry, not a special permanent slot.
@@ -376,6 +380,8 @@ exFAT supports real nested directories of arbitrary depth (unlike FAT's root-dir
 **exFAT mounting does not read the whole device into RAM up front, unlike FAT** (see [Loading the image](#fat-and-usb-mass-storage-mounting) above, which still does). Only the boot region and FAT table (capped at `EXFAT_META_MAX_BYTES`, 16 MiB) and the Allocation Bitmap (capped at `EXFAT_BITMAP_MAX_BYTES`, 8 MiB — the single source of truth for cluster occupancy, consulted on every allocation/free) are kept resident. File *contents* are never copied into RAM wholesale: `exfat_read_file()`/`exfat_write_file()` read and write directly against the device, cluster by cluster, through the same `exfat_blockdev_t` abstraction `fat_blockdev_t` uses (512-byte blocks, batched and retried in `exfat_mount.c` the same way `ext2_mount.c`/`fat_mount.c` do). This is the "mounted USB/FAT drives no longer read the whole device into RAM up front" change mentioned in the v0.9.0 changelog — it landed for exFAT specifically (and for `lufira-packages`' `mount` command's own streaming path); FAT mounting itself (`fat_init()`, above) is unchanged and still buffers the entire image.
 
 Known, deliberate limitations: file names are ASCII-only (code points < 128) even though exFAT itself stores names in UTF-16, since this kernel works in `char*`; and writes always build cluster chains through the FAT (`NoFatChain` is never set on write), while reads still honor `NoFatChain` on files that already have it set (e.g. written by Windows).
+
+**Bounds checking (v0.9.5).** `get_fat()`/`set_fat()`/`free_cluster()` and the raw per-cluster read/write path now reject a cluster number past the FAT table's actual extent, and `fat_length_bytes` itself is sanity-checked against the volume at mount time — the same class of fix as FAT's `get_fat_entry()`/`set_fat_entry()` above, for the same reason: a cluster-chain pointer read off a corrupted or crafted exFAT volume could otherwise drive a lookup past the end of the resident FAT-table buffer.
 
 ### RAMFS (`kernel/fs/ramfs/ramfs.c`)
 
@@ -409,6 +415,6 @@ For more details, refer to the source code in `fs/lufirafs/`, `fs/vfs/`, and `to
 
 ---
 
-**Document Version:** 2.0
-**Last Updated:** September 2026
+**Document Version:** 2.1
+**Last Updated:** October 2026
 **Project:** LufiraOS

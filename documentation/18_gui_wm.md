@@ -115,12 +115,13 @@ These are what an ordinary client program actually links against (`libc/include/
 | `SYS_WIN_POLL_EVENT` (55) | Non-blocking poll for the next queued input/resize/close event. |
 | `SYS_WIN_MOVE` (56) | Move a window. |
 | `SYS_IPC_SEND` / `SYS_IPC_RECV` (57/58) | The generic mailbox primitive itself, exposed directly — not GUI-specific, but how the WM-client RPC above is actually carried. |
-| `SYS_WM_REGISTER` (59) | Become *the* WM process. Exactly one at a time — a second caller fails. |
+| `SYS_WM_REGISTER` (59) | Become *the* WM process. Exactly one at a time — a second caller fails. Root-only since v0.9.5 (see [Known Limitations](#known-limitations)). |
 | `SYS_FB_INFO` (60) | Screen width/height/pixel format, for sizing a compositor buffer. |
 | `SYS_FB_PRESENT` (61) | WM-only: push a (possibly partial, dirty-rectangle) frame buffer to the real framebuffer. |
 | `SYS_FB_FONT` (62) | Copy out the console's own 8×8 bitmap font, so client-side text rendering matches the text console's. |
+| `SYS_WIN_MARK_DIRTY` (96) | *(v0.9.5)* A client marks a rectangle of its own window as changed, without drawing anything — see [Partial Repaint (Dirty-Rect Compositing)](#partial-repaint-dirty-rect-compositing). |
 
-`SYS_FB_PRESENT` and `SYS_FB_INFO` are privileged — the kernel checks the caller's pid against `process_get_wm_pid()` and refuses anyone else. Everything else (`SYS_WIN_*`) is open to any process; what's actually *allowed* (e.g. only the owning process may destroy its own window) is enforced by `wm.c` itself when it answers the RPC, not by the kernel.
+`SYS_FB_PRESENT` and `SYS_FB_INFO` are privileged — the kernel checks the caller's pid against `process_get_wm_pid()` and refuses anyone else. `SYS_WM_REGISTER` itself is privileged a different way, as of v0.9.5: it's root-only (`current_process->uid != 0` → `-EPERM`), closing a registration-hijack gap — `process_wm_register()` on its own only ever rejected a *second* registration, not an untrusted *first* one, so before this fix any unprivileged process that won the race to call it before the real `wm.elf` started could become the system's WM and intercept every other client's input and drawing. Everything else (`SYS_WIN_*`) is open to any process; what's actually *allowed* (e.g. only the owning process may destroy its own window) is enforced by `wm.c` itself when it answers the RPC, not by the kernel.
 
 ---
 
@@ -171,6 +172,15 @@ On top of that, `mark_dirty_rect(x, y, w, h)` and `mark_dirty_full()` (`apps/wm.
 
 **Known issue — not a solved problem.** Because only fill/rect/text drawing goes through `mark_dirty_rect()` and essentially everything else (window move, resize, focus change, raise-to-top, open/close, the start menu) still calls `mark_dirty_full()`, a real interactive session still triggers full-screen presents very often in practice — dragging a window around, for instance, is a continuous stream of full repaints, not a small moving rectangle. Partial presenting works correctly for the narrow case it covers, but it has not eliminated the "basically always a full redraw" behavior the mechanism was meant to fix, and the interaction between the dirty-rect path and some programs can still behave like a full redraw even in cases that look like they should qualify for the partial path. This is an open problem, not resolved in this release — see the project's `CHANGELOG.md` Known Issues for 0.9.0.
 
+### Client-Side Dirty Tracking (v0.9.5)
+
+Everything above is the WM's own, server-side notion of "dirty" — what `wm.c` tracks to decide how much of the *screen* to re-present. v0.9.5 adds a second, independent, client-side piece aimed at a future where a client stops redrawing its *own* window unconditionally on every frame:
+
+- **`SYS_WIN_MARK_DIRTY` (96)** — a client-callable syscall, relayed as `WM_OP_WIN_MARK_DIRTY` (opcode 8) to `wm.c`'s `do_win_mark_dirty()`, which just calls the existing `mark_dirty_rect()` with the window's own client-area offset applied — it draws nothing by itself. See [GUI Syscalls](#gui-syscalls) and [`13_syscalls.md`](13_syscalls.md#gui--window-manager-5062-71-96).
+- **A `dirty` field on every widget** in `libc/src/gui_widgets.c`/`lufira/gui_widgets.h` (`gui_button_t`, `gui_textbox_t`, `gui_checkbox_t`, `gui_listbox_t`) — set by each widget's `_init()` and by its mutators when something actually changes (`gui_checkbox_toggle()`, `gui_textbox_handle_key()` on a successful edit, `gui_listbox_add_item()`/`clear()`, `gui_listbox_click()` only when the selection actually moves, `gui_listbox_scroll()` only when the offset actually moves), and cleared at the very end of the widget's own `_draw()`.
+
+**Deliberately advisory, not enforced.** `_draw()` itself still always redraws unconditionally, regardless of `dirty` — it does **not** skip drawing when `dirty == 0`. This was a conscious design choice, not an oversight: every current GUI app (`calc.c`, `notepad.c`, …) follows a "fill the window, then redraw every widget" pattern in its own `redraw()` — `sys_win_fill()` erases pixels under a widget regardless of whether that widget's own *content* changed, so a `_draw()` that silently skipped on `dirty == 0` would leave a blank hole exactly where that widget used to be. `dirty` exists purely as a hint for a *future* caller that already knows it isn't about to blow away the background first: 1.0-era client code can check it to decide whether to call `_draw()`/`sys_win_mark_dirty()` at all for a given widget, while every app written before this field existed keeps working exactly as before, since nothing reads the field unless it chooses to. Migrating `calc`/`notepad`/the rest of the GUI app suite to actually take advantage of this (skip unnecessary redraws, call `sys_win_mark_dirty()` around only what changed) is explicitly left for 1.0 — v0.9.5 only adds the mechanism.
+
 ---
 
 ## Dependencies
@@ -181,6 +191,7 @@ On top of that, `mark_dirty_rect(x, y, w, h)` and `mark_dirty_full()` (`apps/wm.
 | GUI syscalls | Mailbox IPC, `process_get_wm_pid()` | Every `SYS_WIN_*`/`SYS_FB_*` is an RPC over mailbox IPC addressed to the registered WM pid. |
 | Input routing | PS/2 keyboard/mouse drivers, USB HID (`07_drivers.md`) | Both input paths funnel into the same `input.c` dispatch, which checks `process_get_wm_pid()` on every event. |
 | `wm.c` (userspace, `lufira-packages`) | GUI syscalls, `SYS_FB_*` | The actual compositor — not documented here, see that repository. |
+| `gui_widgets.c` (libc, `lufira/gui_widgets.h`) | GUI syscalls | Button/textbox/checkbox/listbox widgets; carries the client-side `dirty` flag (v0.9.5) described in [Client-Side Dirty Tracking](#client-side-dirty-tracking-v095). |
 
 ---
 
@@ -197,12 +208,12 @@ On top of that, `mark_dirty_rect(x, y, w, h)` and `mark_dirty_full()` (`apps/wm.
 
 ## Conclusion
 
-The kernel's half of the GUI is deliberately thin: a generic mailbox primitive, a privileged framebuffer-present syscall, and a set of RPC wrappers that relay window operations to whichever process registered itself as the window manager. All of the actual compositing, input focus, drag/resize, taskbar, and app logic lives in ordinary userspace code in `lufira-packages`, exercising the same syscall surface any other program could. This release added two more pieces of that userspace logic worth knowing about even though they're not kernel mechanism: fullscreen apps borrowing the WM registration via `fork()` (see [Fullscreen Applications](#fullscreen-applications)) rather than replacing the WM process outright, and a dirty-rect partial-repaint path that cuts down unnecessary full-screen presents for simple in-window drawing — though, honestly, not yet for much else (see [Partial Repaint (Dirty-Rect Compositing)](#partial-repaint-dirty-rect-compositing)).
+The kernel's half of the GUI is deliberately thin: a generic mailbox primitive, a privileged framebuffer-present syscall, and a set of RPC wrappers that relay window operations to whichever process registered itself as the window manager. All of the actual compositing, input focus, drag/resize, taskbar, and app logic lives in ordinary userspace code in `lufira-packages`, exercising the same syscall surface any other program could. One earlier release added fullscreen apps borrowing the WM registration via `fork()` (see [Fullscreen Applications](#fullscreen-applications)) and a dirty-rect partial-repaint path for simple in-window drawing (see [Partial Repaint (Dirty-Rect Compositing)](#partial-repaint-dirty-rect-compositing)) — still not a solved problem for most interactions. v0.9.5 closed a real security gap (`SYS_WM_REGISTER` is now root-only, see [GUI Syscalls](#gui-syscalls)) and laid the first piece of groundwork for client-side dirty tracking (`SYS_WIN_MARK_DIRTY` plus a `dirty` flag on every widget, see [Client-Side Dirty Tracking](#client-side-dirty-tracking-v095)) — a mechanism, not yet a behavior change, with the actual app migration left for 1.0.
 
-For more details, refer to `kernel/system/ipc/mailbox.c`/`wm_protocol.h`, the `SYS_WIN_*`/`SYS_FB_*`/`SYS_WM_REGISTER`/`SYS_IPC_*` implementations in `kernel/system/syscall/syscall.c`, and `apps/wm.c` in `lufira-packages`.
+For more details, refer to `kernel/system/ipc/mailbox.c`/`wm_protocol.h`, the `SYS_WIN_*`/`SYS_FB_*`/`SYS_WM_REGISTER`/`SYS_IPC_*` implementations in `kernel/system/syscall/syscall.c`, `apps/wm.c` and `libc/src/gui_widgets.c` in `lufira-packages`.
 
 ---
 
-**Document Version:** 1.0
+**Document Version:** 1.1
 **Last Updated:** October 2026
 **Project:** LufiraOS

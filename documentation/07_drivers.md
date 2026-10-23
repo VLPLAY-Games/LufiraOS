@@ -17,8 +17,9 @@ This document describes the device drivers included in the LufiraOS kernel. The 
 9. [Input Dispatcher](#input-dispatcher)
 10. [Network Drivers (RTL8139 / e1000 / e1000e)](#network-drivers-rtl8139--e1000--e1000e)
 11. [PCI Bus Driver](#pci-bus-driver)
-12. [Audio Drivers (AC’97 / Intel HDA)](#audio-drivers-ac97--intel-hda)
-13. [Driver Initialisation Sequence](#driver-initialisation-sequence)
+12. [Userspace Driver Infrastructure](#userspace-driver-infrastructure)
+13. [Audio Drivers (AC’97 / Intel HDA)](#audio-drivers-ac97--intel-hda)
+14. [Driver Initialisation Sequence](#driver-initialisation-sequence)
 
 ---
 
@@ -32,9 +33,9 @@ The driver subsystem provides hardware abstraction for essential peripherals:
 - **Keyboard** – PS/2 keyboard with scancode translation, modifier handling, and IRQ1 interrupt support.
 - **Mouse** – PS/2 mouse initialisation and packet decoding.
 - **USB** – an xHCI host‑controller driver providing boot‑protocol HID keyboard/mouse input, Bulk‑Only Transport USB Mass Storage (block read/write), and post-boot hotplug attach/detach, unified with PS/2 through a shared input dispatcher.
-- **Network** – an RTL8139 Fast Ethernet driver, plus Intel e1000/e1000e drivers for a second NIC family, all providing raw frame TX/RX to the protocol stack in `kernel/net/` (see [`16_networking.md`](16_networking.md) for the full Ethernet/ARP/IP/ICMP/TCP/UDP/DNS/TLS/HTTP stack built on top, and its DHCP client). `ifconfig`/`ping`/`wget` (`lufira-packages`) are userspace consumers of this stack, alongside `dlpg sync`/`dlpg upgrade` via `SYS_NET_FETCH`.
+- **Network** – an RTL8139 Fast Ethernet driver, plus Intel e1000/e1000e drivers for a second NIC family. **As of v0.9.5, these no longer live in the kernel at all** — they, and the whole protocol stack built on top of them, moved into a userspace daemon, `netd` (`lufira-packages/daemons/netd/`); see [Userspace Driver Infrastructure](#userspace-driver-infrastructure) below and [`16_networking.md`](16_networking.md) for the full Ethernet/ARP/IP/ICMP/TCP/UDP/DNS/TLS/HTTP stack and its DHCP client. `ifconfig`/`ping`/`wget` (`lufira-packages`) are userspace consumers of `netd`'s syscall surface, alongside `dlpg sync`/`dlpg upgrade` via `SYS_NET_FETCH`.
 - **PCI** – bus enumeration, configuration space access, and BAR (Base Address Register) management.
-- **Audio** – AC’97 (Intel ICH‑compatible) and Intel HDA controllers, both with DMA‑based playback and tone generation; `sound.c` tries HDA first, then AC’97.
+- **Audio** – AC’97 (Intel ICH‑compatible) and Intel HDA controllers, both with DMA‑based playback and tone generation. **As of v0.9.5, also moved out of the kernel**, into a second userspace daemon, `soundd` (`lufira-packages/daemons/soundd.c`), which tries HDA first, then AC’97.
 
 Drivers are designed to be initialised early in the kernel boot process, after the physical memory manager (PMM) and interrupt descriptor table (IDT) are set up. All drivers are polled or interrupt‑driven; the console is used for debugging and user interaction. Most drivers' verbose status output is gated by **developer mode** (see [`04_logging.md`](04_logging.md)) — by default only errors and a handful of high-level "ready/not ready" lines are shown; enable it with the `devmode` shell command or `make debug` to see per‑device/per‑register detail.
 
@@ -277,48 +278,53 @@ Because QEMU (and potentially real hardware) can deliver the *same* physical key
 
 ## Network Drivers (RTL8139 / e1000 / e1000e)
 
+**As of v0.9.5, these drivers no longer live in the kernel.** They were ported, essentially unchanged at the hardware level, into the userspace `netd` daemon (`lufira-packages/daemons/netd/rtl8139.c`/`e1000.c`/`e1000e.c`) as part of moving the whole network stack out of the kernel binary — see [Userspace Driver Infrastructure](#userspace-driver-infrastructure) below and [`16_networking.md`](16_networking.md). This section is kept as the authoritative hardware-level reference (register layouts, boot sequences, the bugs that were found and fixed) — only the *mechanism* each driver uses to reach the hardware changed:
+
+- Every direct kernel call the drivers used to make — `pci_find_device()`, `in8/out8`-style port I/O, `pmm_alloc_contiguous_pages()` — is now a syscall: `sys_driver_claim_device(vendor_id, device_id, &dev)` instead of PCI discovery, `sys_io_in()`/`sys_io_out()` (wrapped in the same `io_in8/16/32`/`io_out8/16/32` helper names, now in `netd/netd_hw.h`) instead of raw port I/O, and `sys_dma_alloc(num_pages, &phys)` instead of `pmm_alloc_contiguous_pages()` for the RX/TX descriptor buffers.
+- Polling is no longer tied to the kernel's PIT tick. `netd` is an ordinary process now — there is no `timer_irq_handler()` hook into it — so `net_poll()` (and, under it, `rtl8139_poll()`/`e1000_poll()`/`e1000e_poll()`) runs instead from `netd`'s own `main()` loop (`daemons/netd/main.c`): wait up to 100 ms on `sys_ipc_recv()` for a client request (relayed `SYS_NET_FETCH`/`SYS_PING`/etc., see [`13_syscalls.md`](13_syscalls.md#sound-and-network-daemons-8990-9295)), handle it if one arrived, then poll the NIC — still fully polled, just driven by the daemon's own loop cadence instead of a 100 Hz interrupt.
+
 ### RTL8139 Network Driver
 
-`drivers/net/rtl8139.c`/`.h` drives a Realtek RTL8139 Fast Ethernet controller (PCI vendor `0x10EC`, device `0x8139`) — the NIC QEMU emulates by default (`-net nic,model=rtl8139`). This section covers the driver/hardware layer only; the Ethernet/ARP/IP/ICMP/TCP protocol stack built on top of it lives in `kernel/net/` and is documented in [`16_networking.md`](16_networking.md).
+`daemons/netd/rtl8139.c`/`.h` drives a Realtek RTL8139 Fast Ethernet controller (PCI vendor `0x10EC`, device `0x8139`) — the NIC QEMU emulates by default (`-net nic,model=rtl8139`). This section covers the driver/hardware layer only; the Ethernet/ARP/IP/ICMP/TCP protocol stack built on top of it lives alongside it in `daemons/netd/` and is documented in [`16_networking.md`](16_networking.md).
 
 ### Discovery and register access
 
-- Found via PCI by exact vendor/device ID (`pci_find_device(0x10EC, 0x8139)`) rather than by class, since RTL8139 predates the PCI class-code conventions later cards use.
-- BAR0 is an **I/O-port** BAR, not MMIO — every register access goes through `in8`/`in16`/`in32`/`out8`/`out16`/`out32` on `rtl_io_base + offset`, the same style as the PCI and AC’97 drivers. Key registers: `MAC0` (6-byte station address), `TSD0`/`TSAD0` (4 Transmit Status/Address Descriptors, one set per TX slot), `RBSTART` (physical base of the RX ring), `CR` (Command Register: reset/enable RX/TX/buffer-empty flags), `CAPR`/`CBR` (RX read/write cursors), `IMR`/`ISR` (interrupt mask/status — mask is always left 0, see below), `TCR`/`RCR` (transmit/receive configuration).
-- `pci_enable_io()` and `pci_enable_bus_master()` are called during discovery (the card DMAs directly to/from system memory), and `pci_disable_interrupts()` disables the legacy PCI INTx line, since it is never serviced.
+- Claimed via `sys_driver_claim_device(0x10EC, 0x8139, &dev)` — exact vendor/device id rather than PCI class, since RTL8139 predates the PCI class-code conventions later cards use.
+- BAR0 is an **I/O-port** BAR, not MMIO — every register access goes through `io_in8`/`io_in16`/`io_in32`/`io_out8`/`io_out16`/`io_out32` (`netd/netd_hw.h`, thin wrappers over `sys_io_in()`/`sys_io_out()`) on `rtl_io_base + offset`, the same style as the PCI and AC’97 drivers always used. Key registers: `MAC0` (6-byte station address), `TSD0`/`TSAD0` (4 Transmit Status/Address Descriptors, one set per TX slot), `RBSTART` (physical base of the RX ring), `CR` (Command Register: reset/enable RX/TX/buffer-empty flags), `CAPR`/`CBR` (RX read/write cursors), `IMR`/`ISR` (interrupt mask/status — mask is always left 0, see below), `TCR`/`RCR` (transmit/receive configuration).
+- `netd_pci_enable(&dev, PCI_COMMAND_IO | PCI_COMMAND_BUS_MASTER | PCI_COMMAND_INT_DISABLE)` is called during discovery (the card DMAs directly to/from system memory, and its legacy PCI INTx line is never serviced) — one read-modify-write over `SYS_PCI_CONFIG_READ`/`WRITE` replacing the kernel's old separate `pci_enable_io()`/`pci_enable_bus_master()`/`pci_disable_interrupts()` calls.
 
 ### Boot sequence
 
-1. **Reset** – write `0x00` to `CONFIG1` to wake the device from power-down, then set the `RST` bit in `CR` and poll (up to ~1 second, via `pit_wait_ms()`) until the controller clears it.
-2. **Buffer allocation** – the receive path needs one **physically contiguous** buffer, because the RTL8139 has no scatter‑gather support on receive: it DMAs incoming frames directly into a single ring without any descriptor list. The existing `pmm_alloc_page()` only ever hands out one page at a time with no contiguity guarantee across calls, so this driver's arrival motivated a new allocator, `pmm_alloc_contiguous_pages(count)` (`kernel/system/mm/pmm.c`/`.h`), which scans the PMM bitmap for a run of `count` free pages and reserves it atomically. The RX ring is allocated as 3 contiguous pages (8 KiB logical ring size plus the spec's recommended 16-byte prefetch slack and 1500 bytes of overrun room for `WRAP`-mode writes that cross the ring boundary, rounded up). Four separate 1‑page buffers (one per TX slot) are allocated with plain `pmm_alloc_page()`, since transmit doesn't need contiguity across slots.
-3. **RX ring setup** – `RBSTART` is programmed with the RX buffer's physical address; `RCR` is configured to accept packets matching our MAC address and broadcasts (`APM`/`AB`), allow ring-boundary-crossing writes into the overrun slack (`WRAP`), use unlimited DMA burst size, an 8 KiB ring length, and no RX FIFO threshold (wait for a complete frame before it's handed to the driver). `CAPR` is initialised to `0 - 16` (not `0`) because the hardware always stores this register offset by −16 from the true read position — writing a bare `0` here leaves the ring permanently "non-empty" from the card's point of view and the poll loop reads uninitialised buffer contents on every tick.
+1. **Reset** – write `0x00` to `CONFIG1` to wake the device from power-down, then set the `RST` bit in `CR` and poll (up to ~1 second) until the controller clears it.
+2. **Buffer allocation** – the receive path needs one **physically contiguous** buffer, because the RTL8139 has no scatter‑gather support on receive: it DMAs incoming frames directly into a single ring without any descriptor list. `sys_dma_alloc(RTL_RX_BUF_PAGES, &phys)` (3 pages — 8 KiB logical ring size plus the spec's recommended 16-byte prefetch slack and 1500 bytes of overrun room for `WRAP`-mode writes that cross the ring boundary, rounded up) gets a physically-contiguous buffer in one syscall; four separate 1‑page TX buffers (one per TX slot) are likewise each a separate `sys_dma_alloc(1, &phys)` call, since transmit doesn't need contiguity across slots.
+3. **RX ring setup** – `RBSTART` is programmed with the RX buffer's physical address; `RCR` is configured to accept packets matching our MAC address and broadcasts (`APM`/`AB`), allow ring-boundary-crossing writes into the overrun slack (`WRAP`), use unlimited DMA burst size, an 8 KiB ring length, and no RX FIFO threshold (wait for a complete frame before it's handed to the driver). `CAPR` is initialised to `0 - 16` (not `0`) because the hardware always stores this register offset by −16 from the true read position — writing a bare `0` here leaves the ring permanently "non-empty" from the card's point of view and the poll loop reads uninitialised buffer contents on every pass.
 4. **TX/RX enable** – `CR` is set to `RE | TE`, and the driver reads back the 6-byte station MAC from `MAC0..MAC0+5`.
 
 ### Polling and interrupts
 
-Like xHCI and AC’97, the RTL8139's interrupt line is never wired up — there is no APIC/MSI support and no PCI capability-list parsing in this kernel. `ISR` bits still latch in hardware regardless of `IMR` (which is left `0`), so `rtl8139_poll()` reads and acknowledges them purely in software; nothing hardware-visible depends on that acknowledgement. `rtl8139_poll()` is called once per PIT tick (100 Hz) from `net_poll()` (`kernel/net/net.c`), which is itself called from `timer_irq_handler()` in `kernel/system/timer/pit.c` right alongside `usb_poll()`. Each call drains up to 8 pending frames from the RX ring (checking the `BUFE` "buffer empty" flag in `CR` between each), parsing the 4-byte status+length header the card prepends to every frame, advancing the ring cursor, and handing the payload to `eth_receive()` (`kernel/net/eth.c`) for the protocol stack to process. Because the RX cursor and `CAPR` are shared mutable state and `rtl8139_poll()`/`rtl8139_send()` can be called both from inside the timer IRQ (via `net_poll()`) and synchronously from ordinary code with interrupts enabled (protocol code that busy-waits on send/receive), a `cli`/`sti`-guarded re-entrancy flag prevents a nested timer tick from processing the ring concurrently with an already-running synchronous poll.
+Like xHCI and AC’97 before the v0.9.5 move, the RTL8139's interrupt line is never wired up — there is no APIC/MSI support and no PCI capability-list parsing anywhere in this project, kernel or daemon. `ISR` bits still latch in hardware regardless of `IMR` (which is left `0`), so `rtl8139_poll()` reads and acknowledges them purely in software; nothing hardware-visible depends on that acknowledgement. As described above, `rtl8139_poll()` is now called from `netd`'s own `main()` loop rather than a PIT tick. Each call drains up to 8 pending frames from the RX ring (checking the `BUFE` "buffer empty" flag in `CR` between each), parsing the 4-byte status+length header the card prepends to every frame, advancing the ring cursor, and handing the payload to `eth_receive()` for the protocol stack to process. `netd` is single-threaded with no reentrancy concern of its own (unlike the old kernel-resident version, which had to guard against being called both from a timer IRQ and synchronously), so the `cli`/`sti`-guarded re-entrancy flag the kernel driver needed is gone along with it.
 
-### Public API (`drivers/net/rtl8139.h`)
+### Public API (`daemons/netd/rtl8139.h`)
 
 | Function | Description |
 |----------|-------------|
-| `void rtl8139_init(void)` | Discovers the controller via PCI, resets it, allocates RX/TX buffers, and brings up RX/TX. Safe to call even if no controller is found. |
+| `void rtl8139_init(void)` | Claims the controller via `sys_driver_claim_device()`, resets it, allocates RX/TX buffers via `sys_dma_alloc()`, and brings up RX/TX. Safe to call even if no controller is found. |
 | `int rtl8139_found(void)` | Returns 1 if a controller was found and initialised. |
 | `const uint8_t *rtl8139_get_mac(void)` | Returns a pointer to the 6-byte MAC address (valid only if `rtl8139_found()`). |
-| `int rtl8139_send(const void *frame, uint16_t len)` | Transmits one pre-built Ethernet frame; blocks (bounded `pit_wait_ms()` timeout) until the hardware reports the transfer complete. Frames shorter than 60 bytes are padded up to the Ethernet minimum. |
-| `void rtl8139_poll(void)` | Called once per PIT tick from `net_poll()`; drains pending RX frames into `eth_receive()`. |
+| `int rtl8139_send(const void *frame, uint16_t len)` | Transmits one pre-built Ethernet frame; blocks until the hardware reports the transfer complete. Frames shorter than 60 bytes are padded up to the Ethernet minimum. |
+| `void rtl8139_poll(void)` | Called once per `netd` main-loop iteration; drains pending RX frames into `eth_receive()`. |
 
-**Limitations:** single RX ring with no automatic recovery from a desynchronised ring header (the driver simply stops parsing until the next tick, a documented simplification rather than a full reset-and-recover path); no interrupt-driven wakeups; one NIC supported at a time.
+**Limitations:** single RX ring with no automatic recovery from a desynchronised ring header (the driver simply stops parsing until the next poll, a documented simplification rather than a full reset-and-recover path); no interrupt-driven wakeups; one NIC supported at a time.
 
-### Intel e1000 / e1000e Drivers (`drivers/net/e1000.c`, `e1000e.c`)
+### Intel e1000 / e1000e Drivers (`daemons/netd/e1000.c`, `e1000e.c`)
 
-A second NIC family alongside RTL8139, added for the much more common Intel chipsets: `e1000.c` targets the classic Intel 8254x family (82540EM and close relatives — PCI vendor `0x8086`; QEMU's `-device e1000` emulates the 82540EM, device id `0x100E`), `e1000e.c` targets the newer PCIe-generation 8257x/8258x family (QEMU's `-device e1000e` emulates the 82574L, device id `0x10D3`). Unlike RTL8139's I/O-port BAR0, both use an **MMIO** BAR0 and the same register layout (`CTRL`/`STATUS`/`EERD`/`RCTL`/`TCTL`/`RDBAL...`/`TDBAL...`) and the same 16-byte "legacy" TX/RX descriptor format — `e1000e.c` is structurally almost identical to `e1000.c`, differing mainly in its PCI device-id list and its own `e1000e_*`-prefixed static state. Like every other NIC/USB driver in this kernel, neither uses interrupts (`IMS` stays 0): `e1000_poll()`/`e1000e_poll()` check each descriptor's own `DD` (Descriptor Done) bit directly, called from `net_poll()` the same way `rtl8139_poll()` is.
+A second NIC family alongside RTL8139, for the much more common Intel chipsets: `e1000.c` targets the classic Intel 8254x family (82540EM and close relatives — PCI vendor `0x8086`; QEMU's `-device e1000` emulates the 82540EM, device id `0x100E`), `e1000e.c` targets the newer PCIe-generation 8257x/8258x family (QEMU's `-device e1000e` emulates the 82574L, device id `0x10D3`) — each tries its own list of known device ids against `sys_driver_claim_device(0x8086, id, &dev)` in turn. Unlike RTL8139's I/O-port BAR0, both use an **MMIO** BAR0 (mapped via `sys_mmap_mmio()`) and the same register layout (`CTRL`/`STATUS`/`EERD`/`RCTL`/`TCTL`/`RDBAL...`/`TDBAL...`) and the same 16-byte "legacy" TX/RX descriptor format — `e1000e.c` is structurally almost identical to `e1000.c`, differing mainly in its PCI device-id list and its own `e1000e_*`-prefixed static state. Neither uses interrupts (`IMS` stays 0): `e1000_poll()`/`e1000e_poll()` check each descriptor's own `DD` (Descriptor Done) bit directly, called from `netd`'s main loop the same way `rtl8139_poll()` is.
 
-Public API (`drivers/net/e1000.h`/`e1000e.h`, identical shape for both): `e1000_init()`/`e1000e_init()`, `e1000_found()`/`e1000e_found()`, `e1000_get_mac()`/`e1000e_get_mac()`, `e1000_send(const void *frame, uint16_t len)`/`e1000e_send(...)`, `e1000_poll()`/`e1000e_poll()`.
+Public API (`daemons/netd/e1000.h`/`e1000e.h`, identical shape for both): `e1000_init()`/`e1000e_init()`, `e1000_found()`/`e1000e_found()`, `e1000_get_mac()`/`e1000e_get_mac()`, `e1000_send(const void *frame, uint16_t len)`/`e1000e_send(...)`, `e1000_poll()`/`e1000e_poll()`.
 
 ### Driver Selection
 
-`net.c` wraps whichever NIC is present behind one `nic_driver_t` interface, so the rest of the network stack (`eth.c` and up, see [`16_networking.md`](16_networking.md)) never has to know which of RTL8139/e1000/e1000e is actually active. `LufiraOS-Builder`'s `--net-device rtl8139|e1000|e1000e|none` picks which one a QEMU run presents (see [`05_build_system.md`](05_build_system.md)).
+`net.c` (`daemons/netd/net.c`) wraps whichever NIC is present behind one `nic_driver_t` interface, so the rest of the network stack (`eth.c` and up, see [`16_networking.md`](16_networking.md)) never has to know which of RTL8139/e1000/e1000e is actually active. `LufiraOS-Builder`'s `--net-device rtl8139|e1000|e1000e|none` picks which one a QEMU run presents (see [`05_build_system.md`](05_build_system.md)); `--driver netd` (or `--no-drivers`, see [`05_build_system.md`](05_build_system.md#driver-selection)) controls whether the `netd` daemon itself is even built into the image.
 
 ---
 
@@ -347,12 +353,40 @@ The PCI driver enumerates all devices on the PCI bus using Configuration Mechani
 | `pci_enable_io(dev)` | Enables I/O space decoding. |
 | `pci_enable_bus_master(dev)` | Enables bus mastering for DMA. |
 | `pci_disable_interrupts(dev)` | Sets the Interrupt Disable bit in the command register (used by xHCI/RTL8139 since their interrupt lines are never serviced — see their respective sections). |
+| `pci_enable_interrupts(dev)` | *(v0.9.5)* Clears the Interrupt Disable bit — added alongside the `cli`/`sti` fix below, for symmetry with `pci_disable_interrupts()`, though nothing in this project currently relies on a serviced PCI interrupt. |
 
-The PCI driver is used by the AC’97, HDA, xHCI, AHCI, NVMe, RTL8139, and e1000/e1000e drivers to locate their respective controllers.
+**Fixed in v0.9.5:** `pci_config_read32()`/`pci_config_write32()` now run with interrupts disabled (`cli`/`sti`) around the `0xCF8`/`0xCFC` port pair — previously an interrupt handler touching the same ports mid-access (the two-port, write-address-then-read/write-data protocol is not atomic) could interleave with a config-space access, a suspected contributor to intermittent NVMe/xHCI hangs seen on real hardware. Not yet confirmed fixed on real hardware (QEMU never reproduced the hang in the first place), but closes a real, independently-identifiable race either way.
+
+The PCI driver is used directly by xHCI/AHCI/NVMe (kernel-resident), and — as of v0.9.5, through the claim/permission layer described in [Userspace Driver Infrastructure](#userspace-driver-infrastructure) below rather than by calling these functions directly — by `netd` and `soundd` to locate their NIC/audio controllers.
+
+---
+
+## Userspace Driver Infrastructure
+
+Added in v0.9.5 (`kernel/system/driver/driver.c`/`.h`) specifically to make moving sound and networking into userspace daemons safe. Before this, the *only* privilege check anywhere in the kernel for touching raw hardware was `uid == 0` — any root process, not just the one trusted daemon, could read/write arbitrary PCI config space, arbitrary I/O ports, or map arbitrary physical memory. That was fine while all hardware access stayed in the kernel itself, but once `netd`/`soundd` became ordinary (if root) userspace processes, "any root process" was far too broad a grant for a model where a shell someone happened to run as root shouldn't be able to reprogram the NIC underneath `netd`.
+
+**The model:** a process must first **claim** a specific PCI device (`SYS_DRIVER_CLAIM_DEVICE`/`SYS_DRIVER_CLAIM_DEVICE_BY_CLASS`, both root-only) before any of the privileged syscalls below will do anything for it, and then only within that one device's own bounds — its own BARs, its own interrupt line. One process may hold several claims (there's no "one device per process" restriction), but each device can only ever be claimed by one process at a time; `MAX_DRIVER_CLAIMS` (8) caps how many claims can exist system-wide at once, not per process.
+
+| Function (`driver.c`) | Description |
+|------------------------|-------------|
+| `driver_claim_device(pid, vendor_id, device_id, *out)` | Claims the first unclaimed device matching an exact vendor/device id (used by the NIC drivers — see [Network Drivers](#network-drivers-rtl8139--e1000--e1000e)). |
+| `driver_claim_device_by_class(pid, class_code, subclass, *out)` | Claims the first unclaimed device matching a PCI class/subclass (used by the audio drivers — see [Audio Drivers](#audio-drivers-ac97--intel-hda) — since the audio class is stable across vendors/emulations while the exact device id isn't). |
+| `driver_release_device(pid, bus, device, function)` | Releases one claim. |
+| `driver_owns_device(pid, bus, device, function)` | Checked before every PCI config/MMIO/port-I/O/IRQ-register syscall touching that device. |
+| `driver_is_registered(pid)` | True if `pid` holds *any* claim — the gate for `SYS_DMA_ALLOC`, which isn't tied to one specific device. |
+| `driver_mmio_allowed(pid, phys, length)` / `driver_io_port_allowed(pid, port, width)` | True if the given physical range / I/O port range falls entirely inside one BAR of a device `pid` has claimed. |
+| `driver_release_process(pid)` | Drops every claim and IRQ registration `pid` held — called from `process_exit()`/signal-driven termination, the same moment `g_wm_pid`/`g_netd_pid`/`g_soundd_pid` get cleared, so a crashed daemon doesn't permanently lock a device away from the next one that starts. |
+| `driver_irq_register(pid, irq)` / `driver_irq_wait(pid, irq)` / `driver_irq_notify(irq)` | A real blocking wait on a hardware IRQ line — the same `PROCESS_BLOCKED` mechanism `mailbox_recv()` uses, not a poll loop. `driver_irq_notify()` is called from `irq_handler()` (`irq.c`) for any line with no kernel-native handler (not 0/1/12); it's a safe no-op if that line isn't actually registered. |
+
+**The twelve syscalls built on top** (`SYS_DRIVER_CLAIM_DEVICE`/`_BY_CLASS`, `SYS_DRIVER_RELEASE_DEVICE`, `SYS_PCI_CONFIG_READ`/`WRITE`, `SYS_IO_IN`/`OUT`, `SYS_MMAP_MMIO`, `SYS_DMA_ALLOC`, `SYS_IRQ_REGISTER`/`WAIT`, `SYS_SHM_CREATE`/`ATTACH`) are documented in full — signatures, return values, error codes — in [`13_syscalls.md`](13_syscalls.md#userspace-driver-infrastructure-7788-91); this section covers only the kernel-side privilege model underneath them. Two related mechanisms introduced alongside this infrastructure are documented elsewhere: `PAGE_MMIO_NOFREE` (the PTE bit that stops `SYS_MMAP_MMIO`'s mappings from being handed back to the PMM on unmap/exit) in [`11_memory_management.md`](11_memory_management.md#page-table-hierarchy), and the shared-memory primitive `SYS_SHM_CREATE`/`ATTACH` backs, used for bulk IPC too large for the 96-byte mailbox, in [`11_memory_management.md`](11_memory_management.md#shared-memory-sys_shm_create--sys_shm_attach).
+
+`netd` and `soundd` (`lufira-packages/daemons/`) are, as of v0.9.5, the only consumers of this infrastructure — see [Network Drivers](#network-drivers-rtl8139--e1000--e1000e) and [Audio Drivers](#audio-drivers-ac97--intel-hda) below for how each one actually uses it, and [`16_networking.md`](16_networking.md)/[`18_gui_wm.md`](18_gui_wm.md) for the daemon-registration syscalls (`SYS_NETD_REGISTER`/`SYS_SOUNDD_REGISTER`, and the pre-existing `SYS_WM_REGISTER`, now also root-only) that gate who's allowed to *be* the trusted process on the other end of `SYS_NET_FETCH`/`SYS_SOUND_*`/`SYS_WIN_*`.
 
 ---
 
 ## Audio Drivers (AC’97 / Intel HDA)
+
+**As of v0.9.5, neither driver lives in the kernel.** Both were ported into one userspace daemon, `soundd` (`lufira-packages/daemons/soundd.c`, a single file holding both backends plus the dispatcher), as part of moving sound out of the kernel binary — see [Userspace Driver Infrastructure](#userspace-driver-infrastructure) below. The hardware-level detail below is unchanged from the kernel-resident drivers except for *how* each one reaches the hardware: `sys_driver_claim_device_by_class(0x04, 0x01, &dev)`/`sys_driver_claim_device_by_class(0x04, 0x03, &dev)` instead of `pci_find_class()` (by class/subclass rather than exact vendor/device id, since AC'97/HDA controllers vary by vendor but the class is stable), `io_in8/16/32`/`io_out8/16/32` and `mmio_read32`/`mmio_write32` (`soundd.c`'s own thin wrappers over `sys_io_in/out()`/`sys_mmap_mmio()`) instead of raw port/MMIO access, and `sys_dma_alloc()` instead of `pmm_alloc_page()` for DMA buffers.
 
 ### AC’97 Audio Driver
 
@@ -361,7 +395,7 @@ The AC’97 driver supports Intel ICH‑compatible audio controllers (PCI class 
 - **Mixer control** – volume, sample rate, and codec information.
 - **DMA‑based PCM playback** – uses a buffer descriptor list (BDL) with up to 32 pages for streaming audio.
 - **Tone generation** – produces simple tones (sine/triangle wave) for beeps and testing.
-- **Polling mode** – currently uses busy‑waiting for DMA completion (interrupts are disabled).
+- **Polling mode** – busy‑waiting for DMA completion (interrupts are disabled, same as every other driver in this project).
 
 ### Hardware Registers
 
@@ -370,15 +404,15 @@ The AC’97 driver supports Intel ICH‑compatible audio controllers (PCI class 
 
 ### DMA Mechanism
 
-- One physical page for the BDL (`ac97_bdl_entry_t[32]`).
+- One physical page for the BDL (`ac97_bdl_entry_t[32]`), from `sys_dma_alloc(1, &phys)`.
 - Each entry points to a 4‑KB DMA buffer (physical address) and specifies the number of 16‑bit samples.
-- The driver allocates DMA pages via `pmm_alloc_page()` to ensure physical memory below 4 GiB.
+- Each DMA buffer is likewise `sys_dma_alloc(1, &phys)` — `soundd` has no concept of "physical memory below 4 GiB" the way the old kernel-side `pmm_alloc_page()` comment did; the syscall just hands back whatever contiguous physical pages the kernel's PMM gives it.
 
 ### Public API
 
 | Function | Description |
 |----------|-------------|
-| `ac97_init()` | Probes PCI, resets controller, initialises codec, allocates DMA buffers. |
+| `ac97_find_controller()`/`ac97_controller_reset()`/`ac97_codec_init()`/`ac97_alloc_dma()` | Claims the controller, resets it, initialises the codec, allocates DMA buffers — called from `soundd`'s `backend_init()`. |
 | `ac97_is_available()` | Returns 1 if the driver successfully initialised. |
 | `ac97_set_volume(uint8_t)` | Sets master volume (0–100). |
 | `ac97_get_volume()` | Returns current volume. |
@@ -386,7 +420,7 @@ The AC’97 driver supports Intel ICH‑compatible audio controllers (PCI class 
 | `ac97_play_pcm_stereo(const int16_t*, uint32_t frames)` | Plays stereo 16‑bit PCM data; blocks until finished. |
 | `ac97_play_tone(uint32_t frequency, uint32_t duration_ms)` | Plays a tone of given frequency and duration. |
 | `ac97_stop()` | Stops any ongoing playback. |
-| `ac97_read_codec(uint8_t reg)` / `ac97_write_codec()` | Direct codec register access. |
+| `ac97_read_codec(uint8_t reg)` / `ac97_write_codec()` | Direct codec register access via `io_in16`/`io_out16`. |
 
 **Limitations:**
 - Only PCM OUT channel is implemented.
@@ -395,23 +429,27 @@ The AC’97 driver supports Intel ICH‑compatible audio controllers (PCI class 
 
 A ring-buffer producer-vs-hardware-`CIV` lookahead cap (`AC97_STREAM_MAX_LOOKAHEAD_PAGES`) bounds worst-case playback latency — previously the producer could race arbitrarily far ahead of the hardware's current-index register, adding noticeable playback delay.
 
-### Intel HDA Audio Driver (`drivers/sound/hda.c`)
+### Intel HDA Audio Driver (`daemons/soundd.c`)
 
-A second audio driver, added for chipsets with no AC’97 emulation at all (common on more modern hardware). Unlike AC’97's I/O-port BARs and simple 8-byte BDL, HDA is an **MMIO** controller with a separate command interface to the codec and a 16-byte BDL using 64-bit addresses. Entirely polled, like every other driver here — no controller interrupts are used, for DMA completion (`SDnSTS.BCIS`) or codec responses alike.
+A second audio backend, for chipsets with no AC’97 emulation at all (common on more modern hardware). Unlike AC’97's I/O-port BARs and simple 8-byte BDL, HDA is an **MMIO** controller (mapped via `sys_mmap_mmio()`) with a separate command interface to the codec and a 16-byte BDL using 64-bit addresses. Entirely polled, like every other driver here — no controller interrupts are used, for DMA completion (`SDnSTS.BCIS`) or codec responses alike.
 
 - **CORB/RIRB** – commands ("verbs") are sent to the codec through the **CORB** (Command Output Ring Buffer) and responses come back through the **RIRB** (Response Input Ring Buffer) — two independent, separately-polled ring buffers rather than a single synchronous register interface.
-- **Codec topology discovery** – `hda_init()` walks the codec's node tree using `Get Parameter`/`Get Connection List Entry` verbs, supporting a direct Pin→DAC connection or up to two hops through a Mixer/Selector; more complex topologies are a clean failure rather than a guess.
+- **Codec topology discovery** – `hda_find_controller()`'s init path walks the codec's node tree using `Get Parameter`/`Get Connection List Entry` verbs, supporting a direct Pin→DAC connection or up to two hops through a Mixer/Selector; more complex topologies are a clean failure rather than a guess.
 - **Sample rate** – quantized to a fixed supported set (8000/11025/16000/22050/32000/44100/48000/88200/96000/176400/192000 Hz, via the format register's BASE/MULT/DIV fields) and rounded to the nearest one — unlike AC’97's continuously adjustable VRA register.
 
-**Fixed bug:** `RIRBCTL`'s interrupt-enable bit (bit 0) was never set at init, so the controller never posted `RINTFL`/advanced its internal RIRB read count — every verb timed out (`[HDA] verb timed out`) regardless of whether PCI IRQs reached the CPU at all, since HDA is fully polled and was never waiting on one. Audio over HDA was effectively a ~1 FPS stutter until this was fixed.
+**Fixed bug (carried over from the pre-v0.9.5 kernel driver, still relevant to the port):** `RIRBCTL`'s interrupt-enable bit (bit 0) must be set at init, or the controller never posts `RINTFL`/advances its internal RIRB read count and every verb times out (`[HDA] verb timed out`) regardless of whether an interrupt would even reach anything, since HDA is fully polled either way.
 
-Public API (`drivers/sound/hda.h`): `hda_init()`, `hda_is_available()`, `hda_set_volume()`/`hda_get_volume()`, `hda_set_sample_rate()`/`hda_get_sample_rate()`, `hda_play_pcm_stereo(const int16_t *samples, uint32_t frames)`, `hda_play_tone(uint32_t frequency, uint32_t duration_ms)`, `hda_stop()` — same shape as the AC’97 API above.
+**Fixed bug (v0.9.5, continuous playback):** HDA's player previously re-armed one short buffer descriptor per `hda_play_pcm_stereo()` call, so Doom's "send one slice per game frame" calling pattern produced audible beeps rather than continuous sound. The port to `soundd` rewrote the HDA player around the same continuous-ring-buffer design AC'97 already used, fixing continuous playback over HDA.
 
-**Known issue:** Doom's audio over HDA is reduced to short beeps rather than continuous playback — a separate, not-yet-root-caused issue from the verb-timeout bug above.
+Public API (`daemons/soundd.c`'s internal `hda_*` functions, dispatched through the same `backend_*` shape as AC'97): `hda_find_controller()`, `hda_is_available()`, `hda_set_volume()`/`hda_get_volume()`, `hda_set_sample_rate()`/`hda_get_sample_rate()`, `hda_play_pcm_stereo(const int16_t *samples, uint32_t frames)`, `hda_play_tone(uint32_t frequency, uint32_t duration_ms)`, `hda_stop()` — same shape as the AC’97 API above.
 
 ### Driver Selection
 
-`sound.c` is the dispatcher both drivers sit behind: `sound_init()` tries `hda_init()` first, then falls back to `ac97_init()`. `LufiraOS-Builder`'s `--audio ac97|hda|none` picks which controller a QEMU run presents (see [`05_build_system.md`](05_build_system.md)).
+`soundd.c`'s `backend_init()` is the dispatcher both drivers sit behind: it tries `hda_find_controller()` first, then falls back to AC'97. `LufiraOS-Builder`'s `--audio ac97|hda|none` picks which controller a QEMU run presents (see [`05_build_system.md`](05_build_system.md)); `--driver soundd` (or `--no-drivers`) controls whether the `soundd` daemon itself is even built into the image.
+
+### Kernel-Side PCM Relay (`sound_ring_write()`/`SYS_SOUND_CONSUME`)
+
+`SYS_SOUND_PLAY_PCM` is the one piece of this subsystem that still touches the kernel directly, rather than relaying through `service_call()` like `SYS_SOUND_INFO`/`SET_VOLUME`/`STOP` do: PCM data (kilobytes per call) doesn't fit the 96-byte mailbox `service_call()` is built on. The caller writes into a kernel-resident ring buffer (`sound_ring_write()`, `syscall.c`), and `soundd` drains it with `SYS_SOUND_CONSUME` (a short, bounded-timeout read from its own main loop, so draining the PCM ring doesn't starve its control-plane mailbox — see [`13_syscalls.md`](13_syscalls.md#sound-and-network-daemons-8990-9295)) and hands whatever it got to `backend_stream_write()`.
 
 ---
 
@@ -429,8 +467,8 @@ Drivers are initialised in a specific order, driven by two hard constraints: som
 8. **xHCI/USB** – `xhci_init()`, before legacy PS/2 (USB HID is the more likely real input source; PS/2 is the fallback).
 9. **Keyboard** – `keyboard_init()`, IRQ1 unmasked immediately after.
 10. **Mouse** – `mouse_init()`, IRQ12 unmasked immediately after.
-11. **Network** – `net_init()` (RTL8139/e1000/e1000e probe chain plus static-IP fallback), then a bounded DHCP attempt (`dhcp_start()`) if a NIC was found.
-12. **Audio** – `sound_init()` tries HDA first, then AC’97.
+11. **Network** – *(as of v0.9.5)* no longer initialised in the kernel at all. `spawn_daemon_process("netd", "/bin/netd.elf")` starts the daemon, which itself claims a NIC (`SYS_DRIVER_CLAIM_DEVICE`, trying RTL8139/e1000/e1000e in turn), attempts DHCP, and registers via `SYS_NETD_REGISTER` — all from inside its own process, after the kernel has moved on. See [Network Drivers](#network-drivers-rtl8139--e1000--e1000e) and [`16_networking.md`](16_networking.md).
+12. **Audio** – *(as of v0.9.5)* likewise no longer initialised in the kernel. `spawn_daemon_process("soundd", "/bin/soundd.elf")` starts the daemon, which claims HDA or AC'97 (`SYS_DRIVER_CLAIM_DEVICE_BY_CLASS`, HDA tried first — the same preference order the kernel's old `sound_init()` used) and registers via `SYS_SOUNDD_REGISTER`. See [Audio Drivers](#audio-drivers-ac97--intel-hda).
 
 Interrupt handlers are registered in the IDT before enabling IRQs. See [`02_kernel_init.md`](02_kernel_init.md) for the complete, authoritative boot order.
 
@@ -438,12 +476,12 @@ Interrupt handlers are registered in the IDT before enabling IRQs. See [`02_kern
 
 ## Conclusion
 
-The LufiraOS driver subsystem provides a solid foundation for basic hardware interaction. The modular design and clear APIs make it easy to add new devices or improve existing ones. The console driver alone is powerful enough for debugging and shell interaction, while the audio, USB, and networking drivers add a full complement of I/O to the system.
+The LufiraOS driver subsystem provides a solid foundation for basic hardware interaction. The modular design and clear APIs make it easy to add new devices or improve existing ones. The console driver alone is powerful enough for debugging and shell interaction, while the storage and USB drivers add a full complement of local I/O to the system. **As of v0.9.5, audio and networking are no longer part of that kernel-resident set** — both moved, hardware-level logic intact, into two userspace daemons (`netd`/`soundd`) running on top of a new PCI-device-claim privilege model ([Userspace Driver Infrastructure](#userspace-driver-infrastructure)) that replaces the old "any root process can touch any hardware" assumption with one scoped to whichever process actually claimed a given device.
 
-For more details, please refer to the source code and comments in each driver directory.
+For more details, please refer to the source code and comments in each driver directory, and to `lufira-packages/daemons/netd/`/`daemons/soundd.c` for the drivers that used to live here.
 
 ---
 
-**Document Version:** 2.0
-**Last Updated:** September 2026
+**Document Version:** 3.0
+**Last Updated:** October 2026
 **Project:** LufiraOS

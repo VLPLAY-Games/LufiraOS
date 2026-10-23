@@ -22,10 +22,12 @@ This document describes the system call interface of LufiraOS. System calls prov
    - [Privileged System Control (31–40)](#privileged-system-control-3140)
    - [USB Mass Storage (41–44)](#usb-mass-storage-4144)
    - [Polling, Signals, Alarms (45–49)](#polling-signals-alarms-4549)
-   - [GUI / Window Manager (50–62, 71)](#gui--window-manager-5062-71)
+   - [GUI / Window Manager (50–62, 71, 96)](#gui--window-manager-5062-71-96)
    - [Generic IPC (57–59)](#generic-ipc-5759)
    - [Miscellaneous (65–66)](#miscellaneous-6566)
    - [Hardware / Sound / Network (67–76)](#hardware--sound--network-6776)
+   - [Userspace Driver Infrastructure (77–88, 91)](#userspace-driver-infrastructure-7788-91)
+   - [Sound and Network Daemons (89–90, 92–95)](#sound-and-network-daemons-8990-9295)
 6. [Calling Convention](#calling-convention)
 7. [Error Handling](#error-handling)
 8. [Dependencies](#dependencies)
@@ -35,19 +37,20 @@ This document describes the system call interface of LufiraOS. System calls prov
 
 ## Overview
 
-System calls provide the interface between user-mode programs and the kernel. As of v0.9.0 there are **75 implemented syscalls** (numbers 0–76; 63 and 64 are explicitly retired and unused — see [System Call Table](#system-call-table)), up from 65 at v0.8.0 and 27 at v0.6.0. They let user programs:
+System calls provide the interface between user-mode programs and the kernel. As of v0.9.5 there are **95 implemented syscalls** (numbers 0–96; 63 and 64 are explicitly retired and unused — see [System Call Table](#system-call-table)), up from 75 at v0.9.0, 65 at v0.8.0, and 27 at v0.6.0. They let user programs:
 
 - Perform file and directory operations (open, close, read, write, seek, pipe, mkdir, rmdir, unlink, readdir, dup2).
-- Manage memory (`mmap`/`munmap`, anonymous only).
-- Manage processes (fork, exec with real `argv`/`envp`, wait, kill/signals, sleep, foreground tracking for Ctrl+C).
+- Manage memory (`mmap`/`munmap`, anonymous only — as of v0.9.5 freed virtual address ranges are reclaimed by a free-list instead of being lost to a forever-growing bump pointer; see [`11_memory_management.md`](11_memory_management.md#process-memory-mapping-mmap--munmap)).
+- Manage processes (fork, exec with real `argv`/`envp`, wait, kill/signals — `SYS_KILL` is ownership-checked since v0.9.5, see [Process Operations](#process-operations) — sleep, foreground tracking for Ctrl+C).
 - Query and change identity/permissions (getuid, getgid, chmod, chown, su, useradd, groupadd, passwd) and the working directory (getcwd, chdir).
 - Query system information (PID, timer ticks, memory/CPU/process stats).
 - Drive privileged system control (mount/unmount — now auto-detecting FAT/ext2/exFAT, reboot, shutdown, developer mode).
-- Talk to USB Mass Storage devices directly (count/info/read/write).
-- Build and drive a GUI: create/manipulate windows, poll input events, register (and, since v0.9.0, unregister) as the window manager, and present framebuffer contents (syscalls 50–62, 71).
+- Talk to USB Mass Storage devices directly (count/info/read/write — both read and write are root-only as of v0.9.5, see [USB Mass Storage](#usb-mass-storage-4144)).
+- Build and drive a GUI: create/manipulate windows, poll input events, register (root-only since v0.9.5) and unregister as the window manager, present framebuffer contents, and (v0.9.5) mark a window region dirty as a partial-repaint hint (syscalls 50–62, 71, 96).
 - Exchange small messages between arbitrary (not just related) processes via a generic per-process mailbox (`SYS_IPC_SEND`/`SYS_IPC_RECV`).
-- Fetch a URL over the network in one blocking call, including DNS, TCP/TLS, and HTTP response parsing (`SYS_NET_FETCH`), send a single ICMP echo (`SYS_PING`), and read/write the network interface's static configuration (`SYS_NET_CONFIG_GET`/`SYS_NET_CONFIG_SET`).
-- Read the CMOS real-time clock (`SYS_RTC_GETTIME`), query/drive the sound driver (`SYS_SOUND_INFO`/`SYS_SOUND_SET_VOLUME`/`SYS_SOUND_PLAY_PCM`/`SYS_SOUND_STOP`), and read back the live kernel's own version/build info (`SYS_OS_VERSION`) — all v0.9.0 additions.
+- Fetch a URL over the network in one blocking call (`SYS_NET_FETCH`) or as an open/read-chunk/close stream (`SYS_NET_FETCH_OPEN`/`_READ`/`_CLOSE`, v0.9.5), send a single ICMP echo (`SYS_PING`), and read/write the network interface's static configuration (`SYS_NET_CONFIG_GET`/`SYS_NET_CONFIG_SET`) — as of v0.9.5 all of these relay to the userspace `netd` daemon rather than calling a kernel-resident network stack (see [`16_networking.md`](16_networking.md)).
+- Read the CMOS real-time clock (`SYS_RTC_GETTIME`), query/drive the sound output (`SYS_SOUND_INFO`/`SYS_SOUND_SET_VOLUME`/`SYS_SOUND_PLAY_PCM`/`SYS_SOUND_STOP` — relayed to the userspace `soundd` daemon since v0.9.5), and read back the live kernel's own version/build info (`SYS_OS_VERSION`).
+- Claim a PCI device and talk to it directly from userspace — config space, port I/O, MMIO, DMA, IRQs (syscalls 77–88, 91, v0.9.5) — and register as one of the two privileged hardware daemons, `netd`/`soundd` (syscalls 89, 92, v0.9.5). See [Userspace Driver Infrastructure](#userspace-driver-infrastructure-7788-91) and [`07_drivers.md`](07_drivers.md).
 - Control system behaviour (yield CPU, exit).
 
 **Design Philosophy:**
@@ -189,10 +192,30 @@ The system call table is an array of function pointers indexed by system call nu
 | 74 | `SYS_OS_VERSION` | Query the running kernel's version and build date/time |
 | 75 | `SYS_NET_CONFIG_GET` | Read the network interface's current IP/netmask/gateway/MAC/link state |
 | 76 | `SYS_NET_CONFIG_SET` | Set the network interface's static IP/netmask/gateway |
+| 77 | `SYS_DRIVER_CLAIM_DEVICE` | Claim a PCI device by vendor/device id (root only) |
+| 78 | `SYS_DRIVER_RELEASE_DEVICE` | Release a previously claimed PCI device |
+| 79 | `SYS_PCI_CONFIG_READ` | Read PCI config space of a device the caller has claimed |
+| 80 | `SYS_PCI_CONFIG_WRITE` | Write PCI config space of a device the caller has claimed |
+| 81 | `SYS_IO_IN` | Read an I/O port within a claimed device's I/O BAR |
+| 82 | `SYS_IO_OUT` | Write an I/O port within a claimed device's I/O BAR |
+| 83 | `SYS_MMAP_MMIO` | Map a claimed device's memory BAR into the caller's address space |
+| 84 | `SYS_DMA_ALLOC` | Allocate physically-contiguous, DMA-usable pages |
+| 85 | `SYS_IRQ_REGISTER` | Claim a hardware IRQ line belonging to a claimed device |
+| 86 | `SYS_IRQ_WAIT` | Block until the claimed IRQ line next fires |
+| 87 | `SYS_SHM_CREATE` | Create a named shared-memory region for bulk IPC |
+| 88 | `SYS_SHM_ATTACH` | Attach to a shared-memory region created by another process |
+| 89 | `SYS_SOUNDD_REGISTER` | Register the caller as the system's one sound daemon (root only) |
+| 90 | `SYS_SOUND_CONSUME` | Dequeue PCM frames from the kernel-side sound ring (soundd only) |
+| 91 | `SYS_DRIVER_CLAIM_DEVICE_BY_CLASS` | Claim a PCI device by class/subclass (root only) |
+| 92 | `SYS_NETD_REGISTER` | Register the caller as the system's one network daemon (root only) |
+| 93 | `SYS_NET_FETCH_OPEN` | Open a streaming fetch of a URL (headers only, connection stays open) |
+| 94 | `SYS_NET_FETCH_READ` | Read the next chunk of an open streaming fetch |
+| 95 | `SYS_NET_FETCH_CLOSE` | Close a streaming fetch (idempotent) |
+| 96 | `SYS_WIN_MARK_DIRTY` | Partial-dirty hint: mark a window region for the WM's next repaint |
 
-All 75 are implemented — there are no remaining stubs. 63 and 64 are not stubs either; they are permanently retired (see their description under [Miscellaneous](#miscellaneous-6566)).
+All 95 are implemented — there are no remaining stubs. 63 and 64 are not stubs either; they are permanently retired (see their description under [Miscellaneous](#miscellaneous-6566)).
 
-**On the syscall count itself:** `syscall_init()` (`kernel/system/syscall/syscall.c`) still prints a single hand-maintained number via `DLOG("[SYSCALL] %d system calls registered\n", ...)` rather than deriving it from `syscall.h` — there is no `SYS_COUNT`/`NUM_SYSCALLS` constant, just a comment next to the registration code noting that it has to be bumped by hand whenever a syscall is added. This is exactly the class of bug the v0.9.0 changelog's "Debug mode printed a stale syscall count" fix addressed (it had drifted to `27`, then `45`, while `65+` were actually registered) — and, true to the "no single source of truth" diagnosis in that same fix, the number has since drifted again: as of this writing the source prints `67`, while the table above shows the real total is **75** (numbers 0–76, minus retired 63/64). Treat the table in this document, not the boot-log line, as authoritative.
+**On the syscall count itself:** `syscall_init()` (`kernel/system/syscall/syscall.c`) still prints a single hand-maintained number via `DLOG("[SYSCALL] %d system calls registered\n", ...)` rather than deriving it from `syscall.h` — there is no `SYS_COUNT`/`NUM_SYSCALLS` constant, just a comment next to the registration code noting that it has to be bumped by hand whenever a syscall is added. This is exactly the class of bug the v0.9.0 changelog's "Debug mode printed a stale syscall count" fix addressed (it had drifted to `27`, then `45`, while `65+` were actually registered) — and, true to the "no single source of truth" diagnosis in that same fix, the number has since drifted *again*: as of this writing the source prints `75` (the v0.9.0 total), while the table above shows the real total is **95** (numbers 0–96, minus retired 63/64). Treat the table in this document, not the boot-log line, as authoritative.
 
 ---
 
@@ -240,15 +263,15 @@ All 75 are implemented — there are no remaining stubs. 63 and 64 are not stubs
 
 **SYS_MMAP (9)**
 - **Signature:** `long sys_mmap(void *addr, unsigned long length, int prot, int flags, int fd)`
-- **Description:** Maps `length` bytes of zero-filled anonymous memory. `MAP_ANONYMOUS` is required; `MAP_FIXED` and file-backed mappings (a real `fd`) are not supported. `addr`/`fd` are ignored. Pages are allocated and mapped **eagerly** — there is no demand-paging path — with `PROT_EXEC` absent mapping to the NX bit. Up to `MAX_MMAP_REGIONS` (32) concurrent regions per process; the virtual address space is a per-process bump allocator starting at `MMAP_AREA_START` that never reclaims space after `munmap()`.
-- **Returns:** Base address of the new mapping, or `(uint64_t)-1` on failure (bad flags, no free region slot, or out of physical memory — in which case any pages already mapped for this call are rolled back).
-- **Implementation:** `pmm_alloc_page()` + `map_page_in_pml4()` per page, in `sys_mmap()`.
+- **Description:** Maps `length` bytes of zero-filled anonymous memory. `MAP_ANONYMOUS` is required; `MAP_FIXED` and file-backed mappings (a real `fd`) are not supported. `addr`/`fd` are ignored. Pages are allocated and mapped **eagerly** — there is no demand-paging path — with `PROT_EXEC` absent mapping to the NX bit. Up to `MAX_MMAP_REGIONS` (32) concurrent regions per process. **As of v0.9.5**, the virtual address range itself comes from a per-process free-list (`mmap_alloc_va()`/`mmap_free_va()`, `syscall.c`) rather than a bump pointer that only ever grew — a range freed by `munmap()` is pushed onto the free list and reused (first-fit, with splitting) by the *next* call to any of `SYS_MMAP`/`SYS_MMAP_MMIO`/`SYS_DMA_ALLOC`/`SYS_SHM_CREATE`/`SYS_SHM_ATTACH`, which all share the same allocator and the same `next_mmap_addr` bump pointer as a fallback once the free list is empty. See [`11_memory_management.md`](11_memory_management.md#process-memory-mapping-mmap--munmap).
+- **Returns:** Base address of the new mapping, or `(uint64_t)-1` on failure (bad flags, no free region slot, or out of physical memory — in which case any pages already mapped for this call are rolled back, including returning the VA range to the free list).
+- **Implementation:** `mmap_alloc_va()` for the address range, then `pmm_alloc_page()` + `map_page_in_pml4()` per page, in `sys_mmap()`.
 
 **SYS_MUNMAP (10)**
 - **Signature:** `long sys_munmap(void *addr, unsigned long length)`
-- **Description:** Unmaps a region. `addr`/`length` must **exactly** match a region previously returned by `mmap()` — there is no partial/sub-range unmap.
+- **Description:** Unmaps a region. `addr`/`length` must **exactly** match a region previously returned by `mmap()` (or `SYS_MMAP_MMIO`/`SYS_DMA_ALLOC`/`SYS_SHM_CREATE`/`SYS_SHM_ATTACH`) — there is no partial/sub-range unmap. As of v0.9.5, the freed `(addr, length)` range is pushed onto the process's VA free-list (`mmap_free_va()`) for reuse by a later allocation, rather than simply discarded.
 - **Returns:** `0` on success, `-1` if no exact match was found.
-- **Implementation:** `unmap_page()` per page (which also frees the physical frame), in `sys_munmap()`.
+- **Implementation:** `unmap_page()` per page (which also frees the physical frame, unless the page is `PAGE_MMIO_NOFREE` — see `SYS_MMAP_MMIO` below), then `mmap_free_va()`, in `sys_munmap()`.
 
 ### Process Operations
 
@@ -296,9 +319,9 @@ All 75 are implemented — there are no remaining stubs. 63 and 64 are not stubs
 
 **SYS_KILL (17)**
 - **Signature:** `long sys_kill(long pid, int sig)`
-- **Description:** Sends a signal to a process (`sig == 0` defaults to `SIGTERM`). `SIGINT`/`SIGTERM` can be caught via `SYS_SIGACTION` (see [Polling, Signals, Alarms](#polling-signals-alarms-4549)); other signals still only have their default action.
-- **Returns:** `0` on success, `-1` if the process was not found.
-- **Implementation:** Calls `process_signal(pid, sig)`.
+- **Description:** Sends a signal to a process (`sig == 0` defaults to `SIGTERM`). `SIGINT`/`SIGTERM` can be caught via `SYS_SIGACTION` (see [Polling, Signals, Alarms](#polling-signals-alarms-4549)); other signals still only have their default action. **As of v0.9.5, ownership-checked:** the caller must be root or share the target process's `uid` — before this fix, any process could signal (including `SIGKILL`) any other pid, the same class of gap chmod/chown already guard against for files.
+- **Returns:** `0` on success, `-EPERM` if the caller is neither root nor the target's owner, `-1` if the process was not found.
+- **Implementation:** `process_find_by_pid()` + a `uid` check, then `process_signal(pid, sig)`.
 
 ### Filesystem / Identity
 
@@ -440,8 +463,8 @@ Direct raw-block access to USB Mass Storage devices, independent of the FAT moun
 
 **SYS_USB_READ (43) / SYS_USB_WRITE (44)**
 - **Signature:** `long sys_usb_read(long index, unsigned long lba, void *buf, unsigned long buf_size)` / `long sys_usb_write(long index, unsigned long lba, const void *buf, unsigned long buf_size)`
-- **Description:** Read/write exactly one block at LBA `lba`. `buf_size` must be at least the device's real block size (same pattern as `SYS_MEMINFO`/`SYS_STATFS` with their struct-size checks) or the call fails with `-EINVAL`. Writing is root-only — direct LBA writes are irreversible and can corrupt a filesystem mounted on the same device via `SYS_MOUNT`.
-- **Returns:** `0`/bytes on success; `-EINVAL` for a too-small buffer, `-1` for other device errors, `-EPERM` for `SYS_USB_WRITE` from a non-root caller.
+- **Description:** Read/write exactly one block at LBA `lba`. `buf_size` must be at least the device's real block size (same pattern as `SYS_MEMINFO`/`SYS_STATFS` with their struct-size checks) or the call fails with `-EINVAL`. **Both are root-only.** Writing always was — direct LBA writes are irreversible and can corrupt a filesystem mounted on the same device via `SYS_MOUNT`. **Reading became root-only in v0.9.5**: raw LBA reads go around the filesystem permission model entirely, so an unprivileged process could previously read any data off a device mounted elsewhere under someone else's permissions.
+- **Returns:** `0`/bytes on success; `-EINVAL` for a too-small buffer, `-1` for other device errors, `-EPERM` for a non-root caller (either syscall).
 
 ---
 
@@ -469,7 +492,7 @@ Added in the "v0.8 bridge" stage specifically so the window manager (and any ord
 
 ---
 
-### GUI / Window Manager (50–62, 71)
+### GUI / Window Manager (50–62, 71, 96)
 
 Full architectural detail — the mailbox IPC primitive underneath, the client/WM RPC protocol, and a pointer to the actual window-manager implementation — is in [`18_gui_wm.md`](18_gui_wm.md). This section only documents each syscall's own contract. As of v0.8, the window manager is an ordinary userspace process (`lufira-packages/apps/wm.c`), not kernel code — every `SYS_WIN_*` call here is a thin RPC wrapper: pack a request, `mailbox_send()` it to the registered WM's PID, block for the reply. The syscall *signatures* are unchanged from the WM's original (now-removed) kernel-resident implementation, so no client code (`libc`'s `gui_widgets.c`, any GUI app) had to change across that move.
 
@@ -500,8 +523,13 @@ Full architectural detail — the mailbox IPC primitive underneath, the client/W
 
 **SYS_WM_REGISTER (59)**
 - **Signature:** `long sys_wm_register(void)`
-- **Description:** Makes the caller the system's **one** window server. Every subsequent `SYS_WIN_*` call and all raw keyboard/mouse input get routed to this PID's mailbox from then on, and only this PID gets access to `SYS_FB_PRESENT`.
-- **Returns:** `0` on success, `-1` if someone else is already registered.
+- **Description:** Makes the caller the system's **one** window server. Every subsequent `SYS_WIN_*` call and all raw keyboard/mouse input get routed to this PID's mailbox from then on, and only this PID gets access to `SYS_FB_PRESENT`. **Root-only as of v0.9.5** — `process_wm_register()` itself only ever guarded against a *second* registration, not against *who* registers first; an unprivileged process that won the race to call this before the real `wm.elf` started could hijack the WM role for every client on the system. Now the same root-only model as `SYS_NETD_REGISTER`/`SYS_SOUNDD_REGISTER`.
+- **Returns:** `0` on success, `-EPERM` if the caller isn't root, `-1` if someone else is already registered.
+
+**SYS_WIN_MARK_DIRTY (96)**
+- **Signature:** `long sys_win_mark_dirty(int window_id, int x, int y, unsigned int w, unsigned int h)`
+- **Description:** Added in v0.9.5 as the kernel-side half of a partial-repaint hint for the GUI (see [`18_gui_wm.md`](18_gui_wm.md#partial-repaint-dirty-rect-compositing)). `x`/`y`/`w`/`h` are client-area-relative, same convention as `SYS_WIN_DRAW_RECT`. Relayed to the WM as `WM_OP_WIN_MARK_DIRTY`, which calls the WM's own pre-existing `mark_dirty_rect()` without drawing anything — it only *extends* the window's accumulated dirty region for the WM's next present; the actual pixels are still drawn through the ordinary `SYS_WIN_FILL`/`DRAW_RECT`/`DRAW_TEXT` calls (each of which already marks its own area dirty automatically). Intended for a future batched/direct-rendering client model (targeted at 1.0); no shipping client calls it yet as of v0.9.5.
+- **Returns:** `0` on success, `-1` if `window_id` doesn't belong to the caller.
 
 **SYS_WM_UNREGISTER (71)**
 - **Signature:** `long sys_wm_unregister(void)`
@@ -554,19 +582,21 @@ These existed only in the GUI subsystem's first (kernel-resident) cut, when the 
 
 **SYS_NET_FETCH (66)**
 - **Signature:** `long sys_net_fetch(const char *url, void *out_buf, unsigned long out_cap, int *status_out)`
-- **Description:** The package manager's (`dlpg sync`/`upgrade`, see [`17_package_manager.md`](17_package_manager.md)) only network syscall, and currently its only caller. Not a raw socket API (no separate `SEND`/`RECV`/`CONNECT`) — one call does URL parsing (scheme/host/port/path), DNS resolution if the host isn't a literal IP, TCP, TLS 1.2 for `https://`, and full HTTP response parsing (including chunked transfer-encoding) via `http_fetch()` (`kernel/net/http_client.c`). Full protocol detail is in [`16_networking.md`](16_networking.md).
+- **Description:** The package manager's (`dlpg sync`/`upgrade`, see [`17_package_manager.md`](17_package_manager.md)) network syscall for a one-shot whole-body fetch (see `SYS_NET_FETCH_OPEN`/`_READ`/`_CLOSE` below for the v0.9.5 streaming alternative `dlpg install`/`update` now use instead). Not a raw socket API (no separate `SEND`/`RECV`/`CONNECT`) — one call does URL parsing (scheme/host/port/path), DNS resolution if the host isn't a literal IP, TCP, TLS 1.2 for `https://`, and full HTTP response parsing (including chunked transfer-encoding). **As of v0.9.5, this syscall no longer calls a kernel-resident network stack at all** — `kernel/net/` was removed; the kernel relays the request via `service_call()` to the userspace `netd` daemon (`lufira-packages/daemons/netd/`, registered via `SYS_NETD_REGISTER`), which does the actual `http_fetch()` (`http_client.c`) over the driver-claim syscalls (see [Userspace Driver Infrastructure](#userspace-driver-infrastructure-7788-91)). The response body (which can be megabytes) doesn't fit the 96-byte mailbox, so the kernel creates a shared-memory region sized to `out_cap` (`shm.c`) and passes its id in the request; `netd` attaches it (`SYS_SHM_ATTACH`), writes `http_fetch()`'s output directly into it, and detaches before replying — the kernel then reads the finished bytes straight out of the shared physical pages via `phys_to_virt()`. The syscall's signature, blocking behavior, and error codes are all unchanged by this move. Full protocol detail is in [`16_networking.md`](16_networking.md).
 
   `out_buf`/`out_cap` receive the response **body only** (no status line/headers). `status_out` (may be `NULL`) receives the HTTP status code if parsing got that far, regardless of whether it's 2xx — a 404 is a successful fetch of a 404 body, not a `sys_net_fetch()` error.
 
-  **Security note on `https://` (stated plainly, not buried):** the TLS client verifies the ServerKeyExchange signature against the key in the certificate the server itself presented — this defeats a naive/passive on-path attacker with no valid key for any certificate at all. It does **not** validate the certificate chain against any trusted root CA, because **there is no bundled set of trusted root certificates in this OS at all.** An attacker able to intercept the connection and present their own self-signed certificate (with a key they control) passes this check. This is a deliberate, documented scope limitation — a full chain validation would need an embedded root-CA trust store, X.509 extension parsing, and hostname-to-certificate matching — not an oversight; the exact same wording appears in the kernel's own `tls.c` and `syscall.h` comments. Do not rely on this for anything where a real MITM is a credible threat.
+  **Security note on `https://` (stated plainly, not buried):** the TLS client verifies the ServerKeyExchange signature against the key in the certificate the server itself presented — this defeats a naive/passive on-path attacker with no valid key for any certificate at all. It does **not** validate the certificate chain against any trusted root CA, because **there is no bundled set of trusted root certificates in this OS at all.** An attacker able to intercept the connection and present their own self-signed certificate (with a key they control) passes this check. This is a deliberate, documented scope limitation — a full chain validation would need an embedded root-CA trust store, X.509 extension parsing, and hostname-to-certificate matching — not an oversight; the exact same wording appears in `netd`'s own `tls.c` and in `syscall.h`. Do not rely on this for anything where a real MITM is a credible threat.
 - **Returns:** `>=0` — body length in `out_buf` (`<= out_cap`) on success. Negative error codes distinguish DNS/TCP/TLS/HTTP-parse/`ENOSPC`/no-network-device failures individually (see `http_client.h`'s `HTTP_FETCH_E*` constants, mirrored as `NET_FETCH_E*` in `libc/include/lufira/syscall.h`) rather than a single generic `-1`.
-- **Implementation:** `http_fetch()` (`kernel/net/http_client.c`), called with the caller's validated `url`/`out_buf`.
+- **Implementation:** `service_call()` to `netd`'s PID → `http_fetch()` (`daemons/netd/http_client.c`), writing into the shared-memory region described above.
 
 ---
 
 ### Hardware / Sound / Network (67–76)
 
-All ten added in v0.9.0, following the same pattern as the rest of the post-v0.6.0 syscall surface: each exists so a userspace package that has no business touching a driver directly (`date`, the "Settings" app, `ifconfig`, `ping`, `doomgeneric`) gets a narrow, checked entry point instead. `SYS_WM_UNREGISTER` (71) is also part of this numeric range but is documented under [GUI / Window Manager](#gui--window-manager-5062-71) above, since it's conceptually a WM call, not a hardware one.
+All ten added in v0.9.0, following the same pattern as the rest of the post-v0.6.0 syscall surface: each exists so a userspace package that has no business touching a driver directly (`date`, the "Settings" app, `ifconfig`, `ping`, `doomgeneric`) gets a narrow, checked entry point instead. `SYS_WM_UNREGISTER` (71) is also part of this numeric range but is documented under [GUI / Window Manager](#gui--window-manager-5062-71-96) above, since it's conceptually a WM call, not a hardware one.
+
+**As of v0.9.5**, the sound syscalls (`SYS_SOUND_INFO`/`SET_VOLUME`/`STOP`) and the network syscalls (`SYS_PING`, `SYS_NET_CONFIG_GET`/`SET`) in this range no longer call a kernel-resident driver directly — they relay through `service_call()` (the same mechanism `SYS_NET_FETCH` uses, see above) to whichever userspace daemon registered itself for that role (`soundd`/`netd`, [Sound and Network Daemons](#sound-and-network-daemons-8990-9295) below). `SYS_SOUND_PLAY_PCM` is the one exception that still touches the kernel directly: PCM data is too large for the mailbox `service_call()` relies on, so it's written straight into a kernel-resident ring buffer (`sound_ring_write()`) that `soundd` drains with `SYS_SOUND_CONSUME`. None of these syscalls' signatures, return values, or error codes changed for the calling program — the move is invisible from userspace's point of view except that it now fails cleanly (rather than silently doing nothing) if the relevant daemon was never started.
 
 **SYS_RTC_GETTIME (67)**
 - **Signature:** `long sys_rtc_gettime(void *buf_ptr)`
@@ -575,27 +605,27 @@ All ten added in v0.9.0, following the same pattern as the rest of the post-v0.6
 
 **SYS_SOUND_INFO (68)**
 - **Signature:** `long sys_sound_info(void *buf_ptr)`
-- **Description:** Wrapper over `sound_is_available()`/`sound_get_volume()`/`sound_driver_name()` (`drivers/sound/sound.h`) — `buf_ptr` receives a `lufira_sound_info_t`. Needed by the userspace "Settings" app (`lufira-packages/apps/settings.c`), which, unlike the kernel-native `command_mixer()` (now dead code), has no direct driver access.
-- **Returns:** Always `0` — "no sound hardware present" is a valid answer (`available=0`, `driver="none"`), not an error condition.
+- **Description:** `buf_ptr` receives a `lufira_sound_info_t`. **As of v0.9.5**, relayed via `service_call()` to the registered `soundd` daemon (`lufira-packages/daemons/soundd.c`) rather than calling `sound_is_available()`/`sound_get_volume()`/`sound_driver_name()` directly — `kernel/drivers/sound/` no longer exists. Needed by the userspace "Settings" app (`lufira-packages/apps/settings.c`), which, unlike the kernel-native `command_mixer()` (now dead code), has no direct driver access.
+- **Returns:** Always `0` — "no sound hardware present" is a valid answer (`available=0`, `driver="none"`), not an error condition; `-1` if `soundd` isn't running at all (relay has nothing to reach).
 
 **SYS_SOUND_SET_VOLUME (69)**
 - **Signature:** `long sys_sound_set_volume(unsigned long volume)`
-- **Description:** Sets output volume. `volume` above 100 is silently clamped to 100 — the same behaviour `sound_set_volume()` already has internally.
-- **Returns:** `0` on success, `-1` if no sound driver (HDA/AC'97) is active (see `sound_is_available()`).
+- **Description:** Sets output volume. `volume` above 100 is silently clamped to 100. Relayed to `soundd` via `service_call()` since v0.9.5, same as `SYS_SOUND_INFO` above.
+- **Returns:** `0` on success, `-1` if no sound driver (HDA/AC'97) is active, or if `soundd` isn't running.
 
 **SYS_SOUND_PLAY_PCM (70)**
 - **Signature:** `long sys_sound_play_pcm(const void *buf_ptr, unsigned long frames)`
-- **Description:** Wraps `sound_play_pcm_stereo()` (`drivers/sound/sound.h`). `buf_ptr` points to `frames` interleaved L/R `int16_t` stereo frames (`frames * 4` bytes) — one blocking DMA pass, the same blocking contract as `sound_play_tone()`/`ac97_play_tone()`/`hda_play_tone()`. Its only consumer is the `doomgeneric` port (`lufira-packages/games/doom/platform/`), which sends one already-mixed slice per game frame (~`snd_maxslicetime_ms`, 28 ms); the blocking time roughly matches the game's own frame interval, so it doesn't visibly desynchronize anything — the same tradeoff `SYS_NET_FETCH` already accepts, since this kernel has no threads to hand the blocking work off to.
-- **Returns:** `0` on success, `-1` if no sound driver is active.
+- **Description:** `buf_ptr` points to `frames` interleaved L/R `int16_t` stereo frames (`frames * 4` bytes). **As of v0.9.5**, this is the one sound syscall that does *not* relay via `service_call()` — PCM data (kilobytes per call) doesn't fit the 96-byte mailbox that relay is built on, so the caller instead writes straight into a kernel-resident ring buffer (`sound_ring_write()`, `syscall.c`), which `soundd` drains with `SYS_SOUND_CONSUME` (see [Sound and Network Daemons](#sound-and-network-daemons-8990-9295)) and hands to the actual hardware. The call still blocks — not on DMA completion directly anymore, but on there being free space in the ring, which in practice tracks actual playback closely enough for the same consumer. Its only consumer is the `doomgeneric` port (`lufira-packages/games/doom/platform/`), which sends one already-mixed slice per game frame (~`snd_maxslicetime_ms`, 28 ms).
+- **Returns:** `0` on success, `-1` if no sound driver is active (or no space in the ring and `soundd` isn't draining it).
 
 **SYS_SOUND_STOP (72)**
 - **Signature:** `long sys_sound_stop(void)`
-- **Description:** Wrapper over `sound_stop()` — immediately halts the active channel, including AC'97's ring buffer (`ac97_stream_write()`), which would otherwise keep looping its last-played pages forever. `doomgeneric` calls this from `I_ShutdownSound()` on exit.
+- **Description:** Relayed via `service_call()` to `soundd` since v0.9.5 — immediately halts the active channel and resets the kernel-side PCM ring (so frames queued before the stop don't play on the next `SYS_SOUND_PLAY_PCM`/restart), including AC'97's own ring buffer (`ac97_stream_write()`), which would otherwise keep looping its last-played pages forever. `doomgeneric` calls this from `I_ShutdownSound()` on exit.
 - **Returns:** Always `0` — "no sound" is not an error here either, matching `SYS_SOUND_INFO`.
 
 **SYS_PING (73)**
 - **Signature:** `long sys_ping(unsigned long dst_ip, unsigned long id, unsigned long seq, unsigned long timeout_ms)`
-- **Description:** Sends one ICMP Echo Request and blocks (up to `timeout_ms`) for the matching Echo Reply — `icmp_ping_send()`+`icmp_ping_wait()` (`kernel/net/icmp.c`), called once per syscall rather than looped; the per-packet loop and `"icmp_seq=N: time=Xms"` printing are the caller's job (`lufira-packages/user/ping.c`), the same division of labor the now-dead kernel-native `command_ping()` used internally.
+- **Description:** Sends one ICMP Echo Request and blocks (up to `timeout_ms`) for the matching Echo Reply — `icmp_ping_send()`+`icmp_ping_wait()` (`daemons/netd/icmp.c`, relayed via `service_call()` since v0.9.5 — see [Hardware / Sound / Network](#hardware--sound--network-6776)), called once per syscall rather than looped; the per-packet loop and `"icmp_seq=N: time=Xms"` printing are the caller's job (`lufira-packages/user/ping.c`), the same division of labor the now-dead kernel-native `command_ping()` used internally.
 - **Returns:** RTT in milliseconds (`>=0`) on success; `-1` timeout; `-2` no network device; `-3` send failure (including an ARP timeout on the route); `-4` the network is busy with another `SYS_NET_FETCH`/`SYS_PING` for more than 5 seconds (`net_lock_acquire()` — the same single-connection restriction `SYS_NET_FETCH` has).
 
 **SYS_OS_VERSION (74)**
@@ -605,8 +635,86 @@ All ten added in v0.9.0, following the same pattern as the rest of the post-v0.6
 
 **SYS_NET_CONFIG_GET (75) / SYS_NET_CONFIG_SET (76)**
 - **Signature:** `long sys_net_config_get(void *buf_ptr)` / `long sys_net_config_set(unsigned long ip, unsigned long netmask, unsigned long gateway)`
-- **Description:** `SYS_NET_CONFIG_GET` wraps `net_get_config()`/`rtl8139_found()`/`rtl8139_get_mac()`, filling a `lufira_net_config_t`; `SYS_NET_CONFIG_SET` wraps `net_set_config()`, leaving `dns_server` untouched (the same convention the now-dead kernel-native `command_ifconfig()` used — it also always passed the existing `net_get_config()->dns_server` through unchanged as its third argument). Both back the userspace `ifconfig` package, which has no direct driver access (unlike the old kernel-native `command_ifconfig()`, `kernel/shell/commands/net.c`, now dead code).
+- **Description:** `SYS_NET_CONFIG_GET` wraps `net_get_config()`/`rtl8139_found()`/`rtl8139_get_mac()` (now inside `netd`, relayed via `service_call()` since v0.9.5 — see [Hardware / Sound / Network](#hardware--sound--network-6776)), filling a `lufira_net_config_t`; `SYS_NET_CONFIG_SET` wraps `net_set_config()`, leaving `dns_server` untouched (the same convention the now-dead kernel-native `command_ifconfig()` used — it also always passed the existing `net_get_config()->dns_server` through unchanged as its third argument). Both back the userspace `ifconfig` package, which has no direct driver access (unlike the old kernel-native `command_ifconfig()`, `kernel/shell/commands/net.c`, now dead code).
 - **Returns:** Always `0` for both — "no NIC present" (`link_up=0`) is a valid `SYS_NET_CONFIG_GET` answer, not an error, the same style as `SYS_SOUND_INFO`.
+
+---
+
+### Userspace Driver Infrastructure (77–88, 91)
+
+All twelve added in v0.9.5, backing the move of sound and networking out of the kernel binary (see [`07_drivers.md`](07_drivers.md) and [`16_networking.md`](16_networking.md)). Before this, the only privilege check for touching hardware at all was `uid == 0` — any root process could read/write any PCI config space, any I/O port, any MMIO region. That's too coarse once `netd`/`soundd` are ordinary (if trusted) userspace processes rather than kernel code: the model here adds an explicit **claim** step (`kernel/system/driver/driver.c`/`.h`) — a process must claim a specific PCI device before any config-space, port-I/O, MMIO, or IRQ syscall touching it is allowed, and then only within that device's own bounds. `MAX_DRIVER_CLAIMS` (8) caps concurrently-claimed devices system-wide, not per process; `driver_release_process()` drops all of a process's claims and IRQ registrations automatically on exit (`process_exit()`/signal-driven termination), so a crashed daemon doesn't permanently lock a device away from the next one that starts.
+
+**SYS_DRIVER_CLAIM_DEVICE (77) / SYS_DRIVER_CLAIM_DEVICE_BY_CLASS (91)**
+- **Signature:** `long sys_driver_claim_device(uint16_t vendor_id, uint16_t device_id, struct lufira_pci_device *out)` / `long sys_driver_claim_device_by_class(uint8_t class_code, uint8_t subclass, struct lufira_pci_device *out)`
+- **Description:** Root-only. Finds the first PCI device matching the given vendor/device id (77) or class/subclass (91 — needed because the same audio class, e.g. `0x04`/`0x01` for AC'97, is stable across vendors/emulations when the exact device id isn't) that nothing else has claimed yet, records the claim against the caller's pid, and copies the device's full description — including all 6 BARs in one shot, no separate per-BAR syscall — into `*out`.
+- **Returns:** `0` on success (`*out` filled in); `-EPERM` if not root; `-EFAULT` for a bad `out` pointer; `-ENOENT` if no matching unclaimed device exists; `-EAGAIN` if the system-wide claim table (`MAX_DRIVER_CLAIMS`) is full.
+- **Implementation:** `driver_claim_device()`/`driver_claim_device_by_class()` (`driver.c`).
+
+**SYS_DRIVER_RELEASE_DEVICE (78)**
+- **Signature:** `long sys_driver_release_device(uint8_t bus, uint8_t device, uint8_t function)`
+- **Description:** Voluntarily releases a device the caller previously claimed — distinct from the automatic release that already happens at process exit.
+- **Returns:** `0` on success, `-EPERM` if the caller doesn't hold that claim.
+- **Implementation:** `driver_release_device()` (`driver.c`).
+
+**SYS_PCI_CONFIG_READ (79) / SYS_PCI_CONFIG_WRITE (80)**
+- **Signature:** `long sys_pci_config_read(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, unsigned int width, uint32_t *out)` / `long sys_pci_config_write(..., uint32_t value)`
+- **Description:** Reads/writes PCI configuration space of a device the caller has claimed — `driver_owns_device()` is checked first. `width` is 1, 2, or 4 bytes.
+- **Returns:** `0` on success, `-EPERM` if the device isn't claimed by the caller, `-EINVAL` for a bad `width`, `-EFAULT` for a bad pointer (read only).
+- **Implementation:** `driver_owns_device()` then `pci_config_read32()`/`pci_config_write32()` (`pci.c`, now `cli`/`sti`-guarded — see [Fixed in v0.9.5](07_drivers.md)), masked/shifted to `width`.
+
+**SYS_IO_IN (81) / SYS_IO_OUT (82)**
+- **Signature:** `long sys_io_in(uint16_t port, unsigned int width, uint32_t *out)` / `long sys_io_out(uint16_t port, unsigned int width, uint32_t value)`
+- **Description:** Reads/writes an x86 I/O port. The port range `[port, port+width)` must fall entirely inside one I/O BAR of a device the caller has claimed (`driver_io_port_allowed()`) — there is no way to poke an arbitrary, unclaimed port.
+- **Returns:** `0` on success, `-EPERM` if the port isn't inside a claimed I/O BAR, `-EINVAL` for a bad `width`, `-EFAULT` for a bad pointer (read only).
+- **Implementation:** `driver_io_port_allowed()` then `in8/16/32()`/`out8/16/32()`.
+
+**SYS_MMAP_MMIO (83)**
+- **Signature:** `long sys_mmap_mmio(uint64_t phys_addr, uint64_t length)`
+- **Description:** Maps `[phys_addr, phys_addr+length)` into the caller's address space as uncacheable (`PAGE_PCD`) memory — the range must fall entirely inside one memory BAR of a device the caller has claimed (`driver_mmio_allowed()`). Mapped pages carry a new PTE bit, `PAGE_MMIO_NOFREE` (`paging.h`) — added specifically so `SYS_MUNMAP`/process teardown never hand a device's own physical memory back to the PMM, which previously would have been a real bug the moment any MMIO-mapping driver unmapped or exited.
+- **Returns:** Virtual address of the mapping, `(uint64_t)-1` if not claimed/outside any BAR/out of memory for page tables.
+- **Implementation:** `driver_mmio_allowed()` then `mmap_alloc_va()` + `map_page_in_pml4()` with `PAGE_MMIO_NOFREE`.
+
+**SYS_DMA_ALLOC (84)**
+- **Signature:** `long sys_dma_alloc(uint64_t num_pages, uint64_t *phys_out)`
+- **Description:** Allocates `num_pages` **physically contiguous** pages (`pmm_alloc_contiguous_pages()`) and maps them as ordinary cacheable read-write memory into the caller's address space — for devices without scatter-gather that need a single contiguous descriptor ring/buffer. Gated by `driver_is_registered()` (the caller must hold at least one device claim) rather than tied to a specific device, since the memory itself isn't device-specific.
+- **Returns:** Virtual address, `(uint64_t)-1` on failure (not registered, no contiguous run available, or out of memory for page tables). `*phys_out` receives the physical address of the first page.
+- **Implementation:** `driver_is_registered()` then `pmm_alloc_contiguous_pages()` + `mmap_alloc_va()` + `map_page_in_pml4()` per page.
+
+**SYS_IRQ_REGISTER (85) / SYS_IRQ_WAIT (86)**
+- **Signature:** `long sys_irq_register(unsigned int irq_line)` / `long sys_irq_wait(unsigned int irq_line)`
+- **Description:** `SYS_IRQ_REGISTER` claims a hardware IRQ line for the caller — the line must match the `PCI_INTERRUPT_LINE` of a device the caller has already claimed, and can't already be claimed by someone else. `SYS_IRQ_WAIT` then blocks the caller (a real `PROCESS_BLOCKED` wait, not a poll loop — the same primitive `mailbox_recv()` uses) until that line next fires, or returns immediately if a firing already accumulated. `irq_handler()` (`irq.c`) calls `driver_irq_notify()` for any IRQ line with no kernel-native handler (i.e. not 0/1/12), which is a no-op unless that line is actually registered.
+- **Returns:** `SYS_IRQ_REGISTER`: `0` success, `-EPERM` the line doesn't match a claimed device or is already taken, `-EINVAL` bad line number. `SYS_IRQ_WAIT`: `0` on firing, `-EPERM` if the line isn't registered to the caller.
+- **Implementation:** `driver_irq_register()`/`driver_irq_wait()`/`driver_irq_notify()` (`driver.c`).
+
+**SYS_SHM_CREATE (87) / SYS_SHM_ATTACH (88)**
+- **Signature:** `long sys_shm_create(uint64_t num_pages, int32_t *id_out)` / `long sys_shm_attach(int32_t shm_id)`
+- **Description:** A general-purpose bulk-IPC primitive for **unrelated** processes — the 96-byte mailbox is enough for control messages, not Ethernet frames or PCM. `SYS_SHM_CREATE` allocates and zeroes `num_pages`, maps them into the creator's own address space (like a `MAP_SHARED` mmap), registers the region in `shm.c` under a new id written to `*id_out`; the creator passes that id to another process (typically over `SYS_IPC_SEND`), which calls `SYS_SHM_ATTACH` to map the *same* physical pages into its own address space (`shm_add_ref()`). Either side detaches with an ordinary `SYS_MUNMAP(addr, length)` — `unmap_page()` calls `shm_release()` for a `PAGE_MMAP_SHARED` page instead of freeing the physical frame outright, so the region survives until every attacher has detached. `SYS_NET_FETCH`'s shared response buffer (see above) is built on this same mechanism, just created and attached by the kernel/`netd` rather than by two ordinary userspace processes.
+- **Returns:** Virtual address on success, `(uint64_t)-1` on failure (out of memory, or — for `SYS_SHM_ATTACH` — an unknown `shm_id`).
+- **Implementation:** `shm.c`, via `mmap_alloc_va()` + `map_page_in_pml4()` per page.
+
+---
+
+### Sound and Network Daemons (89–90, 92–95)
+
+Six more v0.9.5 additions, specific to the two daemons that now own all sound and network hardware: `soundd` and `netd` (`lufira-packages/daemons/`). Registration is deliberately a separate, root-only step from claiming the underlying PCI device — it's what the rest of the syscall table (`SYS_SOUND_*`/`SYS_NET_*`, see [Hardware / Sound / Network](#hardware--sound--network-6776) above) checks before relaying a request, independent of which specific sound/network chip ended up being claimed underneath.
+
+**SYS_SOUNDD_REGISTER (89) / SYS_NETD_REGISTER (92)**
+- **Signature:** `long sys_soundd_register(void)` / `long sys_netd_register(void)`
+- **Description:** Makes the caller the system's one sound/network daemon — root-only, the same hijacking concern as `SYS_WM_REGISTER` (see [GUI / Window Manager](#gui--window-manager-5062-71-96)): without this, any unprivileged process that registered first could intercept every `SYS_SOUND_*`/`SYS_NET_*` call system-wide.
+- **Returns:** `0` on success, `-EPERM` if not root, `-1` if someone else is already registered.
+- **Implementation:** `process_soundd_register()`/`process_netd_register()` (`process.c`), mirroring `process_wm_register()`.
+
+**SYS_SOUND_CONSUME (90)**
+- **Signature:** `long sys_sound_consume(short *out, unsigned int max_frames, long timeout_ms)`
+- **Description:** `soundd`-only: dequeues up to `max_frames` interleaved stereo frames from the kernel-side PCM ring that `SYS_SOUND_PLAY_PCM` writes into. `timeout_ms` follows the `SYS_IPC_RECV` convention (`<0` block indefinitely, `0` return immediately if empty, `>0` wait up to that long) — a short timeout rather than an indefinite block, since `soundd` has to keep multiplexing this against its own control-plane mailbox (`SOUNDD_OP_*`, carrying `SYS_SOUND_SET_VOLUME`/`INFO`/`STOP` requests) in the same loop; blocking forever on an empty ring would stall those too.
+- **Returns:** Number of frames actually copied (`0` if empty and the timeout elapsed, otherwise `1..max_frames`). `-EPERM` if the caller isn't the registered `soundd`.
+- **Implementation:** `sound_ring_read()` (`syscall.c`).
+
+**SYS_NET_FETCH_OPEN (93) / SYS_NET_FETCH_READ (94) / SYS_NET_FETCH_CLOSE (95)**
+- **Signature:** `long sys_net_fetch_open(const char *url, int *status_out, int *has_length_out, unsigned long *length_out)` / `long sys_net_fetch_read(void *out_buf, unsigned long out_cap)` / `long sys_net_fetch_close(void)`
+- **Description:** A streaming alternative to `SYS_NET_FETCH`, added so `dlpg install`/`update` (see [`17_package_manager.md`](17_package_manager.md)) no longer need to buffer an entire `.lpg` in RAM — the old 2 MiB `PACKAGE_FETCH_CAP` would otherwise need raising again for the next package bigger than that. `OPEN` parses the URL, resolves DNS, completes the TCP/TLS connect, sends the request, and parses the response headers — but does **not** read the body. `*has_length_out`/`*length_out` (any of the three output pointers may be `NULL`) report whether a `Content-Length` was present; if not, the body runs until the connection closes, same as `http_fetch()`'s non-streaming path. `READ` returns the next chunk of the body, up to `out_cap` bytes; the underlying TCP/TLS connection is kept open by `netd` *between* `READ` calls specifically so a caller reading in small chunks doesn't pay for a fresh TLS handshake on every call. `CLOSE` is idempotent — safe to call after a clean EOF, after an error, or even if `OPEN` was never called at all. Exactly one stream may be open system-wide at a time (same single-flight restriction `SYS_NET_FETCH`/`SYS_PING` already have). Chunked transfer-encoding is not supported in streaming mode (`NET_FETCH_ECHUNKED`) — only in the whole-body `SYS_NET_FETCH`.
+- **Returns:** `OPEN`: `0` on success, negative `NET_FETCH_E*` on failure (including `NET_FETCH_ECHUNKED`). `READ`: `>0` bytes read, `0` at end of body (the stream is already closed at that point — a further `CLOSE` is harmless but unnecessary), `<0` a `NET_FETCH_E*` (the stream is closed on error too). `CLOSE`: always `0`.
+- **Implementation:** `service_call()` relay to `netd`'s `http_fetch_open()`/`http_fetch_read()`/`http_fetch_close()` (`daemons/netd/http_client.c`), each open/read sharing the one `SYS_NET_FETCH` shared-memory region described above for the data actually transferred.
 
 ---
 
@@ -663,11 +771,11 @@ Not every syscall failure carries one of these — some VFS-level failures (bad 
 | System Calls | `drivers/usb/xhci.c` | `SYS_USB_*`. |
 | System Calls | `system/ipc/mailbox.c` | `SYS_IPC_SEND`/`RECV` directly, and every `SYS_WIN_*`/`SYS_WM_REGISTER`/`SYS_WM_UNREGISTER`/`SYS_FB_*` RPC indirectly (see [`18_gui_wm.md`](18_gui_wm.md)). |
 | System Calls | `drivers/console/console.c` | `SYS_FB_*`'s framebuffer geometry/font/present path. |
-| System Calls | `kernel/net/http_client.c` | `SYS_NET_FETCH`. |
-| System Calls | `kernel/net/icmp.c` | `SYS_PING`. |
-| System Calls | `kernel/net/net.c` (config)/`drivers/net/rtl8139.c` | `SYS_NET_CONFIG_GET`/`SYS_NET_CONFIG_SET`. |
+| System Calls | `kernel/system/driver/driver.c` | PCI claim/release, port-I/O/MMIO/IRQ permission checks for syscalls 77–88, 91. |
+| System Calls | `system/mm/shm.c` | `SYS_SHM_CREATE`/`SYS_SHM_ATTACH` directly, and `SYS_NET_FETCH`'s/`SYS_NET_FETCH_OPEN`'s kernel-brokered response buffer indirectly. |
+| System Calls | `lufira-packages/daemons/netd/` (userspace) | `SYS_NET_FETCH`/`_OPEN`/`_READ`/`_CLOSE`, `SYS_PING`, `SYS_NET_CONFIG_GET`/`SET` — relayed via `service_call()` since v0.9.5; no network stack remains in `kernel/`. |
+| System Calls | `lufira-packages/daemons/soundd.c` (userspace) | `SYS_SOUND_INFO`/`SYS_SOUND_SET_VOLUME`/`SYS_SOUND_STOP` — relayed via `service_call()` since v0.9.5; `SYS_SOUND_PLAY_PCM`/`SYS_SOUND_CONSUME` still go through the kernel-resident PCM ring. No sound driver remains in `kernel/`. |
 | System Calls | `kernel/system/timer/rtc.c` | `SYS_RTC_GETTIME`. |
-| System Calls | `drivers/sound/sound.c` | `SYS_SOUND_INFO`/`SYS_SOUND_SET_VOLUME`/`SYS_SOUND_PLAY_PCM`/`SYS_SOUND_STOP`. |
 | System Calls | `kernel/version.h` | `SYS_OS_VERSION`. |
 | System Calls | Console | (For debugging only). |
 
@@ -675,12 +783,12 @@ Not every syscall failure carries one of these — some VFS-level failures (bad 
 
 ## Conclusion
 
-All 75 defined system calls (numbers 0–76, minus retired 63/64) are implemented, with user-pointer validation and errno-style error codes covering process control (`fork`/`exec` with real `argv`/`envp`/`wait`/signals/pipes), anonymous memory mapping, file and directory I/O, identity/permission management, privileged system control (including auto-detecting `mount`/`unmount` across FAT/ext2/exFAT since v0.9.0), USB Mass Storage access, GUI/window-manager RPC (now with an explicit unregister), generic inter-process messaging, a one-call network fetch over DNS/TCP/TLS/HTTP, and — new in v0.9.0 — RTC time, sound playback/control, a single blocking ICMP ping, live OS version info, and network interface configuration. Most of the growth since v0.6.0's 27 syscalls exists for one reason: moving functionality (the shell, `su`/`mount`/`reboot`, the window manager, and now the sound mixer/`ifconfig`/`ping`/`date`) out of the kernel binary and into ordinary userspace processes needed a controlled interface to replace the direct kernel-internal function calls those features used to make. The use of the `syscall` instruction ensures fast transitions, and the calling convention follows the x86-64 ABI for compatibility.
+All 95 defined system calls (numbers 0–96, minus retired 63/64) are implemented, with user-pointer validation and errno-style error codes covering process control (`fork`/`exec` with real `argv`/`envp`/`wait`/signals/pipes — `kill` ownership-checked since v0.9.5), anonymous memory mapping (now with virtual-address reuse via a free-list, v0.9.5), file and directory I/O, identity/permission management, privileged system control (including auto-detecting `mount`/`unmount` across FAT/ext2/exFAT since v0.9.0), USB Mass Storage access (both read and write root-only since v0.9.5), GUI/window-manager RPC (root-only registration and a partial-dirty hint since v0.9.5), generic inter-process messaging, a one-call or streaming network fetch over DNS/TCP/TLS/HTTP, RTC time, sound playback/control, a single blocking ICMP ping, live OS version info, and network interface configuration. **New in v0.9.5:** an explicit PCI-device-claim privilege model (`SYS_DRIVER_CLAIM_DEVICE*`, port I/O, MMIO, DMA, IRQ wait) and daemon-registration syscalls (`SYS_NETD_REGISTER`/`SYS_SOUNDD_REGISTER`) that let the entire network and sound stacks move out of the kernel binary into two ordinary userspace processes — the single biggest reason the syscall count grew this release, continuing the same pattern that already moved the shell, `su`/`mount`/`reboot`, and the window manager out of the kernel in earlier releases. The use of the `syscall` instruction ensures fast transitions, and the calling convention follows the x86-64 ABI for compatibility.
 
-For more details, refer to the source code in `kernel/system/syscall/`.
+For more details, refer to the source code in `kernel/system/syscall/` and `kernel/system/driver/`.
 
 ---
 
-**Document Version:** 3.0
+**Document Version:** 4.0
 **Last Updated:** October 2026
 **Project:** LufiraOS

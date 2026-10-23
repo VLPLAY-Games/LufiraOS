@@ -2,6 +2,126 @@
 
 All notable changes to LufiraOS are documented in this file.
 
+## [0.9.5] - 2026-10-23
+
+A userspace-drivers release: networking and sound move out of the kernel binary
+entirely, into two ordinary (if privileged) userspace daemons, `netd` and
+`soundd`, running on top of a new PCI/MMIO/port-I/O/IRQ/DMA privilege model
+that stops any root process from poking hardware directly. Alongside that
+move: `LufiraOS-Builder` gained a driver-selection UI, a batch of real
+security findings got closed (signal delivery, raw USB block access, WM
+registration hijacking, out-of-bounds FAT/ext2/exFAT cluster/block access,
+unsalted 32-bit password hashing), and four independent fixes landed that
+don't depend on any of the above: unbounded package-download RAM usage,
+a virtual-address leak in `mmap`/`munmap`, predictable TCP sequence
+numbers/DNS transaction IDs, and the first piece of a partial-repaint API
+for the GUI.
+
+### Added
+
+- **Userspace driver infrastructure** (`kernel/system/driver/driver.c`/`.h`,
+  syscalls 77–88, 91) — a process must first *claim* a specific PCI device
+  (`SYS_DRIVER_CLAIM_DEVICE`/`_BY_CLASS`) before any PCI config space, port
+  I/O, MMIO mapping, or IRQ syscall is allowed, and only within the bounds of
+  that one device — replacing the previous "any root process can touch any
+  hardware" model with one scoped to the one trusted daemon that actually
+  claimed a device. Also added: `SYS_MMAP_MMIO` (with a new `PAGE_MMIO_NOFREE`
+  PTE bit, so process teardown never hands a device's own physical memory
+  back to the PMM), `SYS_DMA_ALLOC` (physically-contiguous pages with the
+  physical address handed back to the caller), `SYS_IRQ_REGISTER`/`_WAIT`
+  (a real blocking wait on a hardware interrupt line, mirroring
+  `mailbox_recv()`), and `SYS_SHM_CREATE`/`_ATTACH` (named shared memory for
+  bulk IPC too large for the 96-byte mailbox — Ethernet frames, PCM). See
+  [`13_syscalls.md`](documentation/13_syscalls.md#hardware--sound--network-6776)
+  and [`07_drivers.md`](documentation/07_drivers.md).
+- **Sound moved to userspace** (`lufira-packages/daemons/soundd.c`) — a full
+  port of the AC'97 and Intel HDA drivers onto the new driver-claim syscalls,
+  with the HDA player rewritten around a continuous ring buffer (the same
+  design AC'97 already used), fixing Doom's HDA audio being reduced to
+  beeps. `SYS_SOUND_PLAY_PCM` carries PCM data through a kernel-resident ring
+  buffer (too large for the mailbox); `SYS_SOUND_INFO`/`SET_VOLUME`/`STOP`
+  relay through a fixed `service_call()` (see Fixed, below). The kernel no
+  longer contains any sound driver code at all — it spawns `/bin/soundd.elf`
+  at boot instead.
+- **Networking moved to userspace** (`lufira-packages/daemons/netd/`) — the
+  entire Ethernet/ARP/IP/ICMP/TCP/UDP/DHCP/DNS/TLS/HTTP stack, its crypto
+  (SHA-256/HMAC/AES-GCM/X25519/bignum/RSA), and all three NIC drivers
+  (RTL8139/e1000/e1000e), ported onto the driver-claim syscalls as one
+  single-threaded daemon. `SYS_NET_FETCH`/`SYS_PING`/`SYS_NET_CONFIG_*` now
+  relay to it; `SYS_NET_FETCH`'s multi-megabyte response body goes through a
+  kernel-brokered shared-memory region (`MAX_SHARED_REGION_PAGES` raised to
+  4096 / 16 MiB to fit it) rather than the mailbox. The kernel no longer
+  contains any network driver or protocol-stack code at all — it spawns
+  `/bin/netd.elf` at boot instead.
+- **Streaming package downloads** — `SYS_NET_FETCH_OPEN`/`_READ`/`_CLOSE`
+  split the previous one-shot `SYS_NET_FETCH` into open-headers/read-a-chunk
+  ×N/close, keeping the TCP/TLS connection alive across calls so repeated
+  reads don't each pay for a new handshake. `dlpg install`/`update` now
+  stream a `.lpg` straight to disk in 128 KiB chunks instead of buffering the
+  whole file in RAM, removing the old 2 MiB `PACKAGE_FETCH_CAP` that would
+  otherwise need raising again for the next large game package. See
+  [`17_package_manager.md`](documentation/17_package_manager.md).
+- **`mmap`/`munmap` virtual-address reuse** — a per-process free-list
+  (`mmap_free_ranges[]`, first-fit with splitting) now reclaims the address
+  range of every `munmap()`'d region for reuse by `mmap`/`mmap_mmio`/
+  `dma_alloc`/`shm_create`/`shm_attach`, instead of the previous bump
+  allocator that only ever grew forward and could exhaust a long-lived
+  process's address space under repeated map/unmap cycles.
+- **Randomized TCP initial sequence numbers and DNS transaction IDs/source
+  ports** — a shared entropy-mixing module (`netd/netrand.c`, the same
+  rdtsc+PIT-tick+counter→SHA-256 technique `tls.c` already used for its own
+  randomness) replaces the previous predictable incrementing counter (TCP
+  ISN) and linear transaction-ID/port derivation (DNS), closing an
+  off-path packet-injection weakness.
+- **Partial-dirty hint for the GUI** (`SYS_WIN_MARK_DIRTY`, syscall 96;
+  `WM_OP_WIN_MARK_DIRTY` on the wire) plus a `dirty` flag on every widget in
+  `gui_widgets.c` (button/textbox/checkbox/listbox), set by the library's own
+  mutators and cleared at the end of `_draw()`. Advisory only — `_draw()`
+  still always redraws unconditionally, so the existing
+  "fill background then redraw everything" pattern used by `calc`/`notepad`
+  keeps working — the mechanism itself lands in 0.9.5; migrating client apps
+  to actually skip unnecessary redraws is left for 1.0. See
+  [`18_gui_wm.md`](documentation/18_gui_wm.md).
+- **`LufiraOS-Builder` driver-selection UI** — a "Userspace drivers" section
+  (CLI: `--driver NAME`/`--no-drivers`; GUI: a checkbox per daemon) picks
+  which of `netd`/`soundd` get built into an image, independent of the
+  existing `--only-package`/`--no-default-packages` controls.
+
+### Fixed
+
+- **`SYS_KILL` sent a signal to any process from any process** — a
+  non-root caller could `kill()` a pid it didn't own. Now requires root or a
+  matching `uid`, the same ownership model files already have.
+- **`SYS_USB_READ` let any process read raw blocks off a USB device** —
+  including a device mounted elsewhere under someone else's permissions,
+  bypassing the filesystem permission model entirely. Made root-only, like
+  `SYS_USB_WRITE` already was.
+- **`SYS_WM_REGISTER` could be hijacked** — any unprivileged process that won
+  the race to call it before the real `wm.elf` started became the system's
+  window manager, intercepting every other client's input and drawing.
+  Root-only now, matching the model already used by `SYS_NETD_REGISTER`/
+  `SYS_SOUNDD_REGISTER`.
+- **No bounds checking on FAT/ext2/exFAT cluster and block pointers read
+  from disk** — a corrupted or crafted filesystem image could drive cluster-
+  chain or block-group lookups arbitrarily far past the end of the mounted
+  image/metadata buffers. Added upper-bound checks to FAT's
+  `get_fat_entry()`/`set_fat_entry()`, exFAT's `get_fat()`/`set_fat()`/
+  `free_cluster()`/raw cluster reads (plus a `fat_length_bytes` sanity check
+  at mount time), and ext2's block/group/inode-pointer helpers (plus
+  `s_blocks_count`/`s_inode_size` checks at mount time, falling back to a
+  zeroed trap buffer instead of reading/writing out of bounds).
+- **Passwords hashed with unsalted 32-bit FNV-1a** — trivially reversible
+  offline in well under a second. Replaced with salted SHA-256 (the same
+  implementation `netd`'s TLS client uses), ported into the kernel at
+  `kernel/lib/sha256.c`. `/etc/passwd`'s hash field grew from 8 to 64 hex
+  digits; the seed accounts were rehashed to match. See
+  [`15_users_permissions.md`](documentation/15_users_permissions.md#password-hashing).
+- **`pci_config_read32()`/`pci_config_write32()` ran without interrupts
+  disabled** — a suspected contributor to intermittent NVMe/xHCI hangs on
+  real hardware (a config-space access interleaved with an interrupt handler
+  touching the same `0xCF8`/`0xCFC` ports). Now wrapped in `cli`/`sti`;
+  `pci_enable_interrupts()` was also added alongside it.
+
 ## [0.9.0] - 2026-10-17
 
 Mostly a storage/hardware-support release: two new disk controllers (AHCI,

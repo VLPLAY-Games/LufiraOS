@@ -24,7 +24,7 @@ This document describes LufiraOS's package format (`.lpg`) and its installer, `d
 
 ## Overview
 
-Before v0.7, every driver and command shipped built into the kernel binary. `.lpg` + `dlpg` (`lufira-packages/base/dlpg.c`) replace that for everything that can run in ring 3: coreutils, GUI apps, and the package manager itself are each a standalone `.lpg`, installed independently under `/bin`. `dlpg` needs no new syscalls beyond what every other userspace program already has — `open`/`read`/`write`/`close`/`seek`/`mkdir`/`chmod`/`unlink` — plus, as of this release, `SYS_NET_FETCH` for `sync`/`upgrade` (see [`16_networking.md`](16_networking.md#https-client-and-sys_net_fetch)).
+Before v0.7, every driver and command shipped built into the kernel binary. `.lpg` + `dlpg` (`lufira-packages/base/dlpg.c`) replace that for everything that can run in ring 3: coreutils, GUI apps, and the package manager itself are each a standalone `.lpg`, installed independently under `/bin`. `dlpg` needs no new syscalls beyond what every other userspace program already has — `open`/`read`/`write`/`close`/`seek`/`mkdir`/`chmod`/`unlink` — plus `SYS_NET_FETCH` for `sync` and, as of v0.9.5, the streaming `SYS_NET_FETCH_OPEN`/`_READ`/`_CLOSE` for `install`/`update`/`upgrade`'s actual `.lpg` downloads (see [`16_networking.md`](16_networking.md#https-client-and-sys_net_fetch)).
 
 There is no archive library anywhere in this project (kernel or userspace) — `.lpg` is a small hand-rolled binary format, the same philosophy as LufiraFS's own on-disk format.
 
@@ -105,11 +105,15 @@ No database beyond these flat files — `dlpg` parses/rewrites `installed` in fu
 ### install / update
 
 ```
-dlpg install <path.lpg>   # fails if the package is already installed
-dlpg update  <path.lpg>   # (re)installs even if already installed
+dlpg install <path.lpg|name>   # fails if the package is already installed
+dlpg update  <path.lpg|name>   # (re)installs even if already installed
 ```
 
+The argument is either a path to a local `.lpg` file, or — via `do_install_from_repo()` — a plain package name, looked up in the index cached by the last `dlpg sync` (see [sync](#sync); fails with a clear message if no index has been cached yet) and downloaded from its `"lpg"` URL before being installed exactly as a local file would be. This is what lets `install`/`update` pull a package straight from the repository without the admin having to download a `.lpg` by hand first.
+
 Both: validate the magic/header, check the package's `min_kernel_version` against the actually-running kernel (see [The `.lpg` Format](#the-lpg-format)), check every dependency in the package against `installed` (version-checked with `lpg_version_gte()`), write out every file (creating/`chmod`ing each per its entry), write the receipt (`<name>.files`), and update `installed`. A kernel-version mismatch, a dependency failure, or a write failure aborts **before** anything else is touched — no partial installs. `update` is the only difference between the two: whether an already-present package is an error or an expected reinstall.
+
+**Downloading a `.lpg` (as of v0.9.5): streamed, not buffered whole.** When the argument names a package rather than a local path, `dlpg` (and `upgrade`, below) fetch its `.lpg` from the cached index's URL via `download_lpg_streaming()` instead of one blocking `SYS_NET_FETCH` into a RAM buffer. It opens the stream (`sys_net_fetch_open()`), then loops `sys_net_fetch_read()` into a single static `PACKAGE_FETCH_CHUNK` (128 KiB) buffer, writing each chunk straight to a staging file (`DOWNLOAD_TMP_PATH`) as it arrives, and closes the stream (`sys_net_fetch_close()`, idempotent) when the body ends. At any moment only one 128 KiB chunk is resident in RAM, regardless of the package's real size. This replaces the previous `PACKAGE_FETCH_CAP` (2 MiB) — a single buffer sized to hold an *entire* `.lpg` in RAM, which the `doomgeneric` package (~4.8 MiB) had already outgrown and which every subsequent larger package would have forced raising again. See [`13_syscalls.md`](13_syscalls.md#sound-and-network-daemons-8990-9295) for the underlying `SYS_NET_FETCH_OPEN`/`_READ`/`_CLOSE` syscalls.
 
 The `installed_entry_t installed[MAX_INSTALLED]` table these subcommands (and `list`/`remove`) load into is a fixed-size stack array — `MAX_INSTALLED` grew from 32 to 64 this release, ahead of the published repository's size (~49 packages at the time of writing, with room to grow). Installing past the limit is refused with `dlpg: installed-package table full (max 64)` rather than overflowing the array.
 
@@ -136,7 +140,7 @@ dlpg upgrade          # every installed package
 dlpg upgrade <name>    # just one
 ```
 
-Reads the index cached by the last `sync` (fails with a clear message if none exists yet — it never fetches a fresh one itself). For each installed package also present in the index: parses its `"name"`/`"version"`/`"lpg"` fields out of the index (a small hand-written scanner, not a general JSON parser — see below), and if the index's version is strictly newer (`lpg_version_gt()`), downloads that package's `.lpg` via its own `SYS_NET_FETCH` call to a staging path, then installs it exactly like `dlpg update` would. Never installs a package that isn't already present — that's `install`'s job. Reports a `checked/upgraded/failed` summary at the end.
+Reads the index cached by the last `sync` (fails with a clear message if none exists yet — it never fetches a fresh one itself). For each installed package also present in the index: parses its `"name"`/`"version"`/`"lpg"` fields out of the index (a small hand-written scanner, not a general JSON parser — see below), and if the index's version is strictly newer (`lpg_version_gt()`), downloads that package's `.lpg` (via `download_lpg_streaming()`, see [install / update](#install--update)) to a staging path, then installs it exactly like `dlpg update` would. Never installs a package that isn't already present — that's `install`'s job. Reports a `checked/upgraded/failed` summary at the end.
 
 **The index parser is deliberately not a general JSON parser.** It knows only the one flat shape `build_index.py` (in `lufira-packages`) always produces: a top-level `"packages"` array of objects with simple string fields, no nesting. That's a reasonable simplification only *because* this repository controls that format end-to-end — it is not a general-purpose JSON reader and would not cope with arbitrary JSON.
 
@@ -174,12 +178,12 @@ Reads the index cached by the last `sync` (fails with a clear message if none ex
 
 ## Conclusion
 
-The package manager is a small, from-scratch format and installer sized to this project's actual needs — no archive library, no general JSON parser, no signature scheme beyond what TLS happens to provide. `sync`/`upgrade` turn it from "copy a `.lpg` onto the disk image at build time" into something that can reach out over a real network and pull a newer package from a real GitHub-hosted repository, which is new this release and the reason the networking stack documented in [`16_networking.md`](16_networking.md) needed to grow a DNS resolver and a TLS client in the first place. This release also hardened the format against the repository's own growth: `min_kernel_version` (see [The `.lpg` Format](#the-lpg-format)) stops a package built for a newer kernel ABI from being installed or baked into an image at all, and `MAX_INSTALLED` doubling from 32 to 64 keeps the installed-package table ahead of the catalog it has to hold.
+The package manager is a small, from-scratch format and installer sized to this project's actual needs — no archive library, no general JSON parser, no signature scheme beyond what TLS happens to provide. `sync`/`upgrade` turn it from "copy a `.lpg` onto the disk image at build time" into something that can reach out over a real network and pull a newer package from a real GitHub-hosted repository, and `min_kernel_version` (see [The `.lpg` Format](#the-lpg-format)) stops a package built for a newer kernel ABI from being installed or baked into an image at all. As of v0.9.5, downloading a `.lpg` no longer means buffering the whole file in RAM — `download_lpg_streaming()` writes it to disk 128 KiB at a time via the new streaming fetch syscalls, so the package size is no longer bounded by anything but disk space.
 
 For more details, refer to `tools/lpg_format.h` in this repository and `base/dlpg.c`/`build_index.py` in `lufira-packages`.
 
 ---
 
-**Document Version:** 1.0
+**Document Version:** 1.1
 **Last Updated:** October 2026
 **Project:** LufiraOS
