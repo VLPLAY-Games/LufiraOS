@@ -19,6 +19,7 @@
 #define WM_OP_WIN_DRAW_TEXT  5
 #define WM_OP_WIN_POLL_EVENT 6
 #define WM_OP_WIN_MOVE       7
+#define WM_OP_WIN_MARK_DIRTY 8
 
 struct __attribute__((packed)) wm_request {
     uint32_t opcode;

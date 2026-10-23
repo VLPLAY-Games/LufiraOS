@@ -311,6 +311,55 @@ static uint64_t sys_seek(uint64_t fd, uint64_t offset, uint64_t whence,
     return (uint64_t)vfs_seek((int)fd, (off_t)offset, (int)whence);
 }
 
+// БЕЗОПАСНОСТЬ/УТЕЧКА VA: общий аллокатор виртуальных адресов для
+// sys_mmap()/sys_shm_attach()/sys_mmap_mmio()/sys_dma_alloc() — раньше
+// каждый из них просто брал next_mmap_addr и безусловно сдвигал его вперёд,
+// никогда не оглядываясь назад; sys_munmap() освобождал физические страницы,
+// но возвращённый sys_munmap()'ом диапазон VA терялся навсегда. Для
+// процесса, который мапит/анмапит много раз подряд (netd — SYS_SHM_ATTACH
+// на каждую порцию SYS_NET_FETCH_READ, см. 0.9.5), это настоящая, хоть и
+// медленная, утечка адресного пространства. Теперь перед тем, как брать
+// новый кусок из next_mmap_addr, сначала смотрим в mmap_free_ranges[] —
+// список диапазонов, которые sys_munmap() туда вернул (mmap_free_va() ниже).
+// Первое совпадение по размеру (first-fit, length>=aligned_len) — если
+// ровно совпал, слот освобождается целиком; если диапазон больше нужного,
+// отдаём его НАЧАЛО, а остаток укорачиваем на месте (тот же слот).
+static uint64_t mmap_alloc_va(process_t *p, uint64_t aligned_len) {
+    for (int i = 0; i < MAX_MMAP_FREE_RANGES; i++) {
+        mmap_free_range_t *r = &p->mmap_free_ranges[i];
+        if (r->length >= aligned_len && r->length > 0) {
+            uint64_t base = r->addr;
+            if (r->length == aligned_len) {
+                r->addr = 0;
+                r->length = 0;
+            } else {
+                r->addr += aligned_len;
+                r->length -= aligned_len;
+            }
+            return base;
+        }
+    }
+    uint64_t base = p->next_mmap_addr;
+    p->next_mmap_addr += aligned_len;
+    return base;
+}
+
+// Обратная сторона mmap_alloc_va() — зовёт sys_munmap() после реального
+// анмапа страниц. Без коалесинга соседних диапазонов — см. комментарий у
+// mmap_free_range_t (process.h): типичный паттерн использования не
+// нуждается в нём. Если список полон, диапазон просто не возвращается в
+// оборот (деградация до прежнего поведения только для этого диапазона,
+// не ошибка самого sys_munmap()).
+static void mmap_free_va(process_t *p, uint64_t addr, uint64_t length) {
+    for (int i = 0; i < MAX_MMAP_FREE_RANGES; i++) {
+        if (p->mmap_free_ranges[i].length == 0) {
+            p->mmap_free_ranges[i].addr = addr;
+            p->mmap_free_ranges[i].length = length;
+            return;
+        }
+    }
+}
+
 // SYS_MMAP (9): addr, length, prot, flags, fd
 // Только анонимная память (MAP_ANONYMOUS обязателен, addr/fd игнорируются,
 // MAP_FIXED не поддерживается). Выделение eager: страницы физически
@@ -346,7 +395,7 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     if (slot < 0)
         return (uint64_t)-1;   // некуда записать новый регион
 
-    uint64_t base = current_process->next_mmap_addr;
+    uint64_t base = mmap_alloc_va(current_process, aligned_len);
     uint64_t pml4_phys = current_process->page_table;
 
     uint64_t page_flags = PAGE_PRESENT | PAGE_USER;
@@ -391,6 +440,7 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
             unmap_page(base + i * PAGE_SIZE);
         }
         if (shared_pages) kfree(shared_pages);
+        mmap_free_va(current_process, base, aligned_len); // отдать VA обратно — mmap_alloc_va() уже его выделил
         return (uint64_t)-1;
     }
 
@@ -405,11 +455,11 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
             for (uint64_t i = 0; i < num_pages; i++) {
                 unmap_page(base + i * PAGE_SIZE);
             }
+            mmap_free_va(current_process, base, aligned_len);
             return (uint64_t)-1;
         }
     }
 
-    current_process->next_mmap_addr += aligned_len;
     current_process->mmap_regions[slot].addr = base;
     current_process->mmap_regions[slot].length = aligned_len;
     current_process->mmap_regions[slot].shared_id = shared_id;
@@ -440,6 +490,9 @@ static uint64_t sys_munmap(uint64_t addr, uint64_t length,
             }
             r->addr = 0;
             r->length = 0;
+            // Отдаём VA-диапазон в оборот — см. mmap_alloc_va()/mmap_free_va()
+            // выше: иначе next_mmap_addr только растёт (старая утечка).
+            mmap_free_va(current_process, addr, aligned_len);
             return 0;
         }
     }
@@ -1858,6 +1911,26 @@ static uint64_t sys_win_move(uint64_t window_id, uint64_t x, uint64_t y,
     return (reply.result == 0) ? 0 : (uint64_t)-1;
 }
 
+// SYS_WIN_MARK_DIRTY (96) — см. syscall.h. w/h упакованы в один аргумент,
+// тот же приём, что у sys_win_draw_rect() выше.
+static uint64_t sys_win_mark_dirty(uint64_t window_id, uint64_t x, uint64_t y,
+                                   uint64_t wh_packed, uint64_t unused4) {
+    (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    uint32_t w = (uint32_t)(wh_packed >> 32);
+    uint32_t h = (uint32_t)(wh_packed & 0xFFFFFFFFu);
+
+    wm_request_t req; memset(&req, 0, sizeof(req));
+    req.opcode = WM_OP_WIN_MARK_DIRTY;
+    req.a[0] = (int32_t)window_id;
+    req.a[1] = (int32_t)x; req.a[2] = (int32_t)y;
+    req.a[3] = (int32_t)w; req.a[4] = (int32_t)h;
+
+    wm_reply_t reply;
+    if (wm_call(&req, &reply) != 0) return (uint64_t)-1;
+    return (reply.result == 0) ? 0 : (uint64_t)-1;
+}
+
 // SYS_IPC_SEND (57): dest_pid, msg_ptr, len — см. syscall.h/mailbox.h.
 static uint64_t sys_ipc_send(uint64_t dest_pid, uint64_t msg_ptr, uint64_t len,
                              uint64_t unused3, uint64_t unused4) {
@@ -2111,6 +2184,55 @@ static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t unused2,
 // shm-область ниже (должен помещаться в MAX_SHARED_REGION_PAGES, shm.h).
 #define NET_FETCH_MAX_CAP (MAX_SHARED_REGION_PAGES * PAGE_SIZE)
 
+// Общая для sys_net_fetch()-семейства (в т.ч. sys_net_fetch_open() ниже):
+// копирует url_len+1 байт (с NUL) из пользовательского url_ptr в свежую
+// shm-страницу. <0 при ошибке.
+static int net_fetch_make_url_shm(uint64_t url_ptr, int64_t url_len) {
+    uint64_t url_phys = pmm_alloc_page();
+    if (!url_phys) return -1;
+    void *url_virt = phys_to_virt(url_phys);
+    memset(url_virt, 0, PAGE_SIZE); // не отдавать netd чужой огрызок старой страницы за NUL
+    memcpy(url_virt, (const void *)url_ptr, (size_t)url_len + 1);
+    int url_shm_id = shm_create(&url_phys, 1);
+    if (url_shm_id < 0) { pmm_free_page(url_phys); return -1; }
+    return url_shm_id;
+}
+
+// Общая для sys_net_fetch()/sys_net_fetch_read() ниже: выделяет num_pages
+// страниц под shm-область размера cap байт (cap==0 — вызывающий сам решает,
+// нужна ли она вообще, сюда не ходит). *pages_out нужен вызывающему для
+// копирования результата после ответа и финального shm_release(). <0 при
+// ошибке, с полным откатом уже выделенного.
+static int net_fetch_make_body_shm(uint64_t cap, uint64_t **pages_out, uint64_t *num_pages_out) {
+    uint64_t num_pages = (cap + PAGE_SIZE - 1) / PAGE_SIZE;
+    *num_pages_out = num_pages;
+    *pages_out = NULL;
+
+    uint64_t *pages = (uint64_t *)kmalloc(num_pages * sizeof(uint64_t));
+    if (!pages) return -1;
+
+    uint64_t allocated;
+    for (allocated = 0; allocated < num_pages; allocated++) {
+        uint64_t phys = pmm_alloc_page();
+        if (!phys) break;
+        pages[allocated] = phys;
+    }
+    if (allocated < num_pages) {
+        for (uint64_t i = 0; i < allocated; i++) pmm_free_page(pages[i]);
+        kfree(pages);
+        return -1;
+    }
+
+    int shm_id = shm_create(pages, num_pages);
+    if (shm_id < 0) {
+        for (uint64_t i = 0; i < num_pages; i++) pmm_free_page(pages[i]);
+        kfree(pages);
+        return -1;
+    }
+    *pages_out = pages;
+    return shm_id;
+}
+
 static uint64_t sys_net_fetch(uint64_t url_ptr, uint64_t out_buf_ptr, uint64_t out_cap,
                               uint64_t status_ptr, uint64_t unused4) {
     (void)unused4;
@@ -2140,17 +2262,8 @@ static uint64_t sys_net_fetch(uint64_t url_ptr, uint64_t out_buf_ptr, uint64_t o
     // netd_request_t, как было раньше: реальные URL пакетного индекса
     // (".../refs/heads/main/index.json", 89 байт) не влезали в прежние 68,
     // фетч тихо уходил по обрезанному пути и ловил 404.
-    uint64_t url_phys = pmm_alloc_page();
-    if (!url_phys) return (uint64_t)-1;
-    void *url_virt = phys_to_virt(url_phys);
-    memset(url_virt, 0, PAGE_SIZE); // не отдавать netd чужой огрызок старой страницы за NUL
-    memcpy(url_virt, (const void *)url_ptr, (size_t)url_len + 1);
-
-    int url_shm_id = shm_create(&url_phys, 1);
-    if (url_shm_id < 0) {
-        pmm_free_page(url_phys);
-        return (uint64_t)-1;
-    }
+    int url_shm_id = net_fetch_make_url_shm(url_ptr, url_len);
+    if (url_shm_id < 0) return (uint64_t)-1;
 
     // Тело ответа (килобайты-мегабайты) — отдельная shm-область под out_cap
     // байт: netd сам ATTACH её (SYS_SHM_ATTACH) и пишет http_fetch() прямо
@@ -2158,35 +2271,15 @@ static uint64_t sys_net_fetch(uint64_t url_ptr, uint64_t out_buf_ptr, uint64_t o
     // phys_to_virt() — универсальный доступ ядра к любой физической
     // странице, ATTACH с его стороны не нужен (в отличие от netd, у ядра
     // нет собственных "page tables пользовательского процесса", только
-    // одна общая physmap).
-    uint64_t num_pages = out_cap == 0 ? 0 : (out_cap + PAGE_SIZE - 1) / PAGE_SIZE;
+    // одна общая physmap). out_cap==0 — вызывающему нужен только статус,
+    // без shm-области вообще (net_fetch_make_body_shm() не умеет cap==0).
+    uint64_t num_pages = 0;
     uint64_t *pages = NULL;
     int body_shm_id = -1;
 
-    if (num_pages > 0) {
-        pages = (uint64_t *)kmalloc(num_pages * sizeof(uint64_t));
-        if (!pages) { shm_release(url_shm_id); return (uint64_t)-1; }
-
-        uint64_t allocated;
-        for (allocated = 0; allocated < num_pages; allocated++) {
-            uint64_t phys = pmm_alloc_page();
-            if (!phys) break;
-            pages[allocated] = phys;
-        }
-        if (allocated < num_pages) {
-            for (uint64_t i = 0; i < allocated; i++) pmm_free_page(pages[i]);
-            kfree(pages);
-            shm_release(url_shm_id);
-            return (uint64_t)-1;
-        }
-
-        body_shm_id = shm_create(pages, num_pages);
-        if (body_shm_id < 0) {
-            for (uint64_t i = 0; i < num_pages; i++) pmm_free_page(pages[i]);
-            kfree(pages);
-            shm_release(url_shm_id);
-            return (uint64_t)-1;
-        }
+    if (out_cap > 0) {
+        body_shm_id = net_fetch_make_body_shm(out_cap, &pages, &num_pages);
+        if (body_shm_id < 0) { shm_release(url_shm_id); return (uint64_t)-1; }
     }
 
     netd_request_t req; memset(&req, 0, sizeof(req));
@@ -2232,6 +2325,134 @@ static uint64_t sys_net_fetch(uint64_t url_ptr, uint64_t out_buf_ptr, uint64_t o
 
     if (status_ptr != 0) *(int *)status_ptr = status;
     return (uint64_t)(int64_t)result;
+}
+
+// ===== Потоковая загрузка (SYS_NET_FETCH_OPEN/READ/CLOSE) — 0.9.5, см.
+// netd_protocol.h. Снимает PACKAGE_FETCH_CAP в dlpg.c (буфер на весь .lpg
+// целиком в RAM): вместо одного SYS_NET_FETCH с cap размером всего файла —
+// один OPEN (заголовки, без тела) + сколько угодно READ подряд порциями
+// ограниченного размера, netd держит TCP/TLS-соединение открытым между
+// ними сам (http_client.c), так что повторный READ не платит за новый
+// handshake. Та же shm-механика, что у sys_net_fetch() выше (helpers
+// net_fetch_make_url_shm()/net_fetch_make_body_shm(), определены там же) —
+// просто URL нужен только OPEN'у, а тело — только READ'у. =====
+
+// SYS_NET_FETCH_OPEN (93) — url_ptr, status_ptr, has_length_ptr, length_ptr.
+// Открывает поток (DNS/TCP/TLS/HTTP-запрос+заголовки внутри netd), тело
+// не читает. has_length_ptr/length_ptr могут быть NULL. 0 при успехе, иначе
+// отрицательный HTTP_FETCH_E* (как у sys_net_fetch()).
+static uint64_t sys_net_fetch_open(uint64_t url_ptr, uint64_t status_ptr, uint64_t has_length_ptr,
+                                   uint64_t length_ptr, uint64_t unused4) {
+    (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+
+    int64_t url_len = validate_user_string(current_process->page_table, url_ptr, USER_STRING_MAX);
+    if (url_len < 0) return (uint64_t)-EFAULT;
+    if (status_ptr != 0 && !is_user_range_valid(current_process->page_table, status_ptr, sizeof(int), 1))
+        return (uint64_t)-EFAULT;
+    if (has_length_ptr != 0 && !is_user_range_valid(current_process->page_table, has_length_ptr, sizeof(int), 1))
+        return (uint64_t)-EFAULT;
+    if (length_ptr != 0 && !is_user_range_valid(current_process->page_table, length_ptr, sizeof(uint64_t), 1))
+        return (uint64_t)-EFAULT;
+
+    uint32_t netd_pid = process_get_netd_pid();
+    if (!netd_pid) {
+        if (status_ptr != 0) *(int *)status_ptr = 0;
+        return (uint64_t)(int64_t)NET_FETCH_ENODEV;
+    }
+
+    int url_shm_id = net_fetch_make_url_shm(url_ptr, url_len);
+    if (url_shm_id < 0) return (uint64_t)-1;
+
+    netd_request_t req; memset(&req, 0, sizeof(req));
+    req.opcode = NETD_OP_FETCH_OPEN;
+    req.url_shm_id = (uint32_t)url_shm_id;
+
+    netd_reply_t reply;
+    int rc = service_call(netd_pid, &req, sizeof(req), &reply, sizeof(reply));
+
+    int result;
+    if (rc != 0) {
+        result = NET_FETCH_ENODEV;
+    } else {
+        result = reply.result;
+        if (status_ptr != 0) *(int *)status_ptr = reply.a[0];
+        if (result == 0) {
+            if (has_length_ptr != 0) *(int *)has_length_ptr = reply.a[1];
+            if (reply.a[1] && length_ptr != 0) *(uint64_t *)length_ptr = (uint64_t)reply.content_length;
+        }
+    }
+
+    shm_release(url_shm_id); // всегда ровно 1 страница
+    return (uint64_t)(int64_t)result;
+}
+
+// SYS_NET_FETCH_READ (94) — out_buf_ptr, out_cap. Следующая порция тела
+// уже открытого потока. >0 — записано байт, 0 — тело кончилось, <0 —
+// HTTP_FETCH_E*. out_cap ограничен тем же потолком, что у sys_net_fetch().
+static uint64_t sys_net_fetch_read(uint64_t out_buf_ptr, uint64_t out_cap, uint64_t unused2,
+                                   uint64_t unused3, uint64_t unused4) {
+    (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+    if (out_cap == 0) return 0;
+    if (!is_user_range_valid(current_process->page_table, out_buf_ptr, out_cap, 1))
+        return (uint64_t)-EFAULT;
+    if (out_cap > NET_FETCH_MAX_CAP) return (uint64_t)-EINVAL;
+
+    uint32_t netd_pid = process_get_netd_pid();
+    if (!netd_pid) return (uint64_t)(int64_t)NET_FETCH_ENODEV;
+
+    uint64_t *pages; uint64_t num_pages;
+    int body_shm_id = net_fetch_make_body_shm(out_cap, &pages, &num_pages);
+    if (body_shm_id < 0) return (uint64_t)-1;
+
+    netd_request_t req; memset(&req, 0, sizeof(req));
+    req.opcode = NETD_OP_FETCH_READ;
+    req.body_shm_id = (uint32_t)body_shm_id;
+    req.cap = (uint32_t)out_cap;
+
+    netd_reply_t reply;
+    int rc = service_call(netd_pid, &req, sizeof(req), &reply, sizeof(reply));
+
+    int result;
+    if (rc != 0) {
+        result = NET_FETCH_ENODEV;
+    } else {
+        result = reply.result;
+        if (result > 0) {
+            uint32_t remaining = (uint32_t)result;
+            uint32_t off = 0;
+            for (uint64_t p = 0; p < num_pages && remaining > 0; p++) {
+                uint32_t take = remaining < PAGE_SIZE ? remaining : (uint32_t)PAGE_SIZE;
+                memcpy((void *)(out_buf_ptr + off), phys_to_virt(pages[p]), take);
+                off += take;
+                remaining -= take;
+            }
+        }
+    }
+
+    for (uint64_t i = 0; i < num_pages; i++) shm_release(body_shm_id);
+    kfree(pages);
+    return (uint64_t)(int64_t)result;
+}
+
+// SYS_NET_FETCH_CLOSE (95) — без аргументов. Идемпотентно — безопасно
+// звать даже если поток уже сам закрылся (EOF/ошибка в READ) или вообще не
+// открывался.
+static uint64_t sys_net_fetch_close(uint64_t unused0, uint64_t unused1, uint64_t unused2,
+                                    uint64_t unused3, uint64_t unused4) {
+    (void)unused0; (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!current_process) return (uint64_t)-EFAULT;
+
+    uint32_t netd_pid = process_get_netd_pid();
+    if (!netd_pid) return 0; // нет netd — и держать открытым нечего
+
+    netd_request_t req; memset(&req, 0, sizeof(req));
+    req.opcode = NETD_OP_FETCH_CLOSE;
+
+    netd_reply_t reply;
+    service_call(netd_pid, &req, sizeof(req), &reply, sizeof(reply)); // результат неважен — close не падает
+    return 0;
 }
 
 // ===== Инфраструктура userspace-драйверов (driver.h) — см. подробные
@@ -2425,18 +2646,18 @@ static uint64_t sys_mmap_mmio(uint64_t phys_addr, uint64_t length, uint64_t unus
     uint64_t map_len = (phys_offset + length + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     uint64_t num_pages = map_len / PAGE_SIZE;
 
-    uint64_t base = current_process->next_mmap_addr;
+    uint64_t base = mmap_alloc_va(current_process, map_len);
     uint64_t pml4_phys = current_process->page_table;
     uint64_t page_flags = PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_PCD | PAGE_MMIO_NOFREE;
 
     for (uint64_t i = 0; i < num_pages; i++) {
         if (map_page_in_pml4(pml4_phys, base + i * PAGE_SIZE, phys_page + i * PAGE_SIZE, page_flags) != 0) {
             for (uint64_t j = 0; j < i; j++) unmap_page(base + j * PAGE_SIZE);
+            mmap_free_va(current_process, base, map_len); // отдать VA обратно — mmap_alloc_va() уже его выделил
             return (uint64_t)-1;
         }
     }
 
-    current_process->next_mmap_addr += map_len;
     current_process->mmap_regions[slot].addr = base;
     current_process->mmap_regions[slot].length = map_len;
     current_process->mmap_regions[slot].shared_id = -1;
@@ -2464,7 +2685,7 @@ static uint64_t sys_dma_alloc(uint64_t num_pages, uint64_t phys_out_ptr, uint64_
     uint64_t phys_base = pmm_alloc_contiguous_pages((uint32_t)num_pages);
     if (!phys_base) return (uint64_t)-1;
 
-    uint64_t base = current_process->next_mmap_addr;
+    uint64_t base = mmap_alloc_va(current_process, num_pages * PAGE_SIZE);
     uint64_t pml4_phys = current_process->page_table;
     uint64_t page_flags = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
 
@@ -2483,10 +2704,10 @@ static uint64_t sys_dma_alloc(uint64_t num_pages, uint64_t phys_out_ptr, uint64_
         // см. pmm.h).
         for (uint64_t i = 0; i < mapped; i++) unmap_page(base + i * PAGE_SIZE);
         for (uint64_t i = mapped; i < num_pages; i++) pmm_free_page(phys_base + i * PAGE_SIZE);
+        mmap_free_va(current_process, base, num_pages * PAGE_SIZE); // отдать VA обратно
         return (uint64_t)-1;
     }
 
-    current_process->next_mmap_addr += num_pages * PAGE_SIZE;
     current_process->mmap_regions[slot].addr = base;
     current_process->mmap_regions[slot].length = num_pages * PAGE_SIZE;
     current_process->mmap_regions[slot].shared_id = -1;
@@ -2551,7 +2772,8 @@ static uint64_t sys_shm_create(uint64_t num_pages, uint64_t id_out_ptr, uint64_t
     uint64_t *pages = (uint64_t *)kmalloc(num_pages * sizeof(uint64_t));
     if (!pages) return (uint64_t)-1;
 
-    uint64_t base = current_process->next_mmap_addr;
+    uint64_t len = num_pages * PAGE_SIZE;
+    uint64_t base = mmap_alloc_va(current_process, len);
     uint64_t pml4_phys = current_process->page_table;
     uint64_t page_flags = PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_MMAP_SHARED;
 
@@ -2572,6 +2794,7 @@ static uint64_t sys_shm_create(uint64_t num_pages, uint64_t id_out_ptr, uint64_t
         // pmm_free_page() (тот же приём, что у sys_mmap(), см. его комментарий).
         for (uint64_t i = 0; i < mapped; i++) unmap_page(base + i * PAGE_SIZE);
         kfree(pages);
+        mmap_free_va(current_process, base, len);
         return (uint64_t)-1;
     }
 
@@ -2579,11 +2802,10 @@ static uint64_t sys_shm_create(uint64_t num_pages, uint64_t id_out_ptr, uint64_t
     kfree(pages); // shm_create() уже скопировало всё, что нужно, в свой реестр
     if (shm_id < 0) {
         for (uint64_t i = 0; i < num_pages; i++) unmap_page(base + i * PAGE_SIZE);
+        mmap_free_va(current_process, base, len);
         return (uint64_t)-1;
     }
 
-    uint64_t len = num_pages * PAGE_SIZE;
-    current_process->next_mmap_addr += len;
     current_process->mmap_regions[slot].addr = base;
     current_process->mmap_regions[slot].length = len;
     current_process->mmap_regions[slot].shared_id = shm_id;
@@ -2617,7 +2839,8 @@ static uint64_t sys_shm_attach(uint64_t shm_id, uint64_t unused1, uint64_t unuse
     }
     if (slot < 0) { kfree(pages); return (uint64_t)-1; }
 
-    uint64_t base = current_process->next_mmap_addr;
+    uint64_t len = num_pages * PAGE_SIZE;
+    uint64_t base = mmap_alloc_va(current_process, len);
     uint64_t pml4_phys = current_process->page_table;
     uint64_t page_flags = PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_MMAP_SHARED;
 
@@ -2625,6 +2848,7 @@ static uint64_t sys_shm_attach(uint64_t shm_id, uint64_t unused1, uint64_t unuse
         if (map_page_in_pml4(pml4_phys, base + i * PAGE_SIZE, pages[i], page_flags) != 0) {
             for (uint64_t j = 0; j < i; j++) unmap_page(base + j * PAGE_SIZE);
             kfree(pages);
+            mmap_free_va(current_process, base, len);
             return (uint64_t)-1;
         }
         // +1 за КАЖДУЮ реально замапленную страницу, сразу по месту — не
@@ -2636,8 +2860,6 @@ static uint64_t sys_shm_attach(uint64_t shm_id, uint64_t unused1, uint64_t unuse
     }
     kfree(pages);
 
-    uint64_t len = num_pages * PAGE_SIZE;
-    current_process->next_mmap_addr += len;
     current_process->mmap_regions[slot].addr = base;
     current_process->mmap_regions[slot].length = len;
     current_process->mmap_regions[slot].shared_id = (int)shm_id;
@@ -2712,6 +2934,10 @@ static syscall_fn_t syscall_table[256] = {
     [SYS_FB_FONT] = sys_fb_font,
     [SYS_DUP2] = sys_dup2,
     [SYS_NET_FETCH] = sys_net_fetch,
+    [SYS_NET_FETCH_OPEN] = sys_net_fetch_open,
+    [SYS_NET_FETCH_READ] = sys_net_fetch_read,
+    [SYS_NET_FETCH_CLOSE] = sys_net_fetch_close,
+    [SYS_WIN_MARK_DIRTY] = sys_win_mark_dirty,
     [SYS_RTC_GETTIME] = sys_rtc_gettime,
     [SYS_SOUND_INFO] = sys_sound_info,
     [SYS_SOUND_SET_VOLUME] = sys_sound_set_volume,

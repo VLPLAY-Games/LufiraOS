@@ -483,6 +483,46 @@
 // зарегистрирован.
 #define SYS_NETD_REGISTER 92
 
+// SYS_NET_FETCH_OPEN/READ/CLOSE (93/94/95) — потоковая загрузка одного URL
+// порциями ограниченного размера, 0.9.5: снимает PACKAGE_FETCH_CAP в
+// dlpg.c (буфер под весь .lpg целиком в RAM — "иначе придётся снова
+// поднимать константу под следующую большую игру"). netd держит TCP/TLS-
+// соединение открытым МЕЖДУ READ-вызовами (http_client.c) — повторный READ
+// не платит за новый TLS-handshake, в отличие от наивного "SYS_NET_FETCH с
+// Range-заголовком на каждую порцию".
+//
+// SYS_NET_FETCH_OPEN (93): url_ptr, status_ptr, has_length_ptr, length_ptr
+// (последние три — указатели на int/int/uint64_t, любой может быть NULL).
+// Разбирает URL, DNS, TCP/TLS-коннект, шлёт GET, разбирает заголовки — тело
+// НЕ читает. 0 при успехе (*has_length_ptr=1 и *length_ptr=Content-Length,
+// если она была в ответе; иначе 0 — тело "до закрытия соединения",
+// см. SYS_NET_FETCH_READ), иначе отрицательный HTTP_FETCH_E* (как у
+// SYS_NET_FETCH), включая HTTP_FETCH_ECHUNKED — потоковый режим не
+// поддерживает chunked-тело (см. http_client.h).
+#define SYS_NET_FETCH_OPEN 93
+
+// SYS_NET_FETCH_READ (94): out_buf_ptr, out_cap (<= NET_FETCH_MAX_CAP, как
+// у SYS_NET_FETCH). Следующая порция уже открытого потока. >0 — байт
+// записано, 0 — тело кончилось (поток уже закрыт сам, SYS_NET_FETCH_CLOSE
+// после этого безвреден), <0 — HTTP_FETCH_E* (поток тоже уже закрыт).
+#define SYS_NET_FETCH_READ 94
+
+// SYS_NET_FETCH_CLOSE (95): без аргументов. Закрывает поток, если он ещё
+// открыт — идемпотентно, безопасно звать даже после EOF/ошибки в READ или
+// если OPEN не звался вовсе.
+#define SYS_NET_FETCH_CLOSE 95
+
+// SYS_WIN_MARK_DIRTY (96): window_id, x, y, wh_packed ((w<<32)|h), unused —
+// partial-dirty hint, 0.9.5: см. WM_OP_WIN_MARK_DIRTY (wm_protocol.h).
+// Не рисует ничего сам — расширяет накопленную "грязную" область окна,
+// которую собеседник (WM) перенесёт на экран при следующем кадре,
+// независимо от уже нарисованного через SYS_WIN_FILL/DRAW_RECT/DRAW_TEXT
+// (каждый из них уже помечает ровно свой кусок автоматически — этот
+// syscall для случаев, когда клиент хочет явно зафиксировать границы сам,
+// например при будущем переходе на пакетную/прямую отрисовку в 1.0).
+// 0 успех, -1 если window_id не принадлежит вызывающему.
+#define SYS_WIN_MARK_DIRTY 96
+
 // Флаги для sys_open
 #define O_RDONLY    0
 #define O_WRONLY    1

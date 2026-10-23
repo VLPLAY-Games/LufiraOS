@@ -414,6 +414,7 @@ void process_init(void) {
     // mmap не вызывает.
     idle_process->next_mmap_addr = MMAP_AREA_START;
     memset(idle_process->mmap_regions, 0, sizeof(idle_process->mmap_regions));
+    memset(idle_process->mmap_free_ranges, 0, sizeof(idle_process->mmap_free_ranges));
     memset(idle_process->signal_handlers, 0, sizeof(idle_process->signal_handlers));
     idle_process->pending_signal = 0;
     idle_process->in_signal_handler = 0;
@@ -628,6 +629,7 @@ process_t* process_create(const char *name, void (*entry)(void)) {
     proc->first_run = (entry == NULL);
     proc->next_mmap_addr = MMAP_AREA_START;
     memset(proc->mmap_regions, 0, sizeof(proc->mmap_regions));
+    memset(proc->mmap_free_ranges, 0, sizeof(proc->mmap_free_ranges));
     memset(proc->signal_handlers, 0, sizeof(proc->signal_handlers));
     proc->pending_signal = 0;
     proc->in_signal_handler = 0;
@@ -1039,6 +1041,7 @@ int process_commit_exec(process_t *proc,
     // физически больше не существуют в new_pml4, сбрасываем учёт.
     proc->next_mmap_addr = MMAP_AREA_START;
     memset(proc->mmap_regions, 0, sizeof(proc->mmap_regions));
+    memset(proc->mmap_free_ranges, 0, sizeof(proc->mmap_free_ranges));
 
     // Обработчики сигналов сбрасываются на default (POSIX: execve() делает
     // то же для пойманных сигналов — их адреса не существуют в новом
@@ -1693,6 +1696,7 @@ uint64_t process_fork(uint64_t frame_ptr) {
     // указателем, начатым заново с MMAP_AREA_START.
     child->next_mmap_addr = parent->next_mmap_addr;
     memcpy(child->mmap_regions, parent->mmap_regions, sizeof(parent->mmap_regions));
+    memcpy(child->mmap_free_ranges, parent->mmap_free_ranges, sizeof(parent->mmap_free_ranges));
 
     // fork() наследует обработчики сигналов (POSIX), но не текущее
     // исполнение — pending_signal/in_signal_handler/alarm_tick это состояние

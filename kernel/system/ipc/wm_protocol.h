@@ -42,6 +42,17 @@
 #define WM_OP_WIN_DRAW_TEXT  5 // a[0]=window_id, a[1..2]=x,y, a[3]=color; str=text
 #define WM_OP_WIN_POLL_EVENT 6 // a[0]=window_id
 #define WM_OP_WIN_MOVE       7 // a[0]=window_id, a[1..2]=x,y
+// WM_OP_WIN_MARK_DIRTY (8) — 0.9.5, partial-dirty hint: клиент сообщает
+// "содержимое вот этого прямоугольника окна изменилось", не передавая
+// самих пикселей — полезно, когда клиент сам обновил несколько примитивов
+// подряд (FILL+DRAW_TEXT и т.п.) и хочет одной явной границей зафиксировать
+// итоговую "грязную" область, вместо того чтобы полагаться на то, что
+// каждый отдельный примитив уже помечает ТОЛЬКО свой кусок (см.
+// mark_dirty_rect() в wm.c — её уже вызывает каждый DRAW_*/FILL). Сам
+// по себе не рисует ничего — вызывающий обязан нарисовать нужное
+// содержимое отдельными WM_OP_WIN_FILL/DRAW_RECT/DRAW_TEXT как обычно, эта
+// операция только расширяет накопленную dirty-область.
+#define WM_OP_WIN_MARK_DIRTY 8 // a[0]=window_id, a[1..4]=x,y,w,h
 
 typedef struct __attribute__((packed)) {
     uint32_t opcode;

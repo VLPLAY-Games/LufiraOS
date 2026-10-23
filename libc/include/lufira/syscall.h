@@ -111,6 +111,10 @@
 #define SYS_SOUND_CONSUME 90
 #define SYS_DRIVER_CLAIM_DEVICE_BY_CLASS 91
 #define SYS_NETD_REGISTER 92
+#define SYS_NET_FETCH_OPEN 93
+#define SYS_NET_FETCH_READ 94
+#define SYS_NET_FETCH_CLOSE 95
+#define SYS_WIN_MARK_DIRTY 96
 
 // Флаги sys_open().
 #define O_RDONLY  0
@@ -739,6 +743,18 @@ static inline long sys_win_move(int window_id, int x, int y) {
     return __syscall5(SYS_WIN_MOVE, window_id, x, y, 0, 0);
 }
 
+// Partial-dirty hint (0.9.5, см. SYS_WIN_MARK_DIRTY — kernel-side
+// syscall.h) — x, y, w, h — КЛИЕНТСКИЕ координаты, как у sys_win_draw_rect()
+// выше. Не рисует ничего сам, только расширяет накопленную dirty-область
+// окна; сам контент всё равно рисуется обычными sys_win_fill()/
+// draw_rect()/draw_text() (они и так помечают свой кусок автоматически) —
+// этот хинт для явной фиксации границ, когда вызывающий это сам знает
+// лучше (например, при пакетной отрисовке в 1.0).
+static inline long sys_win_mark_dirty(int window_id, int x, int y, unsigned int w, unsigned int h) {
+    long wh_packed = ((long)w << 32) | (long)h;
+    return __syscall5(SYS_WIN_MARK_DIRTY, window_id, x, y, wh_packed, 0);
+}
+
 // ===== v0.8 (GUI+WM), этап 3: generic IPC + привилегированные syscall'ы
 // WM-процесса. См. kernel/system/ipc/mailbox.h/wm_protocol.h про
 // архитектуру — это ОБЩИЙ примитив, не привязанный к GUI; обычные
@@ -832,9 +848,9 @@ static inline long sys_dup2(int oldfd, int newfd) {
     return __syscall5(SYS_DUP2, oldfd, newfd, 0, 0, 0);
 }
 
-// Отрицательные коды ошибок sys_net_fetch() ниже — см. подробное описание
-// у SYS_NET_FETCH (kernel/system/syscall/syscall.h) и http_fetch()
-// (kernel/net/http_client.h).
+// Отрицательные коды ошибок sys_net_fetch()/sys_net_fetch_open/read() ниже
+// — см. подробное описание у SYS_NET_FETCH (kernel/system/syscall/
+// syscall.h) и http_fetch() (lufira-packages/daemons/netd/http_client.h).
 #define NET_FETCH_EBADURL   (-1) // не распознан URL (нужна схема http:// или https://)
 #define NET_FETCH_EDNS      (-2) // не удалось резолвить хост (dns.c)
 #define NET_FETCH_ECONNECT  (-3) // TCP-соединение не установилось (tcp.c)
@@ -842,6 +858,7 @@ static inline long sys_dup2(int oldfd, int newfd) {
 #define NET_FETCH_EHTTP     (-5) // ответ сервера не распарсился как HTTP (битые заголовки/нет тела)
 #define NET_FETCH_ENOSPC    (-6) // тело ответа больше out_cap - ничего не скопировано
 #define NET_FETCH_ENODEV    (-7) // сетевая карта не найдена
+#define NET_FETCH_ECHUNKED  (-9) // sys_net_fetch_open(): потоковый режим не поддерживает chunked-тело
 
 // Скачивает URL целиком (http:// или https://) в out_buf — см. подробности
 // архитектуры у SYS_NET_FETCH (kernel-side syscall.h). status_out может
@@ -850,4 +867,26 @@ static inline long sys_dup2(int oldfd, int newfd) {
 // выше.
 static inline long sys_net_fetch(const char *url, void *out_buf, unsigned long out_cap, int *status_out) {
     return __syscall5(SYS_NET_FETCH, (long)url, (long)out_buf, (long)out_cap, (long)status_out, 0);
+}
+
+// Потоковая загрузка одного URL порциями ограниченного размера — см.
+// подробности у SYS_NET_FETCH_OPEN/READ/CLOSE (kernel-side syscall.h).
+// Использование: ровно один sys_net_fetch_open(), затем сколько угодно
+// sys_net_fetch_read() подряд, затем ровно один sys_net_fetch_close()
+// (идемпотентен — безвреден и после EOF/ошибки в read(), и если open()
+// вообще не звался). has_length_out/length_out/status_out могут быть NULL.
+static inline long sys_net_fetch_open(const char *url, int *status_out, int *has_length_out,
+                                      unsigned long *length_out) {
+    return __syscall5(SYS_NET_FETCH_OPEN, (long)url, (long)status_out, (long)has_length_out,
+                      (long)length_out, 0);
+}
+
+// Следующая порция тела уже открытого потока, до out_cap байт. >0 — байт
+// записано в out_buf, 0 — тело кончилось, <0 — NET_FETCH_E*.
+static inline long sys_net_fetch_read(void *out_buf, unsigned long out_cap) {
+    return __syscall5(SYS_NET_FETCH_READ, (long)out_buf, (long)out_cap, 0, 0, 0);
+}
+
+static inline long sys_net_fetch_close(void) {
+    return __syscall5(SYS_NET_FETCH_CLOSE, 0, 0, 0, 0, 0);
 }

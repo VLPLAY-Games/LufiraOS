@@ -96,6 +96,24 @@ typedef struct {
     int shared_id;
 } mmap_region_t;
 
+// Освобождённый sys_munmap()'ом диапазон VA, доступный для повторного
+// использования следующим sys_mmap()/sys_shm_attach()/sys_mmap_mmio()/
+// sys_dma_alloc() — иначе next_mmap_addr только растёт, и процесс,
+// который много раз подряд мапит/анмапит (например, netd — SYS_SHM_ATTACH
+// на каждую порцию SYS_NET_FETCH_READ, см. 0.9.5), со временем выедает
+// адресное пространство впустую, хотя физические страницы уже освобождены.
+// length==0 — слот свободен (нет ожидающего повторного использования
+// диапазона). Без коалесинга соседних диапазонов — осознанно: типичный
+// паттерн (netd) освобождает и тут же запрашивает диапазон ТОГО ЖЕ
+// размера, так что список не растёт вовсе; при разных размерах список
+// просто ограничен тем же потолком, что MAX_MMAP_REGIONS.
+#define MAX_MMAP_FREE_RANGES 32
+
+typedef struct {
+    uint64_t addr;
+    uint64_t length;
+} mmap_free_range_t;
+
 typedef struct process {
     uint32_t pid;
     uint32_t ppid;          // 0 = нет родителя (например, до fork()/wait())
@@ -118,6 +136,7 @@ typedef struct process {
     // (сбрасывается — exec() заменяет всё адресное пространство целиком).
     mmap_region_t mmap_regions[MAX_MMAP_REGIONS];
     uint64_t next_mmap_addr;
+    mmap_free_range_t mmap_free_ranges[MAX_MMAP_FREE_RANGES]; // см. комментарий у mmap_free_range_t
     // Текущий рабочий каталог процесса (LufiraFS) — по умолчанию корень
     // (process_create()). fork() наследует 1:1 (POSIX), exec()
     // (process_commit_exec()) сознательно не трогает — execve() тоже

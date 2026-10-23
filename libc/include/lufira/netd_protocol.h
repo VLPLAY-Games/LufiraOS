@@ -2,15 +2,18 @@
 
 // netd_protocol.h — зеркало kernel/system/ipc/netd_protocol.h, байт-в-байт.
 // Используется только самим netd-процессом — обычные программы общаются
-// через sys_net_fetch()/sys_ping()/sys_net_config_*() (syscall.h), которые
-// прячут этот протокол внутри ядра.
+// через sys_net_fetch()/sys_net_fetch_open/read/close()/sys_ping()/
+// sys_net_config_*() (syscall.h), которые прячут этот протокол внутри ядра.
 
 #include <stdint.h>
 
-#define NETD_OP_FETCH      1
-#define NETD_OP_PING       2
-#define NETD_OP_CONFIG_GET 3
-#define NETD_OP_CONFIG_SET 4
+#define NETD_OP_FETCH       1
+#define NETD_OP_PING        2
+#define NETD_OP_CONFIG_GET  3
+#define NETD_OP_CONFIG_SET  4
+#define NETD_OP_FETCH_OPEN  5
+#define NETD_OP_FETCH_READ  6
+#define NETD_OP_FETCH_CLOSE 7
 
 struct __attribute__((packed)) netd_request {
     uint32_t opcode;
@@ -25,4 +28,5 @@ struct __attribute__((packed)) netd_reply {
     int32_t  a[2];
     uint8_t  mac[6];
     uint32_t our_ip, netmask, gateway, dns_server;
+    uint32_t content_length;
 };
