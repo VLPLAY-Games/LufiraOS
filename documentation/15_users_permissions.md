@@ -138,7 +138,8 @@ typedef struct {
     char username[32];
     uint32_t uid;
     uint32_t gid;
-    uint32_t password_hash;   // FNV-1a of the password
+    uint32_t password_salt;      // best-effort, not real entropy — see Password Hashing
+    uint8_t  password_hash[32];  // SHA-256(salt || password)
     char home[64];
     int in_use;
 } user_entry_t;
@@ -158,11 +159,11 @@ If `/etc/passwd`/`/etc/group` are missing or unreadable (a fresh or corrupted di
 
 Both files are plain colon-separated text, parsed by mutating the line buffer in place (`split_fields()` replaces `:` with `\0`) since this freestanding environment has no `strtok`.
 
-**`/etc/passwd`** — `username:uid:gid:password_hash_hex:home` (the trailing `home` field is optional; if absent, `home` defaults to `/`):
+**`/etc/passwd`** — `username:uid:gid:salt_hex:password_hash_hex:home` (the trailing `home` field is optional; if absent, `home` defaults to `/`):
 
 ```
-root:0:0:3774e5d9:/
-guest:1000:1000:811c9dc5:/
+root:0:0:12345678:04a20a489fc18209ccb0131065aade8d87d0e149c674b7c8d79af1f0cfda26a2:/
+guest:1000:1000:87654321:235c6e3ab89786e7f171838fda309579aa64e99a9a1431ad94c650fdf3622969:/
 ```
 
 **`/etc/group`** — `groupname:gid`:
@@ -176,29 +177,29 @@ Both examples above are taken verbatim from the seeded `tools/seed/passwd`/`tool
 
 ### Password Hashing
 
-Passwords are hashed with **FNV-1a, 32-bit**, stored as 8 hex digits in the passwd file's 4th field:
+Passwords are hashed with a per-account salt plus **SHA-256** (ported into the kernel at `kernel/lib/sha256.c`, from the same FIPS 180-4 implementation `lufira-packages/daemons/netd/crypto/sha256.c` uses for TLS — no kernel-specific dependencies beyond `memcpy`/`memset`). Before 0.9.5 this was unsalted 32-bit FNV-1a; `salted_password_hash()` in `users.c` is now:
 
 ```c
-// FNV-1a 32-bit — a simple non-cryptographic hash; nothing stronger is
-// needed here (hobby OS, no crypto library present at all).
-static uint32_t fnv1a_hash(const char *s) {
-    uint32_t h = 0x811c9dc5u;
-    while (*s) {
-        h ^= (uint8_t)(*s++);
-        h *= 0x01000193u;
-    }
-    return h;
+static void salted_password_hash(uint32_t salt, const char *password, uint8_t out[32]) {
+    uint8_t salt_be[4] = {
+        (uint8_t)(salt >> 24), (uint8_t)(salt >> 16), (uint8_t)(salt >> 8), (uint8_t)salt
+    };
+    sha256_ctx_t ctx;
+    sha256_init(&ctx);
+    sha256_update(&ctx, salt_be, sizeof(salt_be));
+    sha256_update(&ctx, password, strlen(password));
+    sha256_final(&ctx, out);
 }
 ```
 
-This is **not** a cryptographically secure hash and should not be treated as one:
+The salt is 4 bytes, stored as 8 hex digits in the passwd file's 4th field; the SHA-256 digest is 32 bytes, stored as 64 hex digits in the 5th field (`hex_to_bytes()`/`bytes_to_hex()` in `users.c`, since `hex_to_int()` only ever handled a single 32-bit accumulator). `generate_salt()` is unchanged from before — still `pit_get_ticks()` mixed with a per-call counter, **not real entropy** — its only job is to stop one precomputed table from covering every account with the same password at once, not to resist a targeted attack against one known `(salt, hash)` pair.
 
-- No salt — identical passwords across accounts (or a precomputed FNV-1a rainbow table) produce identical hashes, immediately visible to anyone who can read `/etc/passwd`.
-- A 32-bit output space is small enough to brute-force or reverse offline in well under a second on modern hardware.
-- FNV-1a was designed for hash-table distribution, not for resisting deliberate collision/preimage search.
-- `/etc/passwd` itself is created with `uid=0`, `gid=0`, `perm=0644` (`LUFIRAFS_DEFAULT_FILE_PERM`, set by `tools/mkfs_lufirafs.c` when it `put`s the seed file) — i.e. it is world-readable by design, so any non-root user can read every stored hash directly, not just root.
+This closes the worst problems of the old scheme (unsalted, 32-bit, non-cryptographic FNV-1a — trivially reversible offline in well under a second) but is still **not** a proper password KDF:
 
-`users_check_password(name, password)` returns `1` only if `fnv1a_hash(password ? password : "")` equals the stored hash for that username, `0` otherwise (including "user not found").
+- SHA-256 is fast by design — unlike PBKDF2/bcrypt/argon2, it has no deliberate work factor, so an offline attacker with the hash can still try candidate passwords quickly (just not anywhere near as quickly as with 32-bit FNV-1a).
+- `/etc/passwd` itself is created with `uid=0`, `gid=0`, `perm=0644` (`LUFIRAFS_DEFAULT_FILE_PERM`, set by `tools/mkfs_lufirafs.c` when it `put`s the seed file) — i.e. it is world-readable by design, so any non-root user can still read every stored `(salt, hash)` pair directly, not just root.
+
+`users_check_password(name, password)` returns `1` only if `salted_password_hash(salt, password ? password : "", ...)` equals the stored hash for that username (compared with `memcmp()`, 32 bytes), `0` otherwise (including "user not found").
 
 ### Lookup and Add API
 
@@ -231,8 +232,8 @@ All four lookup functions return `0` on success (with `*out` filled in when non-
 
 | Account | uid | gid | Password | Notes |
 |---------|-----|-----|----------|-------|
-| `root` | 0 | 0 | `toor` (FNV-1a hash `3774e5d9`) | Full-privilege account; also the identity every shell starts as by default (see [Process Identity](#process-identity)). |
-| `guest` | 1000 | 1000 (`users` group) | *empty string* (hash `811c9dc5`, which is `fnv1a_hash("")`) | A demo/unprivileged account with no password at all — `su guest` from a non-root shell succeeds with no password argument. |
+| `root` | 0 | 0 | `toor` (salt `12345678`, SHA-256 hash `04a20a48…fda26a2`) | Full-privilege account; also the identity every shell starts as by default (see [Process Identity](#process-identity)). |
+| `guest` | 1000 | 1000 (`users` group) | *empty string* (salt `87654321`, hash `235c6e3a…f3622969`, i.e. `salted_password_hash(0x87654321, "")`) | A demo/unprivileged account with no password at all — `su guest` from a non-root shell succeeds with no password argument. |
 
 Both are real security caveats if this system is ever exposed beyond a local, single-user hobby context: the root password is a well-known hardcoded default (`toor`, the classic "root spelled backwards" convention) baked into every built image, and the seeded `guest` account requires no password whatsoever. Neither is rotated or prompted for at first boot — there is no first-boot setup flow.
 
@@ -299,7 +300,7 @@ The six interactive commands that drive this subsystem no longer live in the ker
 
 - **No setuid/setgid bit** — `exec()` never changes a process's identity, confirmed directly by the comment in `process_commit_exec()` (see [Process Identity](#process-identity)). There is no way for a non-root user to gain elevated privilege by running a specific program, and correspondingly no way to build a "run this one thing as root" helper the way real Unix uses setuid binaries.
 - **No multi-group membership** — each user has exactly one primary `gid`; `users.h`'s own header comment describes the model as "a simple user/group database over LufiraFS text files — classic early Unix style: one primary group per user, no multi-group membership." There is no supplementary-groups list anywhere in `user_entry_t` or `process_t`.
-- **Non-cryptographic password hashing** — passwords are hashed with unsalted 32-bit FNV-1a (see [Password Hashing](#password-hashing)), which is trivially brute-forceable and offers no collision resistance. Combined with `/etc/passwd` being world-readable (`perm 0644`), any local non-root process can read every account's hash.
+- **Password hashing has no work factor** — since 0.9.5, passwords are salted SHA-256 rather than unsalted 32-bit FNV-1a (see [Password Hashing](#password-hashing)), but SHA-256 alone is still not a proper password KDF (no deliberate slowdown like PBKDF2/bcrypt/argon2). Combined with `/etc/passwd` being world-readable (`perm 0644`), any local non-root process can still read every account's `(salt, hash)` pair and attempt an offline dictionary/brute-force attack.
 - **`cd` does not enforce directory permissions** — `SYS_CHDIR` (`syscall.c`) never calls `lufirafs_check_access()` (see [Enforcement Coverage](#enforcement-coverage)), so a directory's own exec ("search") bit does not prevent changing into it. `ls`, by contrast, is no longer in this category: since v0.7 it's a userspace package that opens its target with a plain `SYS_OPEN(O_RDONLY)` first, which *is* permission-checked (read bit on the directory) — see [Enforcement Coverage](#enforcement-coverage).
 - **`su`'s password prompt moved, but the kernel-side check did not change** — the current userspace `su` builtin (`lufira-packages/shell/shell.c`) prompts for the password separately and suppresses local echo while it's typed, unlike the old kernel-native `command_su()` (dead code), which took the password as a plain, visible command-line argument (`su <username> [password]`). The actual password check still happens once, inside the kernel (`SYS_SU` → `users_check_password()`), unchanged by this move.
 - **Hardcoded default root password shipped in the seed image** — every built `disk.img` ships `root` with the same well-known password (`toor`) and an additional `guest` account with **no password at all** (see [Default and Seeded Accounts](#default-and-seeded-accounts)). This is a real security problem for any use beyond a local, single-user hobby/testing context — there is no first-boot password-change flow, and nothing warns a user to change either credential.

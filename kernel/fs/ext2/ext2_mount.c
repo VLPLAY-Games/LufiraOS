@@ -133,6 +133,7 @@ int vfs_ext2_unmount(const char *prefix) {
             vfs_ext2_mount_t *m = &g_mounts[i];
             sync_mount_to_usb(m);
             kfree(m->fs.dirty_map);
+            kfree(m->fs.trap_block);
             kfree(m->image_buf);
             m->image_buf = NULL;
             m->in_use = 0;

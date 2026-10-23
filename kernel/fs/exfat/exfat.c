@@ -31,8 +31,17 @@ static void mark_dirty(exfat_fs_t *fs, uint32_t byte_off, uint32_t len) {
 static inline uint8_t *fat_entry_ptr(exfat_fs_t *fs, uint32_t cluster) {
     return fs->image + fs->fat_offset_bytes + (uint64_t)cluster * 4;
 }
-static uint32_t get_fat(exfat_fs_t *fs, uint32_t cluster) { return rd32(fat_entry_ptr(fs, cluster)); }
+// БЕЗОПАСНОСТЬ: cluster приходит из цепочки FAT/записи каталога на диске —
+// без верхней границы (валидные номера кластеров — [2, cluster_count+1],
+// та же договорённость, что max_cluster в kernel/fs/fat/fat.c)
+// fat_entry_ptr() давал произвольный offset за пределами fs->image.
+// EXFAT_FAT_BAD уже распознаётся cluster_for_index() как конец цепочки.
+static uint32_t get_fat(exfat_fs_t *fs, uint32_t cluster) {
+    if (cluster < 2 || cluster >= fs->cluster_count + 2) return EXFAT_FAT_BAD;
+    return rd32(fat_entry_ptr(fs, cluster));
+}
 static void set_fat(exfat_fs_t *fs, uint32_t cluster, uint32_t val) {
+    if (cluster < 2 || cluster >= fs->cluster_count + 2) return;
     wr32(fat_entry_ptr(fs, cluster), val);
     mark_dirty(fs, (uint32_t)(fat_entry_ptr(fs, cluster) - fs->image), 4);
 }
@@ -43,12 +52,14 @@ static inline uint64_t cluster_byte_offset(exfat_fs_t *fs, uint32_t cluster) {
     return (uint64_t)fs->cluster_heap_offset_bytes + (uint64_t)(cluster - 2) * fs->cluster_size;
 }
 static int read_cluster_raw(exfat_fs_t *fs, uint32_t cluster, void *buf) {
-    if (cluster < 2) return -1;
+    // Верхняя граница — та же причина, что у get_fat()/set_fat() выше:
+    // cluster может прийти из цепочки FAT на диске без проверки сверху.
+    if (cluster < 2 || cluster >= fs->cluster_count + 2) return -1;
     uint64_t off = cluster_byte_offset(fs, cluster);
     return fs->dev.read_blocks(fs->dev.ctx, (uint32_t)(off / 512), fs->cluster_size / 512, buf);
 }
 static int write_cluster_raw(exfat_fs_t *fs, uint32_t cluster, const void *buf) {
-    if (cluster < 2) return -1;
+    if (cluster < 2 || cluster >= fs->cluster_count + 2) return -1;
     uint64_t off = cluster_byte_offset(fs, cluster);
     return fs->dev.write_blocks(fs->dev.ctx, (uint32_t)(off / 512), fs->cluster_size / 512, buf);
 }
@@ -71,6 +82,12 @@ static uint32_t alloc_cluster(exfat_fs_t *fs) {
 }
 
 static void free_cluster(exfat_fs_t *fs, uint32_t cluster) {
+    // БЕЗОПАСНОСТЬ: вызывающие (exfat_truncate()/exfat_delete()) берут
+    // cluster из first_cluster записи каталога на диске — у повреждённого/
+    // злонамеренного образа это произвольное число, без верхней границы
+    // индекс "i >> 3" уходил за пределы fs->bitmap (отдельное kmalloc-
+    // выделение размером bitmap_bits/8, см. exfat.h).
+    if (cluster < 2 || cluster >= fs->cluster_count + 2) return;
     uint32_t i = cluster - 2;
     fs->bitmap[i >> 3] &= ~(1 << (i & 7));
 }
@@ -422,6 +439,15 @@ int exfat_init(exfat_fs_t *fs, const exfat_blockdev_t *dev, uint32_t total_secto
     // fat_entry_ptr() читал/писал бы за пределами fs->image (выделен ровно
     // под cluster_heap_offset_bytes, не под весь диск, см. exfat.h).
     if ((uint64_t)fs->fat_offset_bytes + (uint64_t)fs->fat_length_bytes > fs->cluster_heap_offset_bytes) return -2;
+    // fat_length_bytes и cluster_count — НЕЗАВИСИМЫЕ поля на диске:
+    // проверка выше гарантирует только то, что сама таблица FAT укладывается
+    // до кучи кластеров, не то, что в неё реально влезают cluster_count
+    // записей по 4 байта — без этого get_fat()/set_fat() (их собственная
+    // проверка "cluster < cluster_count+2" ниже) всё ещё могли читать/писать
+    // за пределами ЗАНЯТОЙ диском части fs->image, в "хвосте" до
+    // cluster_heap_offset_bytes, если fat_length_bytes занижен относительно
+    // cluster_count.
+    if ((uint64_t)fs->fat_length_bytes < ((uint64_t)fs->cluster_count + 2) * 4) return -2;
     if (fs->cluster_heap_offset_bytes % 512 != 0) return -2; // не укладывается в 512-байтные LBA устройства
 
     fs->total_sectors = total_sectors;
@@ -726,6 +752,11 @@ void exfat_truncate(exfat_fs_t *fs, exfat_handle_t h) {
         if (nofat) {
             uint64_t size = rd64(se + 24);
             uint32_t n = (uint32_t)((size + fs->cluster_size - 1) / fs->cluster_size);
+            // size — 64-битное поле прямо с диска; у файла не может быть
+            // больше кластеров, чем их всего на ФС — иначе при повреждённом
+            // образе цикл крутится миллиарды итераций (каждая уже безопасна
+            // благодаря проверке в free_cluster(), но это всё равно подвес).
+            if (n > fs->cluster_count) n = fs->cluster_count;
             for (uint32_t i = 0; i < n; i++) free_cluster(fs, fc + i);
         } else {
             uint32_t cc = fc;
@@ -863,6 +894,7 @@ int exfat_unlink(exfat_fs_t *fs, exfat_handle_t parent, const char *name) {
     if (first_cluster >= 2) {
         if (no_fat_chain) {
             uint32_t n = (uint32_t)((target_size + fs->cluster_size - 1) / fs->cluster_size);
+            if (n > fs->cluster_count) n = fs->cluster_count; // см. комментарий в exfat_truncate()
             for (uint32_t i = 0; i < n; i++) free_cluster(fs, first_cluster + i);
         } else {
             uint32_t c = first_cluster;

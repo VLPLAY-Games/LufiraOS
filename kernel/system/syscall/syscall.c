@@ -703,8 +703,18 @@ static uint64_t sys_kill(uint64_t pid,
     (void)unused2;
     (void)unused3;
 
+    if (!current_process) return (uint64_t)-EFAULT;
     if (pid == 0)
         return (uint64_t)-1;
+
+    // БЕЗОПАСНОСТЬ: без этой проверки любой процесс мог прислать
+    // произвольный сигнал (включая SIGKILL) любому другому pid — та же
+    // модель владения, что у файлов (см. uid-проверку в sys_chmod выше):
+    // root или совпадающий uid.
+    process_t *target = process_find_by_pid((uint32_t)pid);
+    if (!target) return (uint64_t)-1;
+    if (current_process->uid != 0 && current_process->uid != target->uid)
+        return (uint64_t)-EPERM;
 
     int signal = sig ? (int)sig : SIGTERM;
 
@@ -1553,6 +1563,12 @@ static uint64_t sys_usb_read(uint64_t index, uint64_t lba, uint64_t buf_ptr, uin
                              uint64_t unused1) {
     (void)unused1;
     if (!current_process) return (uint64_t)-EFAULT;
+    // БЕЗОПАСНОСТЬ: прямое чтение по LBA идёт мимо файловой системы и её
+    // прав — непривилегированный процесс мог прочитать чужие данные с
+    // устройства (например, с раздела, смонтированного от имени root'а)
+    // в обход permission-модели SYS_OPEN/SYS_READ. Root-only, как и запись
+    // (см. комментарий в syscall.h).
+    if (current_process->uid != 0) return (uint64_t)-EPERM;
 
     uint32_t max_lba, block_size;
     if (xhci_msd_get_info((int)index, &max_lba, &block_size) != 0) return (uint64_t)-ENOENT;
@@ -1868,11 +1884,18 @@ static uint64_t sys_ipc_recv(uint64_t msg_out_ptr, uint64_t timeout_ms, uint64_t
     return 1;
 }
 
-// SYS_WM_REGISTER (59) — см. syscall.h.
+// SYS_WM_REGISTER (59) — root-only, см. syscall.h.
 static uint64_t sys_wm_register(uint64_t unused0, uint64_t unused1, uint64_t unused2,
                                 uint64_t unused3, uint64_t unused4) {
     (void)unused0; (void)unused1; (void)unused2; (void)unused3; (void)unused4;
     if (!current_process) return (uint64_t)-EFAULT;
+    // БЕЗОПАСНОСТЬ (WM hijack): process_wm_register() сам защищает только
+    // от повторной регистрации (g_wm_pid != 0), не от того, кто
+    // регистрируется — непривилегированный процесс мог успеть
+    // зарегистрироваться первым (до старта настоящего wm.elf) и перехватить
+    // роль WM для всех клиентов. Та же root-only модель, что уже у
+    // SYS_NETD_REGISTER/SYS_SOUNDD_REGISTER.
+    if (current_process->uid != 0) return (uint64_t)-EPERM;
     return (process_wm_register(current_process->pid) == 0) ? 0 : (uint64_t)-1;
 }
 

@@ -581,6 +581,8 @@ static inline long sys_usb_info(long index, struct lufira_usb_info *out) {
 
 // buf_size должен быть >= block_size реального устройства (см. sys_usb_info()),
 // иначе -EINVAL. Возвращает число прочитанных/записанных байт при успехе.
+// Root-only (прямое чтение по LBA идёт мимо прав файловой системы) — см.
+// комментарий у SYS_USB_READ в kernel/system/syscall/syscall.h.
 static inline long sys_usb_read(long index, unsigned long lba, void *buf, unsigned long buf_size) {
     return __syscall5(SYS_USB_READ, index, (long)lba, (long)buf, (long)buf_size, 0);
 }

@@ -87,7 +87,17 @@ static void mark_fat_sector_dirty(fat_fs_t *fs, uint32_t cluster) {
 /* ======== Таблица FAT всегда лежит в резидентных метаданных (fs->image),
  * независимо от того, как читаются данные/корень. ======== */
 uint32_t get_fat_entry(fat_fs_t *fs, uint32_t cluster) {
-    if (cluster < 2) return 0xFFF7;
+    // БЕЗОПАСНОСТЬ: cluster приходит из цепочки FAT на диске (следующий
+    // кластер — произвольное 28-битное значение при повреждённой/
+    // злонамеренной ФС, не обязательно EOC-маркер) — без верхней границы
+    // offset ниже уходил за пределы fs->image (резидентные метаданные, не
+    // весь диск), та же проверка, что уже у read/write_cluster_raw() выше.
+    // 0x0FFFFFFF, не 0xFFF7 — is_eoc() сравнивает с разным порогом в
+    // зависимости от fat_type (0xFF8/0xFFF8/0x0FFFFFF8), и только значение
+    // выше всех трёх гарантированно читается вызывающим кодом как "конец
+    // цепочки" независимо от типа ФС (иначе цикл обхода цепочки мог
+    // зависнуть на повреждённой FAT16/32, где 0xFFF7 < порога 0xFFF8).
+    if (cluster < 2 || cluster >= fs->max_cluster) return 0x0FFFFFFF;
     uint8_t *fat = fs->image + fs->fat_start * 512;
     uint32_t offset, entry;
     switch (fs->fat_type) {
@@ -108,7 +118,7 @@ uint32_t get_fat_entry(fat_fs_t *fs, uint32_t cluster) {
             entry &= 0x0FFFFFFF;
             break;
         default:
-            return 0xFFF7;
+            return 0x0FFFFFFF;
     }
     return entry;
 }
@@ -121,7 +131,9 @@ int is_eoc(fat_fs_t *fs, uint32_t cluster) {
 
 /* Установка записи FAT с пометкой грязных секторов */
 static void set_fat_entry(fat_fs_t *fs, uint32_t cluster, uint32_t value) {
-    if (cluster < 2) return;
+    // БЕЗОПАСНОСТЬ: та же верхняя граница, что и в get_fat_entry() выше —
+    // без неё это запись за пределами fs->image с произвольным offset.
+    if (cluster < 2 || cluster >= fs->max_cluster) return;
 
     uint32_t sectors_per_fat = fs->sectors_per_fat;  /* используем сохранённое значение */
 

@@ -3,7 +3,18 @@
 #include "lib/stddef.h"
 #include "lib/string.h"
 
+// БЕЗОПАСНОСТЬ: block_num почти всегда приходит прямо с диска — inode->
+// i_block[]/косвенные таблицы/extent-дерево/bg_inode_table/bg_*_bitmap —
+// у повреждённого или злонамеренного образа это произвольное 32-битное
+// число. Без верхней границы это OOB-чтение/запись за пределами fs->image
+// (резидентный целиком весь образ устройства, см. ext2.h) — самый серьёзный
+// найденный баг в драйверах ФС. fs->sb->s_blocks_count — доверенная граница
+// (ext2_init() проверяет s_blocks_count*block_size <= image_size при
+// монтировании), выход за неё отдаёт занулённый fs->trap_block вместо
+// чтения/записи чужой памяти — тот же трюк, что sparse-дырка (block==0)
+// у вызывающих, не падение и не порча кучи.
 static inline void *blk_ptr(ext2_fs_t *fs, uint32_t block_num) {
+    if (block_num >= fs->sb->s_blocks_count) return fs->trap_block;
     return fs->image + (uint64_t)block_num * fs->block_size;
 }
 
@@ -18,15 +29,28 @@ static void mark_dirty(ext2_fs_t *fs, uint32_t byte_off, uint32_t len) {
 // Группа по индексу — шаг fs->desc_size, не sizeof(ext2_group_desc_t): при
 // 64BIT дескриптор 64-байтный (лишние поля нам не нужны), но первые 32 байта
 // совпадают с 32-битным форматом — приведение типа ниже корректно всегда.
+//
+// БЕЗОПАСНОСТЬ: free_block()/free_inode() вычисляют g делением block/ino,
+// пришедших прямо с диска (extent-дерево, inode->i_block[]) — у повреждённого
+// образа g может выйти за fs->groups_count. fs->trap_block (>= desc_size)
+// используется и здесь как общая "ловушка" — тот же приём, что у blk_ptr().
 static inline ext2_group_desc_t *group_ptr(ext2_fs_t *fs, uint32_t g) {
+    if (g >= fs->groups_count) return (ext2_group_desc_t *)fs->trap_block;
     return (ext2_group_desc_t *)((uint8_t *)fs->groups + (uint64_t)g * fs->desc_size);
 }
 
 static inline ext2_inode_t *inode_ptr(ext2_fs_t *fs, uint32_t ino) {
+    // БЕЗОПАСНОСТЬ: ino==0 невалиден по формату (нумерация с 1); ino выше
+    // s_inodes_count — повреждённый образ или прямой вызов с чужим числом
+    // (ext2_write_file() не перепроверяет ino). group дополнительно
+    // перепроверяется через group_ptr() выше на случай, если сам
+    // s_inodes_count/s_inodes_per_group не согласован с groups_count.
+    if (ino == 0 || ino > fs->sb->s_inodes_count) return (ext2_inode_t *)fs->trap_block;
     uint32_t group = (ino - 1) / fs->sb->s_inodes_per_group;
     uint32_t idx = (ino - 1) % fs->sb->s_inodes_per_group;
     uint32_t table_block = group_ptr(fs, group)->bg_inode_table;
     uint64_t off = (uint64_t)table_block * fs->block_size + (uint64_t)idx * fs->inode_size;
+    if (off + fs->inode_size > fs->image_size) return (ext2_inode_t *)fs->trap_block;
     return (ext2_inode_t *)(fs->image + off);
 }
 
@@ -58,8 +82,22 @@ int ext2_init(ext2_fs_t *fs, uint8_t *image, uint32_t image_size) {
     // образа (например, auto-detect sys_mount() на FAT/exFAT-флешке) привёл
     // бы к делению на ноль (#DE).
     if (fs->sb->s_blocks_per_group == 0 || fs->sb->s_inodes_per_group == 0) return -1;
+    // s_blocks_count — независимое поле на диске, не выводится из image_size:
+    // без этой проверки blk_ptr() не мог бы доверять ему как границе (см.
+    // комментарий там) — объявленный размер ФС обязан укладываться в реально
+    // резидентный образ.
+    if ((uint64_t)fs->sb->s_blocks_count * fs->block_size > image_size) return -1;
+
+    fs->trap_block = (uint8_t *)kmalloc(fs->block_size);
+    if (!fs->trap_block) return -1;
+    memset(fs->trap_block, 0, fs->block_size);
 
     fs->inode_size = (fs->sb->s_rev_level >= 1 && fs->sb->s_inode_size) ? fs->sb->s_inode_size : 128;
+    // s_inode_size без верхней границы — alloc_inode()/ext2_read_inode()
+    // используют fs->inode_size как длину memset/шаг таблицы инодов; завышенный
+    // (на диске, не выводится ни из чего другого) значение испортило бы
+    // соседние метаданные в fs->image за пределами одной записи инода.
+    if (fs->inode_size < 128 || fs->inode_size > fs->block_size) return -1;
     fs->has_filetype = (fs->sb->s_rev_level >= 1) &&
                         (fs->sb->s_feature_incompat & EXT2_FEATURE_INCOMPAT_FILETYPE);
 
@@ -135,9 +173,17 @@ static uint32_t alloc_block(ext2_fs_t *fs) {
 }
 
 static void free_block(ext2_fs_t *fs, uint32_t block) {
-    if (!block) return;
+    // БЕЗОПАСНОСТЬ: block приходит из extent-дерева/i_block[] на диске —
+    // у повреждённого образа это произвольное число. block < s_first_data_
+    // block даёт underflow в вычитании ниже (огромный g); без верхней
+    // границы g может выйти за fs->groups_count — group_ptr() сам уже
+    // подстрахован (отдаёт trap_block), но здесь дешевле и понятнее
+    // отказаться сразу, не трогая bg_free_blocks_count/s_free_blocks_count
+    // бессмысленным "освобождением" чужого/несуществующего блока.
+    if (!block || block < fs->sb->s_first_data_block || block >= fs->sb->s_blocks_count) return;
     uint32_t g = (block - fs->sb->s_first_data_block) / fs->sb->s_blocks_per_group;
     uint32_t idx = (block - fs->sb->s_first_data_block) % fs->sb->s_blocks_per_group;
+    if (g >= fs->groups_count) return;
     bitmap_free(fs, group_ptr(fs, g)->bg_block_bitmap, idx);
     group_ptr(fs, g)->bg_free_blocks_count++;
     fs->sb->s_free_blocks_count++;
@@ -166,8 +212,13 @@ static uint32_t alloc_inode(ext2_fs_t *fs, int is_dir) {
 }
 
 static void free_inode(ext2_fs_t *fs, uint32_t ino, int is_dir) {
+    // БЕЗОПАСНОСТЬ: та же причина, что у free_block() выше — ino может
+    // прийти неперепроверенным (ext2_write_file() не вызывает
+    // ext2_read_inode() первым).
+    if (ino == 0 || ino > fs->sb->s_inodes_count) return;
     uint32_t g = (ino - 1) / fs->sb->s_inodes_per_group;
     uint32_t idx = (ino - 1) % fs->sb->s_inodes_per_group;
+    if (g >= fs->groups_count) return;
     bitmap_free(fs, group_ptr(fs, g)->bg_inode_bitmap, idx);
     group_ptr(fs, g)->bg_free_inodes_count++;
     fs->sb->s_free_inodes_count++;

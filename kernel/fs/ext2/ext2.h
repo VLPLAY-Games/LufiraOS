@@ -139,6 +139,11 @@ typedef struct {
     int       has_filetype;
     uint8_t  *dirty_map;       // 1 бит/512-байтный сектор образа — см. fat.h
     uint32_t  dirty_map_size;
+    // Один блок-"ловушка", зануленный раз при монтировании — см. blk_ptr()
+    // в ext2.c: номер блока (из inode->i_block[]/косвенных таблиц/дескриптора
+    // группы — всё на диске, не доверяем) за пределами s_blocks_count
+    // получает указатель сюда вместо чтения/записи за пределами fs->image.
+    uint8_t  *trap_block;
 } ext2_fs_t;
 
 // 0 при успехе (валидный magic, фичи — в пределах EXT2_SUPPORTED_INCOMPAT/
