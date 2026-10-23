@@ -29,8 +29,18 @@
 #define LUFIRAFS_ESP_SIZE     (4u * 1024u * 1024u)
 
 #define LUFIRAFS_MAGIC        0x31534C4Fu   // "OLS1" по байтам little-endian
-#define LUFIRAFS_VERSION      2u            // v2: inode incl. uid/gid/perm
-#define LUFIRAFS_BLOCK_SIZE   4096u
+#define LUFIRAFS_VERSION      3u            // v3: block_size 4096 -> 8192 (см. ниже)
+// Был 4096 — при 12 прямых + 1 косвенном блоке (1024 указателя на блок)
+// максимальный размер файла получался ~4.05МиБ (LUFIRAFS_MAX_FILE_SIZE
+// ниже), а doom.lpg — уже 4.77МиБ: любая запись после ~4.05МиБ упиралась
+// в проверку в lufirafs_write() и возвращала -1 ("write error while
+// staging download" в dlpg.c). Тот же косвенный блок при block_size=8192
+// даёт 2048 указателей — максимум файла ~16.09МиБ, с запасом. Несовместимо
+// со старыми образами диска (lufirafs_init() и так сверяет sb.block_size
+// с этой константой и отказывает при расхождении) — ожидается полная
+// пересборка через LufiraOS-Builder, отдельных пользовательских дисков
+// с данными пока не существует.
+#define LUFIRAFS_BLOCK_SIZE   8192u
 #define LUFIRAFS_INODE_SIZE   76u
 #define LUFIRAFS_DIRENT_SIZE  64u
 #define LUFIRAFS_MAX_NAME     59            // + завершающий '\0' в 60-м байте

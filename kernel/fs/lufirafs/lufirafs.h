@@ -16,6 +16,16 @@ typedef struct {
                               // disk_write_sectors() (см. kernel/drivers/disk)
     lufirafs_superblock_t sb;
     uint8_t *dirty_bitmap;    // 1 бит на блок ВСЕГО региона (kmalloc'd)
+    // Курсор alloc_block() — НЕ персистентный (не пишется на диск, просто
+    // sb.data_start после lufirafs_init()). Без него каждый alloc_block()
+    // сканировал битовую карту заново от data_start, так что запись
+    // многомегабайтного файла (напр. doom.lpg, ~4.5МиБ) при почти пустом
+    // хвосте диска пересканировала весь уже занятый префикс на КАЖДЫЙ
+    // новый блок — ощутимый вклад в "очень долго" при установке. Теперь
+    // скан стартует с последнего места находки и оборачивается на
+    // data_start только если до конца региона свободных блоков не нашлось
+    // (нужно для переиспользования дыр после unlink/truncate).
+    uint32_t next_free_block;
 } lufirafs_t;
 
 int lufirafs_init(lufirafs_t *fs, void *image, uint32_t image_size, uint32_t lba_offset);

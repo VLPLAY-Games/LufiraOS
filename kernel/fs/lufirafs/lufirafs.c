@@ -51,14 +51,24 @@ static void block_bitmap_set(lufirafs_t *fs, uint32_t block, int used) {
 }
 
 static uint32_t alloc_block(lufirafs_t *fs) {
-    for (uint32_t b = fs->sb.data_start; b < fs->sb.total_blocks; b++) {
-        if (!block_bitmap_test(fs, b)) {
-            block_bitmap_set(fs, b, 1);
-            memset(get_block_ptr(fs, b), 0, LUFIRAFS_BLOCK_SIZE);
-            mark_dirty(fs, b);
-            if (fs->sb.free_blocks > 0) fs->sb.free_blocks--;
-            write_superblock(fs);
-            return b;
+    // Сначала от курсора до конца региона (общий случай — растущий файл на
+    // диске без дыр), затем от data_start до курсора (подбирает блоки,
+    // освобождённые unlink()/truncate() позади курсора). Застревает на
+    // data_start по кругу, если диск полон — тот же результат (0), что и у
+    // старого полного скана.
+    for (uint32_t pass = 0; pass < 2; pass++) {
+        uint32_t start = (pass == 0) ? fs->next_free_block : fs->sb.data_start;
+        uint32_t end = (pass == 0) ? fs->sb.total_blocks : fs->next_free_block;
+        for (uint32_t b = start; b < end; b++) {
+            if (!block_bitmap_test(fs, b)) {
+                block_bitmap_set(fs, b, 1);
+                memset(get_block_ptr(fs, b), 0, LUFIRAFS_BLOCK_SIZE);
+                mark_dirty(fs, b);
+                if (fs->sb.free_blocks > 0) fs->sb.free_blocks--;
+                write_superblock(fs);
+                fs->next_free_block = b + 1;
+                return b;
+            }
         }
     }
     return 0;
@@ -629,6 +639,8 @@ int lufirafs_init(lufirafs_t *fs, void *image, uint32_t image_size, uint32_t lba
     fs->dirty_bitmap = (uint8_t*)kmalloc(dirty_bytes);
     if (!fs->dirty_bitmap) return -1;
     memset(fs->dirty_bitmap, 0, dirty_bytes);
+
+    fs->next_free_block = fs->sb.data_start;
 
     lufirafs_mounted = 1;
     return 0;
