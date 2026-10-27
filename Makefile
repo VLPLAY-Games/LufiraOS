@@ -115,6 +115,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/system/cpu/gdt.c \
     $(KERNEL_DIR)/system/cpu/idt.c \
     $(KERNEL_DIR)/system/cpu/irq.c \
+    $(KERNEL_DIR)/system/cpu/apic.c \
     $(KERNEL_DIR)/system/cpu/tss.c \
     $(KERNEL_DIR)/system/mm/pmm.c \
     $(KERNEL_DIR)/system/mm/paging.c \

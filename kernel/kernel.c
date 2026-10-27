@@ -19,6 +19,7 @@
 #include "system/cpu/tss.h"
 #include "fs/lufirafs/lufirafs.h"
 #include "system/cpu/irq.h"
+#include "system/cpu/apic.h"
 #include "system/acpi/acpi.h"
 #include "system/process/process.h"
 #include "system/timer/pit.h"
@@ -44,6 +45,18 @@ static inline void outb(uint16_t port, uint8_t val) {
     asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 
+// Классический трюк инициализации 8259 PIC (OSDev "8259 PIC" wiki) — запись
+// в порт 0x80 (неиспользуемый "POST diagnostic" порт, безопасно писать куда
+// угодно) занимает реальное время шины, достаточное, чтобы настоящий чип
+// успел обработать предыдущий ICW/OCW прежде чем придёт следующий. У
+// эмулированного в QEMU 8259 это не нужно (обрабатывает мгновенно), поэтому
+// без этой задержки всё работает под QEMU, но на части реального железа
+// (особенно бюджетные Atom/Celeron-чипсеты) последовательные outb() без
+// паузы могут быть обработаны некорректно/не полностью.
+static inline void io_wait(void) {
+    outb(0x80, 0);
+}
+
 #define PIC1         0x20
 #define PIC2         0xA0
 #define PIC1_COMMAND PIC1
@@ -53,28 +66,43 @@ static inline void outb(uint16_t port, uint8_t val) {
 #define ICW1_ICW4    0x01
 #define ICW1_INIT    0x10
 
-static void pic_remap(void) {
-    outb(PIC1_COMMAND, ICW1_INIT | ICW1_ICW4);
-    outb(PIC2_COMMAND, ICW1_INIT | ICW1_ICW4);
-    outb(PIC1_DATA, 0x20);
-    outb(PIC2_DATA, 0x28);
-    outb(PIC1_DATA, 0x04);
-    outb(PIC2_DATA, 0x02);
-    outb(PIC1_DATA, 0x01);
-    outb(PIC2_DATA, 0x01);
-    outb(PIC1_DATA, 0xFF);
-    outb(PIC2_DATA, 0xFF);
-
-    // Ядро целиком на легаси 8259 PIC (Local APIC/IOAPIC не программируются).
-    // На части реального железа IMCR (порты 0x22/0x23, Intel MP Spec) держит
-    // выходы PIC1 переключёнными на Local APIC вместо CPU — так могла оставить
-    // прошивка после multi-core bring-up через APIC. sti/irq_enable(0) в этом
-    // случае проходят без ошибок, но IRQ физически не доходит до CPU: первый
-    // код, которому нужно реально дождаться тика таймера (xhci_init() ->
-    // pit_wait_ms()), виснет намертво. Принудительно переключаем IMCR в
-    // "PIC mode" — безопасно и на чипсетах без IMCR (запись игнорируется).
+// IMCR (порты 0x22/0x23, Intel MP Spec) — системный переключатель "куда
+// физически подключён единственный провод в CPU INTR": бит0=0 — PIC Mode
+// (8259 напрямую в CPU, IOAPIC ОТКЛЮЧЁН), бит0=1 — APIC/Symmetric I/O Mode
+// (8259 ОТКЛЮЧЁН, работает только IOAPIC->LAPIC). Это переключатель "или
+// то, или другое", НЕ "выбрать путь по умолчанию, остальное неважно" — если
+// он реально есть на этом чипсете, он определяет, долетит ли хоть что-то до
+// CPU, независимо от того, насколько правильно запрограммирован IOAPIC.
+//
+// НАЙДЕННЫЙ БАГ: pic_remap() раньше звал это БЕЗУСЛОВНО и ВСЕГДА в "PIC
+// mode" (0x00) — то есть даже после того, как ниже по коду успешно
+// поднимался APIC/IOAPIC (apic_init()), IMCR продолжал быть выставлен в
+// "PIC mode" с самого начала загрузки, что на чипсете с реальным IMCR
+// физически ОТКЛЮЧАЕТ IOAPIC от CPU насовсем — ровно поэтому даже
+// правильно запрограммированный IOAPIC (см. apic.c) не доставлял ни одного
+// прерывания (any_irq оставался 0 даже с "[APIC] irq 0 -> GSI 2..." в логе).
+// Теперь зовётся РОВНО ОДИН РАЗ, уже после попытки apic_init(), с
+// полярностью, соответствующей тому, что РЕАЛЬНО используется дальше.
+static void pic_set_imcr_mode(int apic_mode) {
     outb(0x22, 0x70);
-    outb(0x23, 0x01);
+    outb(0x23, apic_mode ? 0x01 : 0x00);
+}
+
+static void pic_remap(void) {
+    outb(PIC1_COMMAND, ICW1_INIT | ICW1_ICW4); io_wait();
+    outb(PIC2_COMMAND, ICW1_INIT | ICW1_ICW4); io_wait();
+    outb(PIC1_DATA, 0x20); io_wait();
+    outb(PIC2_DATA, 0x28); io_wait();
+    outb(PIC1_DATA, 0x04); io_wait();
+    outb(PIC2_DATA, 0x02); io_wait();
+    outb(PIC1_DATA, 0x01); io_wait();
+    outb(PIC2_DATA, 0x01); io_wait();
+    outb(PIC1_DATA, 0xFF); io_wait();
+    outb(PIC2_DATA, 0xFF); io_wait();
+
+    // IMCR здесь НЕ трогаем — выставляется ровно один раз, позже, уже по
+    // факту того, поднялся APIC или нет (см. pic_set_imcr_mode() выше и
+    // её единственный вызов ниже по коду, после apic_init()).
 }
 
 lufirafs_t lufirafs;
@@ -293,7 +321,7 @@ void _start(BootInfo* bi) {
     LOG_PENDING("Initializing IDT...");
     idt_init();
     LOG_DONE_OK("IDT initialized");
-    
+
     LOG_PENDING("Remapping PIC...");
     pic_remap();
     LOG_DONE_OK("PIC remapped");
@@ -340,16 +368,35 @@ void _start(BootInfo* bi) {
         LOG_FAIL("No disk image provided");
     }
 
+    // apic_ok=1 — LAPIC+IOAPIC подняты по ACPI MADT и irq.c дальше работает
+    // через них (apic_available()); 0 — остаёмся на легаси 8259, как раньше
+    // этой фичи. См. apic.c/apic.h: на части реального железа 8259
+    // физически не доходит до CPU вообще, IOAPIC — единственный рабочий путь.
+    int apic_ok = 0;
     if (bi->RsdpAddress) {
         LOG_PENDING("Initializing ACPI...");
         if (acpi_init(bi->RsdpAddress) == 0) {
             LOG_DONE_OK("ACPI initialized");
+
+            LOG_PENDING("Initializing LAPIC/IOAPIC...");
+            apic_ok = apic_init();
+            if (apic_ok) {
+                LOG_DONE_OK("LAPIC/IOAPIC active (using APIC instead of legacy 8259)");
+            } else {
+                LOG_DONE_WARN("LAPIC/IOAPIC unavailable, staying on legacy 8259 PIC");
+            }
         } else {
             LOG_DONE_WARN("ACPI initialization failed");
         }
     } else {
         LOG_WARN("No RSDP found, ACPI disabled");
     }
+    // Единственное место, где трогаем IMCR — теперь СОГЛАСОВАННО с тем,
+    // что реально используется: APIC поднялся -> APIC mode (1), иначе ->
+    // PIC mode (0). Раньше pic_remap() безусловно форсила PIC mode ДО
+    // этой точки — на чипсете с реальным IMCR это намертво отключало
+    // IOAPIC от CPU, даже когда apic_init() ниже отрабатывал успешно.
+    pic_set_imcr_mode(apic_ok);
 
     LOG_PENDING("Initializing process manager...");
     process_init();

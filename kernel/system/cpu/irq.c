@@ -4,8 +4,13 @@
 #include "drivers/mouse/mouse.h"
 #include "system/timer/pit.h"
 #include "system/driver/driver.h"
+#include "system/cpu/apic.h"
 
-// Прямая работа с портами PIC
+// Прямая работа с портами PIC — путь по умолчанию, ЕСЛИ apic_available()
+// не говорит обратного (см. apic.c/apic.h: на части реального железа 8259
+// физически не доходит до CPU вообще никак, там единственный рабочий путь
+// — LAPIC+IOAPIC; на остальном/под QEMU оба пути эквивалентны, но PIC —
+// то, что уже было проверено временем, поэтому остаётся умолчанием).
 static inline uint8_t inb(uint16_t port) {
     uint8_t ret;
     asm volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
@@ -21,6 +26,10 @@ static inline void outb(uint16_t port, uint8_t val) {
 #define PIC2_DATA 0xA1
 
 static void send_eoi(uint8_t irq) {
+    if (apic_available()) {
+        lapic_eoi();
+        return;
+    }
     if (irq >= 8)
         outb(PIC2_CMD, 0x20);
     outb(PIC1_CMD, 0x20);
@@ -64,6 +73,18 @@ void irq_handler(uint64_t vector, interrupt_frame_t *frame) {
 
 // Включение конкретной линии IRQ
 void irq_enable(uint8_t irq) {
+    if (apic_available()) {
+        // IRQ2 — легаси cascade (master<-slave 8259), у IOAPIC нет такого
+        // понятия: каждый GSI независим. Более того, GSI2 почти всегда УЖЕ
+        // занят Interrupt Source Override для ИСТИННОГО IRQ0 (классическая
+        // ISA-плата подключала таймер именно туда) — попытка здесь
+        // запрограммировать GSI2 под "IRQ2" затёрла бы редирект таймера.
+        // Поэтому IRQ2 на APIC-пути — осознанный no-op.
+        if (irq == 2) return;
+        ioapic_enable_irq(irq, (uint8_t)(0x20 + irq));
+        return;
+    }
+
     uint16_t port;
     uint8_t value;
 
@@ -79,6 +100,12 @@ void irq_enable(uint8_t irq) {
 
 // Выключение линии IRQ
 void irq_disable(uint8_t irq) {
+    if (apic_available()) {
+        if (irq == 2) return; // см. irq_enable() — IRQ2 тут не существует как отдельная линия
+        ioapic_disable_irq(irq);
+        return;
+    }
+
     uint16_t port;
     uint8_t value;
 

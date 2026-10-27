@@ -10,6 +10,7 @@
 #include "lib/string.h"
 #include "system/devmode/devmode.h"
 #include "system/klog/klog.h"
+#include "lib/cpu.h"
 
 /*
  * xHCI-драйвер: контроллер + boot-протокол HID (клавиатура/мышь) +
@@ -1473,6 +1474,59 @@ static void xhci_poll_hotplug(void) {
 }
 
 /* ======================================================================== */
+/* BIOS/SMM hand-off (USB Legacy Support Capability, xHCI spec §7.1.1)      */
+/* ======================================================================== */
+
+// НАЙДЕННЫЙ БАГ (реальное железо, зависает ровно на xhci_reset() после
+// "resetting controller..." — под QEMU всё работало, т.к. у эмулированного
+// xHCI этой capability просто нет). На настоящем ноутбуке контроллер очень
+// часто стартует под управлением прошивки/SMM; пока BIOS Owned Semaphore не
+// снят (а до хэндоффа мы его даже не просили снять), запись HCRST может не
+// просто быть проигнорирована, а зависнуть насмерть — прошивка продолжает
+// дёргать контроллер через SMI параллельно с ОС. Это тот же класс проблемы,
+// что печально известный EHCI legacy hand-off, только для xHCI.
+//
+// xECP (HCCPARAMS1[31:16]) — смещение первого extended capability в
+// ДВОЙНЫХ СЛОВАХ от cap_base. Each capability: байт 0 = Capability ID,
+// байт 1 = Next Capability Pointer (тоже в двойных словах, 0 = конец
+// списка). ID==1 — USB Legacy Support Capability (USBLEGSUP на offset+0,
+// USBLEGCTLSTS на offset+4).
+static void xhci_bios_handoff(uint32_t hccparams1) {
+    uint32_t xecp_dwords = (hccparams1 >> 16) & 0xFFFFu;
+    if (xecp_dwords == 0) return; // нет списка расширенных capability — хэндофф не нужен
+
+    uint32_t off = xecp_dwords * 4;
+    for (int guard = 0; guard < 64; guard++) { // защита от битого/циклического списка
+        uint32_t cap = reg_read32(xhci_cap_base, off);
+        uint8_t cap_id = (uint8_t)(cap & 0xFFu);
+        uint8_t next = (uint8_t)((cap >> 8) & 0xFFu);
+
+        if (cap_id == 1) { // USB Legacy Support Capability
+            if (cap & (1u << 16)) { // BIOS Owned Semaphore выставлен
+                reg_write32(xhci_cap_base, off, cap | (1u << 24)); // просим OS Owned
+
+                int timeout = 1000; // 1с с запасом, как у AHCI/прочих real-hardware таймаутов тут
+                while (timeout-- > 0 && (reg_read32(xhci_cap_base, off) & (1u << 16))) {
+                    pit_wait_ms(1);
+                }
+                if (reg_read32(xhci_cap_base, off) & (1u << 16)) {
+                    printf("[XHCI] WARNING: BIOS did not release xHCI ownership in time\n");
+                }
+            }
+
+            // Глушим дальнейшие SMI от контроллера: нижние 16 бит
+            // USBLEGCTLSTS — enable-биты (обнуляем), верхние 16 — status
+            // (RW1C, пишем все единицы, чтобы сбросить накопленное).
+            reg_write32(xhci_cap_base, off + 4, 0xFFFF0000u);
+            return;
+        }
+
+        if (next == 0) break;
+        off += (uint32_t)next * 4;
+    }
+}
+
+/* ======================================================================== */
 /* Публичный API                                                            */
 /* ======================================================================== */
 
@@ -1503,6 +1557,7 @@ void xhci_init(void) {
 
     DLOG("[XHCI] caplen=%u ctxsize=%u maxslots=%u maxports=%u\n",
          caplen, xhci_context_size, xhci_max_slots, xhci_max_ports);
+    xhci_bios_handoff(hccparams1);
 
     if (!xhci_reset()) return;
 

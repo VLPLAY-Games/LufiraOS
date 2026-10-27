@@ -25,6 +25,15 @@ typedef struct __attribute__((packed)) {
 #define HPET_MMIO_SIZE          1024 // с запасом хватает на caps/config/счётчик
 
 #define HPET_CFG_ENABLE (1ULL << 0)
+// LEG_RT_CNF (Legacy Replacement Route, HPET spec §2.3.1): пока этот бит
+// взведён, GSI2/GSI8 (куда по Interrupt Source Override переопределены
+// ISA IRQ0/IRQ8 — см. apic.c) кормит уже не настоящий 8254 PIT/RTC, а
+// компаратор HPET Timer0/Timer1. Этот кернел HPET программирует только как
+// свободно бегущий счётчик (см. шапку файла) и прерываний от него не ждёт,
+// а PIT (pit.c) настроен на честный 8254 — если прошивка оставила
+// LEG_RT_CNF включённым (частый дефолт), PIT'овский IRQ0 физически
+// отключён от GSI2/IOAPIC. Явно сбрасываем бит при инициализации.
+#define HPET_CFG_LEG_RT (1ULL << 1)
 
 static volatile uint8_t *hpet_base = NULL;
 static uint64_t hpet_period_fs = 0; // длительность одного тика, фемтосекунды
@@ -82,9 +91,11 @@ void hpet_init(void) {
     }
 
     uint64_t cfg = hpet_reg_read(HPET_REG_CONFIG);
-    hpet_reg_write(HPET_REG_CONFIG, cfg & ~HPET_CFG_ENABLE);
+    hpet_reg_write(HPET_REG_CONFIG, cfg & ~(HPET_CFG_ENABLE | HPET_CFG_LEG_RT));
     hpet_reg_write(HPET_REG_MAIN_COUNTER, 0);
-    hpet_reg_write(HPET_REG_CONFIG, cfg | HPET_CFG_ENABLE);
+    // ENABLE обратно взводим, LEG_RT_CNF — осознанно НЕТ: возвращаем
+    // настоящему 8254 PIT (pit.c) и RTC их штатные GSI2/GSI8.
+    hpet_reg_write(HPET_REG_CONFIG, (cfg & ~HPET_CFG_LEG_RT) | HPET_CFG_ENABLE);
 
     g_hpet_available = 1;
     DLOG("[HPET] enabled: base=0x%lx period=%lu fs (~%lu Hz)\n",
