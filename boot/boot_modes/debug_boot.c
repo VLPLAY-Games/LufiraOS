@@ -3,7 +3,6 @@
 #include "system/memory.h"
 #include "system/graphics.h"
 #include "system/tables.h"
-#include "loaders/fat_loader.h"
 #include "system/exit_boot.h"
 #include "loaders/kernel_loader.h"
 #include "ui/splash.h"
@@ -111,26 +110,14 @@ VOID DebugBoot(BootInfo *bi, EFI_HANDLE ImageHandle) {
     }
     LOG_OK(L"Kernel loaded (%ld KB)", bi->KernelSize / 1024);
     
-    LOG_INFO(L"Loading FAT image...");
-    EFI_BLOCK_IO_PROTOCOL *BlockIo = NULL;
-    GetBlockIO(LoadedImage, &BlockIo);
-    
-    if (BlockIo && BlockIo->Media) {
-        LoadFATImage(BlockIo, bi, FALSE, FALSE, NULL, 0, 0, 0);
-        if (bi->FATImageBase)
-            LOG_OK(L"FAT image loaded (%ld KB)", bi->FATImageSize / 1024);
-        else if (bi->FATImageSize == 0 && bi->FATImageBase == 0)
-            LOG_FAIL(L"FAT image not loaded - read error or allocation failed");
-        else
-            LOG_FAIL(L"FAT image not loaded - unknown error");
-    } else {
-        if (!BlockIo)
-            LOG_FAIL(L"No Block I/O Protocol available");
-        else if (!BlockIo->Media)
-            LOG_FAIL(L"Block I/O media not present");
-        else
-            LOG_FAIL(L"Block I/O device not accessible");
-    }
+    // v1.0.0 план: ядро больше не читает LufiraFS из предзагруженного в
+    // RAM образа диска (см. kernel/kernel.c — lufirafs_init() сам читает
+    // с диска через свой AHCI/NVMe/ATA-драйвер, найдя партицию по MBR) —
+    // LoadFATImage()/GetBlockIO() (fat_loader.c) больше не нужны ни в
+    // одном boot mode, поля оставлены в BootInfo нулевыми (не удалены —
+    // менять layout структуры без необходимости рискованно).
+    bi->FATImageBase = 0;
+    bi->FATImageSize = 0;
     
     // Memory Map Dump
     EFI_INPUT_KEY Key;

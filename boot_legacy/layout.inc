@@ -3,30 +3,37 @@
 ; (LufiraOS-Builder) — расхождение значит, что stage1/stage2 будут читать
 ; не те сектора.
 ;
-; Разметка ESP (первые cfg.esp_size байт disk.img, см. LufiraOS-Builder/
-; lufira_builder/config.py):
-;   LBA 0        — загрузочный сектор FAT12 (BPB цел, байты 0x3E..0x1FD
-;                   пропатчены STAGE1_CODE).
-;   LBA 1..64    — stage2.bin (до STAGE2_MAX_SECTORS*512 байт): real mode
-;                   A20/unreal/E820/VESA/диск, затем переход в protected/
-;                   long mode.
-;   LBA 65..96   — legacy_main.bin (до LEGACY_MAIN_MAX_SECTORS*512 байт),
-;                   freestanding x86-64 C, собран и грузится как плоский
-;                   бинарник (objcopy -O binary), как kernel.bin ниже — не
-;                   линкуется со stage2.asm напрямую, т.к. 16-битный
-;                   real-mode код stage2 адресуется сегмент-относительно
-;                   (org 0, CS=STAGE2_LOAD_SEGMENT), что несовместимо с
-;                   обычным плоско-адресным ELF-линковщиком. Поэтому
-;                   собирается отдельно и грузится своим INT13-чтением.
-;   LBA 97       — заголовок ядра: magic 'LFKR' (4 байта) + little-endian
-;                   размер (4 байта), затем raw kernel.bin.
-;   LBA 98..4191 — kernel.bin (до KERNEL_MAX_SECTORS*512 байт).
-;   LBA 4192+    — обычная FAT12-область (FAT-таблицы/root dir/данные:
-;                   EFI/BOOT/BOOTX64.EFI, /kernel.bin — для UEFI-пути).
+; v1.0.0 план — переход с "суперфлоппи" (FAT12 прямо в LBA0, без таблицы
+; разделов) на настоящий MBR. Разметка ВСЕГО disk.img теперь:
+;   LBA 0            — MBR: 446 байт boot-кода (STAGE1_CODE, 0x000..0x1BD)
+;                       + таблица из 2 партиций (0x1BE..0x1FD: ESP 0xEF,
+;                       LufiraFS 0xDA) + сигнатура 0x55AA.
+;   LBA 1..64        — stage2.bin (до STAGE2_MAX_SECTORS*512 байт): real
+;                       mode A20/unreal/E820/VESA/диск, переход в
+;                       protected/long mode.
+;   LBA 65..96       — legacy_main.bin (до LEGACY_MAIN_MAX_SECTORS*512
+;                       байт), freestanding x86-64 C, собран и грузится
+;                       как плоский бинарник (objcopy -O binary), как
+;                       kernel.bin ниже — не линкуется со stage2.asm
+;                       напрямую, т.к. 16-битный real-mode код stage2
+;                       адресуется сегмент-относительно (org 0,
+;                       CS=STAGE2_LOAD_SEGMENT), что несовместимо с
+;                       обычным плоско-адресным ELF-линковщиком. Поэтому
+;                       собирается отдельно и грузится своим INT13-чтением.
+;   LBA 97           — заголовок ядра: magic 'LFKR' (4 байта) + little-
+;                       endian размер (4 байта), затем raw kernel.bin.
+;   LBA 98..4095     — kernel.bin (до KERNEL_MAX_SECTORS*512 байт) — этот
+;                       диапазон 1..4095 ("MBR-зазор", та же идея, что у
+;                       GRUB) лежит ДО первой партиции и никакой файловой
+;                       системой не затрагивается.
+;   LBA 4096..12287  — партиция 1 (ESP, FAT12: EFI/BOOT/BOOTX64.EFI,
+;                       /kernel.bin — для UEFI-пути).
+;   LBA 12288+       — партиция 2 (LufiraFS).
 ;
-; Reserved sector count в BPB (mkfs.fat -R) должен быть >= RESERVED_SECTORS
-; ниже — иначе эти LBA попадут в настоящую FAT-область и образ будет
-; испорчен при следующей сборке.
+; RESERVED_SECTORS ниже — это размер MBR-зазора (ESP_GAP_SIZE в
+; LufiraOS-Builder/lufira_builder/config.py, байт/512) — KERNEL_HEADER_LBA
+; + 1 + KERNEL_MAX_SECTORS обязан ему точно равняться, иначе либо
+; затирается начало партиции 1, либо впустую пропадает место зазора.
 
 STAGE2_LOAD_SEGMENT equ 0x1000      ; физический адрес 0x10000
 STAGE2_PHYS_BASE    equ (STAGE2_LOAD_SEGMENT << 4) ; = 0x10000, см. использование в stage2.asm
@@ -39,8 +46,8 @@ LEGACY_MAIN_LOAD_ADDR    equ 0x00090000 ; <1MB — обычное INT13, unreal 
 
 KERNEL_HEADER_LBA    equ (LEGACY_MAIN_LBA + LEGACY_MAIN_MAX_SECTORS) ; 97
 KERNEL_MAGIC         equ 0x524B464C ; 'LFKR' little-endian в памяти
-KERNEL_MAX_SECTORS   equ 4094
-RESERVED_SECTORS     equ (KERNEL_HEADER_LBA + 1 + KERNEL_MAX_SECTORS) ; 4192
+KERNEL_MAX_SECTORS   equ 3998
+RESERVED_SECTORS     equ (KERNEL_HEADER_LBA + 1 + KERNEL_MAX_SECTORS) ; 4096 = ESP_GAP_SIZE/512
 
 ; Физические адреса временных буферов/таблиц реал-мод стадии stage2 —
 ; подобраны так, чтобы не пересекаться друг с другом и с самим stage2.bin

@@ -13,8 +13,8 @@ typedef struct {
 } EFI_MEMORY_DESCRIPTOR;
 
 // Инициализация PMM: карта памяти, регион ядра и ДОПОЛНИТЕЛЬНЫЙ регион для
-// резервирования (reserved_base==0 — только ядро). Используется для
-// bi->FATImageBase — см. комментарий в pmm.c.
+// резервирования (reserved_base==0/reserved_size==0 — ничего, кроме ядра,
+// не резервировать; с v1.0.0 kernel.c всегда зовёт с 0, 0 — см. pmm.c).
 void pmm_init(void* memory_map, uint64_t map_size, uint32_t desc_size,
               uint64_t kernel_base, uint64_t kernel_size,
               uint64_t reserved_base, uint64_t reserved_size);

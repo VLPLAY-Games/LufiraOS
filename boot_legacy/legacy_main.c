@@ -151,8 +151,17 @@ void legacy_main(LegacyHandoff* h) {
 
     bi.KernelBase = h->kernel_base;
     bi.KernelSize = h->kernel_size;
-    bi.FATImageBase = h->fatimage_base;
-    bi.FATImageSize = h->fatimage_size;
+    // v1.0.0 план: ядро больше не читает LufiraFS из предзагруженного в
+    // RAM образа диска (см. kernel/kernel.c — теперь lufirafs_init() сам
+    // читает с диска через disk_read_sectors(), найдя партицию по MBR) —
+    // поля оставлены в BootInfo нулевыми (не удалены — изменение layout
+    // структуры рискованно без необходимости, см. тот же приём в
+    // boot/boot_modes/*.c на UEFI-стороне). stage2.asm всё ещё грузит
+    // h->fatimage_base/size (см. layout.inc, FATIMAGE_*) — просто больше
+    // никем не используется ниже; не трогаем это отдельно, лишняя работа
+    // при загрузке, но безвредная.
+    bi.FATImageBase = 0;
+    bi.FATImageSize = 0;
 
     bi.RsdpAddress = find_rsdp();
     bi.SmbiosAddress = find_smbios();

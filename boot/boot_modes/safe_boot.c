@@ -3,7 +3,6 @@
 #include "system/memory.h"
 #include "system/graphics.h"
 #include "system/tables.h"
-#include "loaders/fat_loader.h"
 #include "system/exit_boot.h"
 #include "loaders/kernel_loader.h"
 
@@ -35,20 +34,15 @@ VOID SafeBoot(BootInfo *bi, EFI_HANDLE ImageHandle) {
     // System tables
     ScanSystemTables(bi);
     
-    // FAT image (optional in safe mode, just try)
-    EFI_LOADED_IMAGE *LoadedImage;
-    uefi_call_wrapper(gBS->HandleProtocol, 3, ImageHandle, &LoadedImageProtocol, (VOID**)&LoadedImage);
-    
-    EFI_BLOCK_IO_PROTOCOL *BlockIo = NULL;
-    GetBlockIO(LoadedImage, &BlockIo);
-    
-    if (BlockIo && BlockIo->Media) {
-        LoadFATImage(BlockIo, bi, FALSE, FALSE, NULL, 0, 0, 0);
-    } else {
-        bi->FATImageBase = 0;
-        bi->FATImageSize = 0;
-    }
-    
+    // v1.0.0 план: ядро больше не читает LufiraFS из предзагруженного в
+    // RAM образа диска (см. kernel/kernel.c — lufirafs_init() сам читает
+    // с диска через свой AHCI/NVMe/ATA-драйвер, найдя партицию по MBR) —
+    // LoadFATImage()/GetBlockIO() (fat_loader.c) больше не нужны ни в
+    // одном boot mode, поля оставлены в BootInfo нулевыми (не удалены —
+    // менять layout структуры без необходимости рискованно).
+    bi->FATImageBase = 0;
+    bi->FATImageSize = 0;
+
     // Exit boot services and boot
     ExitBootServicesWrapper(bi, ImageHandle);
     

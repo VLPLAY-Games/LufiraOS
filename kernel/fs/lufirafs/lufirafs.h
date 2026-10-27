@@ -4,18 +4,28 @@
 #include "fs/vfs/vfs.h"
 
 // In-memory состояние смонтированной LufiraFS. Единственный экземпляр на
-// систему (extern lufirafs_t lufirafs в kernel.c): весь диск отражён в
-// память при загрузке, запись идёт в эту копию, на диск сбрасывается через
-// dirty-битовую карту (lufirafs_sync()).
+// систему (extern lufirafs_t lufirafs в kernel.c).
+//
+// v1.0.0 план: в RAM целиком держим ТОЛЬКО метаданные (image/image_size —
+// [0, sb.data_start) блоков: суперблок + битовая карта + таблица inode) —
+// малы и не растут с размером диска. Блоки ДАННЫХ (содержимое файлов,
+// записи каталогов, косвенные блоки) в RAM не держим вообще — читаются/
+// пишутся по требованию прямо через disk_read_sectors()/disk_write_sectors()
+// (см. lufirafs.c, read_data_block()/write_data_block()), без кеша.
+// Запись метаданных по-прежнему отслеживается dirty-битовой картой и
+// сбрасывается на диск через lufirafs_sync().
 typedef struct {
-    uint8_t *image;          // указатель на начало РЕГИОНА этой ФС в RAM
-    uint32_t image_size;     // байт в регионе
+    uint8_t *image;          // метаданные ([0, sb.data_start) блоков) в RAM
+    uint32_t image_size;     // байт в fs->image (sb.data_start * block_size)
     uint32_t lba_offset;     // смещение региона в АБСОЛЮТНЫХ LBA реального
-                              // диска — нужно, чтобы lufirafs_sync() писал
-                              // грязные блоки по правильным адресам через
-                              // disk_write_sectors() (см. kernel/drivers/disk)
+                              // диска (начало партиции LufiraFS, см.
+                              // drivers/disk/mbr.c) — и откуда lufirafs_init()
+                              // сам читает метаданные, и куда lufirafs_sync()/
+                              // блоки данных пишут через drivers/disk.
     lufirafs_superblock_t sb;
-    uint8_t *dirty_bitmap;    // 1 бит на блок ВСЕГО региона (kmalloc'd)
+    uint8_t *dirty_bitmap;    // 1 бит на блок МЕТАДАННЫХ (data_start блоков,
+                              // kmalloc'd) — блоки данных сюда не входят,
+                              // пишутся сразу (см. выше).
     // Курсор alloc_block() — НЕ персистентный (не пишется на диск, просто
     // sb.data_start после lufirafs_init()). Без него каждый alloc_block()
     // сканировал битовую карту заново от data_start, так что запись
@@ -28,7 +38,11 @@ typedef struct {
     uint32_t next_free_block;
 } lufirafs_t;
 
-int lufirafs_init(lufirafs_t *fs, void *image, uint32_t image_size, uint32_t lba_offset);
+// lba_offset — начало партиции LufiraFS в абсолютных LBA реального диска
+// (см. drivers/disk/mbr.c, вызывать после disk_init()) — lufirafs_init()
+// сам читает суперблок+метаданные через disk_read_sectors(), никакого
+// предзагруженного образа в RAM больше не нужно.
+int lufirafs_init(lufirafs_t *fs, uint32_t lba_offset);
 extern int lufirafs_mounted; // 1 после успешного lufirafs_init() — для devmode.c/klog.c
 
 // Курсор чтения каталога.

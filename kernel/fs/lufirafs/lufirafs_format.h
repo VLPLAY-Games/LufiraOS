@@ -20,12 +20,12 @@
 
 #include <stdint.h>
 
-// UEFI умеет читать только FAT12/16/32, поэтому первые LUFIRAFS_ESP_SIZE
-// байт диска — FAT-раздел (ESP) с /EFI/BOOT/BOOTX64.EFI и /kernel.bin, а
-// остальное занимает LufiraFS. fat_loader.c грузит весь диск с LBA 0 одним
-// куском, так что ядру достаточно прибавить это смещение к
-// bi->FATImageBase. Значение общее для kernel и mkfs — расхождение значит,
-// что mkfs отформатирует не тот регион, что читает ядро.
+// Размер партиции 1 (ESP, FAT12 — /EFI/BOOT/BOOTX64.EFI и /kernel.bin) в
+// MBR-разметке диска (v1.0.0 план — см. LufiraOS-Builder/lufira_builder/
+// config.py, ESP_SIZE и _write_mbr()). Ядро саму ESP не трогает (её не
+// монтирует и не читает — LufiraFS находит себя по MBR-партиции, см.
+// drivers/disk/mbr.c), константа здесь чисто для документации/проверки
+// совпадения значений между kernel и mkfs при расхождении формата.
 #define LUFIRAFS_ESP_SIZE     (4u * 1024u * 1024u)
 
 #define LUFIRAFS_MAGIC        0x31534C4Fu   // "OLS1" по байтам little-endian

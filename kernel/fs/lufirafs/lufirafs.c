@@ -1,8 +1,25 @@
 // Драйвер LufiraFS — собственная файловая система ядра, независимая от FAT
-// (см. формат диска в lufirafs_format.h). Персистентность как у FAT: весь
-// диск загружен в RAM единым куском (fs->image), запись отслеживается
-// битовой картой "грязных" блоков и сбрасывается на диск через drivers/disk
-// в lufirafs_sync()/lufirafs_flush().
+// (см. формат диска в lufirafs_format.h).
+//
+// v1.0.0 план: раньше весь диск грузился в RAM единым куском бутлоадером
+// (суперфлоппи, bi->FATImageBase) — теперь lufirafs_init() сам читает с
+// диска через drivers/disk (после MBR-поиска своей партиции, см.
+// drivers/disk/mbr.c). В RAM целиком остаются ТОЛЬКО метаданные —
+// суперблок + битовая карта + таблица inode (fs->image, [0, data_start)
+// блоков) — они малы и НЕ растут с размером диска (bitmap ~1 бит/блок,
+// таблица inode фиксированного размера, см. LUFIRAFS_INODE_COUNT), в
+// отличие от самих данных файлов. Запись метаданных отслеживается битовой
+// картой "грязных" блоков, как раньше (lufirafs_sync()/lufirafs_flush()).
+//
+// Блоки ДАННЫХ (block >= sb.data_start — содержимое файлов, записи
+// каталогов, косвенные блоки) в RAM не держим вообще: read_data_block()/
+// write_data_block() читают/пишут их по требованию напрямую через
+// disk_read_sectors()/disk_write_sectors(), без кеша (write-through) — это
+// и снимает прежний потолок "размер диска ограничен доступным RAM на
+// момент загрузки". Временный буфер под блок — ВСЕГДА kmalloc/kfree, не
+// стек: LUFIRAFS_BLOCK_SIZE (8192 байт) на кадр стека слишком много
+// относительно KERNEL_STACK_SIZE (16KB, process.h) при возможной
+// рекурсии (lufirafs_du_blocks()).
 #include "lufirafs.h"
 #include "system/mm/pmm.h"
 #include "system/mm/heap.h"
@@ -14,12 +31,16 @@
 
 int lufirafs_mounted = 0;
 
+// ===== Метаданные (суперблок/битовая карта/таблица inode) — в RAM, как раньше =====
+
 static inline uint8_t* get_block_ptr(lufirafs_t *fs, uint32_t block) {
+    // Валиден ТОЛЬКО для метаданных (block < fs->sb.data_start) — fs->image
+    // теперь покрывает только их, не блоки данных.
     return fs->image + (uint64_t)block * LUFIRAFS_BLOCK_SIZE;
 }
 
 static void mark_dirty(lufirafs_t *fs, uint32_t block) {
-    if (block >= fs->sb.total_blocks) return;
+    if (block >= fs->sb.data_start) return; // блоки данных пишутся сразу, не через dirty-карту
     fs->dirty_bitmap[block / 8] |= (uint8_t)(1u << (block % 8));
 }
 
@@ -29,8 +50,6 @@ static void write_superblock(lufirafs_t *fs) {
     memcpy(fs->image, &fs->sb, sizeof(fs->sb));
     mark_dirty(fs, 0);
 }
-
-// ===== Битовая карта блоков данных =====
 
 static inline uint8_t* block_bitmap_ptr(lufirafs_t *fs) {
     return fs->image + (uint64_t)fs->sb.bitmap_start * LUFIRAFS_BLOCK_SIZE;
@@ -50,6 +69,22 @@ static void block_bitmap_set(lufirafs_t *fs, uint32_t block, int used) {
     mark_dirty(fs, bitmap_block);
 }
 
+// ===== Блоки ДАННЫХ — напрямую с диска, без кеша в RAM =====
+
+static int read_data_block(lufirafs_t *fs, uint32_t block, void *out_buf) {
+    if (block < fs->sb.data_start || block >= fs->sb.total_blocks) return -1;
+    uint32_t sectors_per_block = LUFIRAFS_BLOCK_SIZE / 512;
+    uint32_t lba = fs->lba_offset + block * sectors_per_block;
+    return disk_read_sectors(lba, (uint8_t)sectors_per_block, out_buf);
+}
+
+static int write_data_block(lufirafs_t *fs, uint32_t block, const void *buf) {
+    if (block < fs->sb.data_start || block >= fs->sb.total_blocks) return -1;
+    uint32_t sectors_per_block = LUFIRAFS_BLOCK_SIZE / 512;
+    uint32_t lba = fs->lba_offset + block * sectors_per_block;
+    return disk_write_sectors(lba, (uint8_t)sectors_per_block, buf);
+}
+
 static uint32_t alloc_block(lufirafs_t *fs) {
     // Сначала от курсора до конца региона (общий случай — растущий файл на
     // диске без дыр), затем от data_start до курсора (подбирает блоки,
@@ -62,8 +97,16 @@ static uint32_t alloc_block(lufirafs_t *fs) {
         for (uint32_t b = start; b < end; b++) {
             if (!block_bitmap_test(fs, b)) {
                 block_bitmap_set(fs, b, 1);
-                memset(get_block_ptr(fs, b), 0, LUFIRAFS_BLOCK_SIZE);
-                mark_dirty(fs, b);
+
+                uint8_t *zero = (uint8_t*)kmalloc(LUFIRAFS_BLOCK_SIZE);
+                if (!zero) {
+                    block_bitmap_set(fs, b, 0); // откатываем — не смогли обнулить блок
+                    return 0;
+                }
+                memset(zero, 0, LUFIRAFS_BLOCK_SIZE);
+                write_data_block(fs, b, zero);
+                kfree(zero);
+
                 if (fs->sb.free_blocks > 0) fs->sb.free_blocks--;
                 write_superblock(fs);
                 fs->next_free_block = b + 1;
@@ -81,7 +124,7 @@ static void free_data_block(lufirafs_t *fs, uint32_t block) {
     write_superblock(fs);
 }
 
-// ===== Таблица inode =====
+// ===== Таблица inode (метаданные — в RAM, как раньше) =====
 
 int lufirafs_read_inode(lufirafs_t *fs, uint32_t ino, lufirafs_inode_t *out) {
     if (!fs || !out || ino == 0 || ino > fs->sb.inode_count) return -1;
@@ -139,8 +182,10 @@ static void free_inode_slot(lufirafs_t *fs, uint32_t ino) {
 
 // Возвращает номер block_index-го блока данных inode (0-based). create=1 —
 // при отсутствии выделяет новый блок (и, если нужно, косвенный блок) и
-// прописывает указатель на него в inode/косвенном блоке. inode передаётся
-// и читается, и (при create) пишется вызывающей стороной отдельно.
+// прописывает указатель на него в inode/косвенном блоке (читает косвенный
+// блок с диска, мутирует один указатель, сразу пишет обратно — никакого
+// отложенного кеша для блоков данных, см. module comment). inode
+// передаётся и читается, и (при create) пишется вызывающей стороной отдельно.
 static uint32_t inode_get_block(lufirafs_t *fs, lufirafs_inode_t *inode, uint32_t block_index, int create) {
     if (block_index < LUFIRAFS_DIRECT_BLOCKS) {
         if (inode->direct[block_index] == 0 && create) {
@@ -161,14 +206,22 @@ static uint32_t inode_get_block(lufirafs_t *fs, lufirafs_inode_t *inode, uint32_
         inode->indirect = ib;
     }
 
-    uint32_t *iptrs = (uint32_t*)get_block_ptr(fs, inode->indirect);
-    if (iptrs[idx] == 0 && create) {
+    uint8_t *buf = (uint8_t*)kmalloc(LUFIRAFS_BLOCK_SIZE);
+    if (!buf) return 0;
+    if (read_data_block(fs, inode->indirect, buf) != 0) { kfree(buf); return 0; }
+
+    uint32_t *iptrs = (uint32_t*)buf;
+    uint32_t result = iptrs[idx];
+    if (result == 0 && create) {
         uint32_t nb = alloc_block(fs);
-        if (!nb) return 0;
-        iptrs[idx] = nb;
-        mark_dirty(fs, inode->indirect);
+        if (nb) {
+            iptrs[idx] = nb;
+            write_data_block(fs, inode->indirect, buf);
+            result = nb;
+        }
     }
-    return iptrs[idx];
+    kfree(buf);
+    return result;
 }
 
 // ===== Копирование ограниченного по длине имени (strncpy в lib/string.h нет) =====
@@ -186,18 +239,23 @@ static int lookup_in_dir(lufirafs_t *fs, uint32_t dir_ino, const char *name, uin
     if (lufirafs_read_inode(fs, dir_ino, &dir) != 0) return -1;
     if (dir.mode != LUFIRAFS_MODE_DIR) return -1;
 
+    uint8_t *buf = (uint8_t*)kmalloc(LUFIRAFS_BLOCK_SIZE);
+    if (!buf) return -1;
+
     uint32_t nblocks = (dir.size + LUFIRAFS_BLOCK_SIZE - 1) / LUFIRAFS_BLOCK_SIZE;
     for (uint32_t b = 0; b < nblocks; b++) {
         uint32_t bn = inode_get_block(fs, &dir, b, 0);
-        if (!bn) continue;
-        lufirafs_dirent_t *ents = (lufirafs_dirent_t*)get_block_ptr(fs, bn);
+        if (!bn || read_data_block(fs, bn, buf) != 0) continue;
+        lufirafs_dirent_t *ents = (lufirafs_dirent_t*)buf;
         for (uint32_t i = 0; i < LUFIRAFS_DIRENTS_PER_BLOCK; i++) {
             if (ents[i].inode != 0 && strcmp(ents[i].name, name) == 0) {
                 *out_ino = ents[i].inode;
+                kfree(buf);
                 return 0;
             }
         }
     }
+    kfree(buf);
     return -1;
 }
 
@@ -205,30 +263,38 @@ static int add_dirent(lufirafs_t *fs, uint32_t dir_ino, const char *name, uint32
     lufirafs_inode_t dir;
     if (lufirafs_read_inode(fs, dir_ino, &dir) != 0) return -1;
 
+    uint8_t *buf = (uint8_t*)kmalloc(LUFIRAFS_BLOCK_SIZE);
+    if (!buf) return -1;
+
     uint32_t nblocks = (dir.size + LUFIRAFS_BLOCK_SIZE - 1) / LUFIRAFS_BLOCK_SIZE;
 
     for (uint32_t b = 0; b < nblocks; b++) {
         uint32_t bn = inode_get_block(fs, &dir, b, 0);
-        if (!bn) continue;
-        lufirafs_dirent_t *ents = (lufirafs_dirent_t*)get_block_ptr(fs, bn);
+        if (!bn || read_data_block(fs, bn, buf) != 0) continue;
+        lufirafs_dirent_t *ents = (lufirafs_dirent_t*)buf;
         for (uint32_t i = 0; i < LUFIRAFS_DIRENTS_PER_BLOCK; i++) {
             if (ents[i].inode == 0) {
                 ents[i].inode = entry_ino;
                 copy_name(ents[i].name, name, LUFIRAFS_MAX_NAME);
-                mark_dirty(fs, bn);
+                write_data_block(fs, bn, buf);
+                kfree(buf);
                 return 0;
             }
         }
     }
 
-    // Свободного слота нет — растим каталог на один блок.
+    // Свободного слота нет — растим каталог на один блок (alloc_block()
+    // уже обнулил его содержимое на диске, buf обнуляем тоже перед put'ом
+    // первой записи).
     uint32_t bn = inode_get_block(fs, &dir, nblocks, 1);
-    if (!bn) return -1;
+    if (!bn) { kfree(buf); return -1; }
 
-    lufirafs_dirent_t *ents = (lufirafs_dirent_t*)get_block_ptr(fs, bn);
+    memset(buf, 0, LUFIRAFS_BLOCK_SIZE);
+    lufirafs_dirent_t *ents = (lufirafs_dirent_t*)buf;
     ents[0].inode = entry_ino;
     copy_name(ents[0].name, name, LUFIRAFS_MAX_NAME);
-    mark_dirty(fs, bn);
+    write_data_block(fs, bn, buf);
+    kfree(buf);
 
     dir.size = (nblocks + 1) * LUFIRAFS_BLOCK_SIZE;
     lufirafs_write_inode(fs, dir_ino, &dir);
@@ -239,20 +305,25 @@ static int remove_dirent(lufirafs_t *fs, uint32_t dir_ino, const char *name) {
     lufirafs_inode_t dir;
     if (lufirafs_read_inode(fs, dir_ino, &dir) != 0) return -1;
 
+    uint8_t *buf = (uint8_t*)kmalloc(LUFIRAFS_BLOCK_SIZE);
+    if (!buf) return -1;
+
     uint32_t nblocks = (dir.size + LUFIRAFS_BLOCK_SIZE - 1) / LUFIRAFS_BLOCK_SIZE;
     for (uint32_t b = 0; b < nblocks; b++) {
         uint32_t bn = inode_get_block(fs, &dir, b, 0);
-        if (!bn) continue;
-        lufirafs_dirent_t *ents = (lufirafs_dirent_t*)get_block_ptr(fs, bn);
+        if (!bn || read_data_block(fs, bn, buf) != 0) continue;
+        lufirafs_dirent_t *ents = (lufirafs_dirent_t*)buf;
         for (uint32_t i = 0; i < LUFIRAFS_DIRENTS_PER_BLOCK; i++) {
             if (ents[i].inode != 0 && strcmp(ents[i].name, name) == 0) {
                 ents[i].inode = 0;
                 ents[i].name[0] = '\0';
-                mark_dirty(fs, bn);
+                write_data_block(fs, bn, buf);
+                kfree(buf);
                 return 0;
             }
         }
     }
+    kfree(buf);
     return -1;
 }
 
@@ -274,21 +345,27 @@ int lufirafs_readdir(lufirafs_dir_t *dir, lufirafs_dirent_t *out) {
     uint32_t total_entries =
         ((inode.size + LUFIRAFS_BLOCK_SIZE - 1) / LUFIRAFS_BLOCK_SIZE) * LUFIRAFS_DIRENTS_PER_BLOCK;
 
+    uint8_t *buf = (uint8_t*)kmalloc(LUFIRAFS_BLOCK_SIZE);
+    if (!buf) return -1;
+
+    int result = -1;
     while (dir->index < total_entries) {
         uint32_t block_index = dir->index / LUFIRAFS_DIRENTS_PER_BLOCK;
         uint32_t entry_index = dir->index % LUFIRAFS_DIRENTS_PER_BLOCK;
         dir->index++;
 
         uint32_t bn = inode_get_block(fs, &inode, block_index, 0);
-        if (!bn) continue;
+        if (!bn || read_data_block(fs, bn, buf) != 0) continue;
 
-        lufirafs_dirent_t *ents = (lufirafs_dirent_t*)get_block_ptr(fs, bn);
+        lufirafs_dirent_t *ents = (lufirafs_dirent_t*)buf;
         if (ents[entry_index].inode != 0) {
             *out = ents[entry_index];
-            return 0;
+            result = 0;
+            break;
         }
     }
-    return -1;
+    kfree(buf);
+    return result;
 }
 
 // ===== Разрешение путей =====
@@ -500,6 +577,9 @@ int lufirafs_read(lufirafs_t *fs, uint32_t ino, uint32_t offset, void *buf, uint
     if (offset >= inode.size) return 0;
     if (offset + count > inode.size) count = inode.size - offset;
 
+    uint8_t *block_buf = (uint8_t*)kmalloc(LUFIRAFS_BLOCK_SIZE);
+    if (!block_buf) return -1;
+
     uint32_t remaining = count;
     uint32_t pos = offset;
     uint8_t *dst = (uint8_t*)buf;
@@ -511,13 +591,17 @@ int lufirafs_read(lufirafs_t *fs, uint32_t ino, uint32_t offset, void *buf, uint
         if (chunk > remaining) chunk = remaining;
 
         uint32_t bn = inode_get_block(fs, &inode, block_index, 0);
-        if (bn == 0) memset(dst, 0, chunk);
-        else memcpy(dst, get_block_ptr(fs, bn) + block_off, chunk);
+        if (bn == 0 || read_data_block(fs, bn, block_buf) != 0) {
+            memset(dst, 0, chunk);
+        } else {
+            memcpy(dst, block_buf + block_off, chunk);
+        }
 
         dst += chunk;
         pos += chunk;
         remaining -= chunk;
     }
+    kfree(block_buf);
     return (int)count;
 }
 
@@ -527,6 +611,9 @@ int lufirafs_write(lufirafs_t *fs, uint32_t ino, uint32_t offset, const void *bu
     lufirafs_inode_t inode;
     if (lufirafs_read_inode(fs, ino, &inode) != 0) return -1;
     if ((uint64_t)offset + count > LUFIRAFS_MAX_FILE_SIZE) return -1;
+
+    uint8_t *block_buf = (uint8_t*)kmalloc(LUFIRAFS_BLOCK_SIZE);
+    if (!block_buf) return -1;
 
     uint32_t remaining = count;
     uint32_t pos = offset;
@@ -544,11 +631,20 @@ int lufirafs_write(lufirafs_t *fs, uint32_t ino, uint32_t offset, const void *bu
             uint32_t written = count - remaining;
             if (offset + written > inode.size) inode.size = offset + written;
             lufirafs_write_inode(fs, ino, &inode);
+            kfree(block_buf);
             return written > 0 ? (int)written : -1;
         }
 
-        memcpy(get_block_ptr(fs, bn) + block_off, src, chunk);
-        mark_dirty(fs, bn);
+        // Частичная запись блока (не с начала блока и/или не на весь
+        // блок) — сначала читаем текущее содержимое, иначе затёрли бы
+        // чужие байты того же блока; полный блок целиком читать не нужно.
+        if (block_off != 0 || chunk != LUFIRAFS_BLOCK_SIZE) {
+            if (read_data_block(fs, bn, block_buf) != 0) memset(block_buf, 0, LUFIRAFS_BLOCK_SIZE);
+            memcpy(block_buf + block_off, src, chunk);
+        } else {
+            memcpy(block_buf, src, chunk);
+        }
+        write_data_block(fs, bn, block_buf);
 
         src += chunk;
         pos += chunk;
@@ -557,6 +653,7 @@ int lufirafs_write(lufirafs_t *fs, uint32_t ino, uint32_t offset, const void *bu
 
     if (pos > inode.size) inode.size = pos;
     lufirafs_write_inode(fs, ino, &inode);
+    kfree(block_buf);
     return (int)count;
 }
 
@@ -570,17 +667,39 @@ int lufirafs_truncate(lufirafs_t *fs, uint32_t ino, uint32_t new_size) {
         uint32_t old_nblocks = (inode.size + LUFIRAFS_BLOCK_SIZE - 1) / LUFIRAFS_BLOCK_SIZE;
         uint32_t new_nblocks = (new_size + LUFIRAFS_BLOCK_SIZE - 1) / LUFIRAFS_BLOCK_SIZE;
 
-        for (uint32_t b = new_nblocks; b < old_nblocks; b++) {
+        // Индекс >= LUFIRAFS_DIRECT_BLOCKS живёт в косвенном блоке — читаем
+        // его ОДИН раз сюда, чистим нужные записи, пишем обратно один раз
+        // после цикла (не на каждую запись). Если с косвенным блоком не
+        // повезло (kmalloc/чтение не удались) — НЕ трогаем индексы из этого
+        // диапазона вообще: освободить блок данных, но оставить в
+        // косвенном блоке висячий указатель на него, было бы хуже (реальная
+        // порча ФС при следующем чтении), чем просто не уменьшить size до
+        // конца в этом редком случае.
+        int need_indirect = inode.indirect && old_nblocks > LUFIRAFS_DIRECT_BLOCKS && new_nblocks < old_nblocks;
+        uint8_t *ind_buf = NULL;
+        if (need_indirect) {
+            ind_buf = (uint8_t*)kmalloc(LUFIRAFS_BLOCK_SIZE);
+            if (ind_buf && read_data_block(fs, inode.indirect, ind_buf) != 0) { kfree(ind_buf); ind_buf = NULL; }
+        }
+        uint32_t loop_end = (need_indirect && !ind_buf)
+            ? (new_nblocks > LUFIRAFS_DIRECT_BLOCKS ? new_nblocks : LUFIRAFS_DIRECT_BLOCKS)
+            : old_nblocks;
+        int ind_dirty = 0;
+
+        for (uint32_t b = new_nblocks; b < loop_end; b++) {
             uint32_t bn = inode_get_block(fs, &inode, b, 0);
             if (!bn) continue;
             free_data_block(fs, bn);
             if (b < LUFIRAFS_DIRECT_BLOCKS) {
                 inode.direct[b] = 0;
-            } else if (inode.indirect) {
-                uint32_t *iptrs = (uint32_t*)get_block_ptr(fs, inode.indirect);
-                iptrs[b - LUFIRAFS_DIRECT_BLOCKS] = 0;
-                mark_dirty(fs, inode.indirect);
+            } else if (ind_buf) {
+                ((uint32_t*)ind_buf)[b - LUFIRAFS_DIRECT_BLOCKS] = 0;
+                ind_dirty = 1;
             }
+        }
+        if (ind_buf) {
+            if (ind_dirty) write_data_block(fs, inode.indirect, ind_buf);
+            kfree(ind_buf);
         }
 
         if (new_nblocks == 0 && inode.indirect) {
@@ -616,14 +735,22 @@ uint32_t lufirafs_du_blocks(lufirafs_t *fs, uint32_t ino) {
 
 // ===== Инициализация и синхронизация с диском =====
 
-int lufirafs_init(lufirafs_t *fs, void *image, uint32_t image_size, uint32_t lba_offset) {
-    if (!fs || !image) return -1;
+int lufirafs_init(lufirafs_t *fs, uint32_t lba_offset) {
+    if (!fs) return -1;
 
-    fs->image = (uint8_t*)image;
-    fs->image_size = image_size;
     fs->lba_offset = lba_offset;
+    uint32_t sectors_per_block = LUFIRAFS_BLOCK_SIZE / 512;
 
-    memcpy(&fs->sb, fs->image, sizeof(fs->sb));
+    // Суперблок — ровно один блок, читаем в стековый буфер (512*16=8192
+    // байт... нет, это ровно LUFIRAFS_BLOCK_SIZE — см. предупреждение в
+    // шапке файла про стек, 8192 байт здесь единственный раз, ДО того как
+    // что-либо ещё использует стек этого вызова глубоко, безопасно).
+    uint8_t sb_buf[LUFIRAFS_BLOCK_SIZE];
+    if (disk_read_sectors(lba_offset, (uint8_t)sectors_per_block, sb_buf) != 0) {
+        printf("[LufiraFS] Не удалось прочитать суперблок с диска (lba=%u)\n", lba_offset);
+        return -1;
+    }
+    memcpy(&fs->sb, sb_buf, sizeof(fs->sb));
 
     if (fs->sb.magic != LUFIRAFS_MAGIC) {
         printf("[LufiraFS] Bad magic 0x%lx (ожидался 0x%lx) — диск не отформатирован\n",
@@ -635,9 +762,32 @@ int lufirafs_init(lufirafs_t *fs, void *image, uint32_t image_size, uint32_t lba
         return -1;
     }
 
-    uint32_t dirty_bytes = (fs->sb.total_blocks + 7) / 8;
+    // Метаданные (суперблок+bitmap+inode table) — [0, data_start) блоков,
+    // малы и НЕ растут с размером диска (см. module comment) — читаем
+    // целиком в RAM, чанками по <=255 секторов (disk_read_sectors берёт
+    // sector_count как uint8_t).
+    fs->image_size = fs->sb.data_start * LUFIRAFS_BLOCK_SIZE;
+    fs->image = (uint8_t*)kmalloc(fs->image_size);
+    if (!fs->image) return -1;
+
+    uint32_t meta_sectors = fs->sb.data_start * sectors_per_block;
+    uint32_t done = 0;
+    while (done < meta_sectors) {
+        uint32_t remaining = meta_sectors - done;
+        uint8_t chunk = (remaining > 255) ? 255 : (uint8_t)remaining;
+        if (disk_read_sectors(lba_offset + done, chunk, fs->image + (uint64_t)done * 512) != 0) {
+            printf("[LufiraFS] Не удалось прочитать метаданные с диска\n");
+            kfree(fs->image);
+            return -1;
+        }
+        done += chunk;
+    }
+
+    // dirty-карта теперь только по метаданным (блоки данных пишутся сразу,
+    // см. module comment) — data_start блоков, не total_blocks.
+    uint32_t dirty_bytes = (fs->sb.data_start + 7) / 8;
     fs->dirty_bitmap = (uint8_t*)kmalloc(dirty_bytes);
-    if (!fs->dirty_bitmap) return -1;
+    if (!fs->dirty_bitmap) { kfree(fs->image); return -1; }
     memset(fs->dirty_bitmap, 0, dirty_bytes);
 
     fs->next_free_block = fs->sb.data_start;
@@ -652,7 +802,10 @@ void lufirafs_sync(lufirafs_t *fs) {
     uint32_t sectors_per_block = LUFIRAFS_BLOCK_SIZE / 512;
     uint32_t written = 0;
 
-    for (uint32_t b = 0; b < fs->sb.total_blocks; b++) {
+    // Только [0, data_start) — ровно то, что покрывает dirty_bitmap (см.
+    // lufirafs_init()); блоки данных сами себя пишут сразу, им тут делать
+    // нечего и выходить за это дело нельзя — dirty_bitmap под них не выделен.
+    for (uint32_t b = 0; b < fs->sb.data_start; b++) {
         if (fs->dirty_bitmap[b / 8] & (1u << (b % 8))) {
             uint32_t lba = fs->lba_offset + b * sectors_per_block;
             if (disk_write_sectors(lba, (uint8_t)sectors_per_block, get_block_ptr(fs, b)) == 0) {
@@ -663,7 +816,7 @@ void lufirafs_sync(lufirafs_t *fs) {
     }
 
     if (written > 0) {
-        DLOG("[LufiraFS] Synced %u block(s) to disk\n", written);
+        DLOG("[LufiraFS] Synced %u metadata block(s) to disk\n", written);
     }
 }
 

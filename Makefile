@@ -102,6 +102,7 @@ KERNEL_C_SOURCES := \
     $(KERNEL_DIR)/drivers/disk/disk.c \
 	$(KERNEL_DIR)/drivers/disk/ahci.c \
 	$(KERNEL_DIR)/drivers/disk/nvme.c \
+	$(KERNEL_DIR)/drivers/disk/mbr.c \
 	$(KERNEL_DIR)/drivers/usb/xhci.c \
 	$(KERNEL_DIR)/drivers/usb/usb_hid.c \
 	$(KERNEL_DIR)/drivers/input/input.c \

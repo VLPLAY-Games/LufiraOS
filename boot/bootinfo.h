@@ -17,6 +17,10 @@ typedef struct {
     uint64_t KernelSize;
     uint64_t RsdpAddress;
     uint64_t SmbiosAddress;
+    // v1.0.0 план: больше НЕ используются (всегда 0, см. boot_modes/*.c) —
+    // LufiraFS читается напрямую с диска ядром, не из предзагруженного
+    // образа. Оставлены нулевыми, не удалены — layout структуры должен
+    // совпадать с kernel/bootinfo.h байт-в-байт.
     uint64_t FATImageBase;
     uint64_t FATImageSize;
 } BootInfo;

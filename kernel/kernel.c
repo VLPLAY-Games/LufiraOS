@@ -13,6 +13,7 @@
 #include "drivers/console/console.h"
 #include "drivers/serial/serial.h"
 #include "drivers/disk/disk.h"
+#include "drivers/disk/mbr.h"
 #include "drivers/usb/xhci.h"
 #include "system/cpu/gdt.h"
 #include "system/cpu/idt.h"
@@ -299,16 +300,15 @@ void _start(BootInfo* bi) {
 
     initialize_console(bi);
 
-    // Читаем флаг режима разработчика по сырому образу диска ДО lufirafs_init()
-    // (см. devmode_probe_early()) — иначе решить, показывать ли лого вместо
-    // текстового лога, можно было бы только после монтирования ФС.
-    if (bi->FATImageBase && bi->FATImageSize > LUFIRAFS_ESP_SIZE) {
-        devmode_probe_early((void*)(bi->FATImageBase + LUFIRAFS_ESP_SIZE),
-                             (uint32_t)(bi->FATImageSize - LUFIRAFS_ESP_SIZE));
-    }
-    if (!devmode_is_enabled()) {
-        show_boot_logo();
-    }
+    // v1.0.0 план: решить "лого или текстовый лог" раньше было можно по
+    // сырому образу диска, предзагруженному бутлоадером в RAM (см. старый
+    // devmode_probe_early()) — теперь LufiraFS читается только с диска
+    // через disk_read_sectors() (см. drivers/disk/mbr.c, lufirafs.c), а
+    // значит и флаг devmode известен только ПОСЛЕ disk_init() ниже. Эти
+    // первые строки (GDT/TSS/IDT/PIC/PMM/paging/heap/ACPI/APIC/.../
+    // disk_init()) теперь ВСЕГДА печатаются как текстовый лог — лого (если
+    // devmode выключен) сменяет их позже, см. блок монтирования LufiraFS
+    // после disk_init().
 
     LOG_PENDING("Initializing GDT...");
     gdt_init();
@@ -327,12 +327,12 @@ void _start(BootInfo* bi) {
     LOG_DONE_OK("PIC remapped");
 
     // Порядок важен: сначала PMM, потом PAGING, потом HEAP.
-    // reserved_base/reserved_size покрывают весь диск, загруженный бутлоадером
-    // в RAM одним куском (bi->FATImageBase, см. fat_loader.c) — зачем это
-    // резервировать, см. подробности у pmm_init() в pmm.c.
+    // reserved_base/reserved_size (0, 0) — v1.0.0 план: бутлоадер больше не
+    // грузит весь диск в RAM одним куском (см. lufirafs.c), резервировать
+    // под это нечего; pmm_init() просто пропускает этот резерв, если size==0.
     pmm_init(bi->MemoryMap, bi->MemoryMapSize, bi->MemoryMapDescriptorSize,
                 bi->KernelBase, bi->KernelSize,
-                bi->FATImageBase, bi->FATImageSize);
+                0, 0);
     paging_init(bi);
     
     // Heap теперь статический - инициализируем сразу
@@ -343,30 +343,6 @@ void _start(BootInfo* bi) {
     // ядру тут нечего инициализировать (g_wm_pid/mailbox уже по умолчанию
     // 0/пустой, см. process.c).
 
-    // Бутлоадер грузит весь диск в RAM одним куском с LBA 0: первые
-    // LUFIRAFS_ESP_SIZE байт — FAT-раздел (ESP) прошивки, LufiraFS начинается
-    // сразу за ним. lba_offset нужен lufirafs_sync(), чтобы писать "грязные"
-    // блоки по правильным абсолютным LBA через drivers/disk (см. lufirafs.c).
-    if (bi->FATImageBase && bi->FATImageSize > LUFIRAFS_ESP_SIZE) {
-        LOG_PENDING("Mounting LufiraFS...");
-        void *fs_image = (void*)(bi->FATImageBase + LUFIRAFS_ESP_SIZE);
-        uint32_t fs_size = (uint32_t)(bi->FATImageSize - LUFIRAFS_ESP_SIZE);
-        uint32_t lba_offset = LUFIRAFS_ESP_SIZE / 512;
-        if (lufirafs_init(&lufirafs, fs_image, fs_size, lba_offset) == 0) {
-            LOG_DONE_OK("LufiraFS mounted");
-            devmode_init();
-            klog_init();
-            users_init();
-            if (users_root_has_default_password()) {
-                printf("[SECURITY] root password is still the default - run 'passwd -u root <new>' to change it\n");
-            }
-            klog("[BOOT] LufiraOS booting, devmode=%u", devmode_is_enabled());
-        } else {
-            LOG_DONE_FAIL("LufiraFS mount failed");
-        }
-    } else {
-        LOG_FAIL("No disk image provided");
-    }
 
     // apic_ok=1 — LAPIC+IOAPIC подняты по ACPI MADT и irq.c дальше работает
     // через них (apic_available()); 0 — остаёмся на легаси 8259, как раньше
@@ -471,13 +447,38 @@ void _start(BootInfo* bi) {
     // как и xhci_init() ниже, вызывается ПОСЛЕ sti/irq_enable(0): ahci.c/
     // nvme.c используют pit_wait_ms() (откалиброван по тикам PIT) вместо
     // голого спина.
-    //
-    // klog_init()/klog() выше (при монтировании LufiraFS) пишут на диск ещё
-    // ДО этой точки, то есть ДО sti, тем же legacy ATA PIO путём (ahci/nvme
-    // пока не инициализированы). Поэтому ata_wait_ready()/ata_wait_drq() в
-    // disk.c проверяют cpu_interrupts_active() перед вызовом pit_wait_ms(),
-    // а не предполагают, что прерывания уже включены.
     disk_init();
+
+    // v1.0.0 план: LufiraFS теперь монтируется ЗДЕСЬ, не раньше —
+    // lufirafs_init() сам читает с диска через disk_read_sectors()
+    // (см. lufirafs.c), чего до disk_init() просто не существует
+    // (g_ata_present/ahci_available()/nvme_available() ещё не установлены,
+    // см. disk.c — disk_read_sectors() до disk_init() гарантированно
+    // вернёт -1). Партицию находим сами по MBR (drivers/disk/mbr.c) —
+    // бутлоадер больше не передаёт ни образ диска в RAM, ни его смещение.
+    LOG_PENDING("Mounting LufiraFS...");
+    uint32_t lufirafs_lba = 0;
+    if (mbr_find_partition(MBR_PARTITION_TYPE_LUFIRAFS, &lufirafs_lba) == 0 &&
+        lufirafs_init(&lufirafs, lufirafs_lba) == 0) {
+        LOG_DONE_OK("LufiraFS mounted");
+        devmode_init();
+        klog_init();
+        users_init();
+        if (users_root_has_default_password()) {
+            printf("[SECURITY] root password is still the default - run 'passwd -u root <new>' to change it\n");
+        }
+        klog("[BOOT] LufiraOS booting, devmode=%u", devmode_is_enabled());
+    } else {
+        LOG_DONE_FAIL("LufiraFS mount failed");
+    }
+
+    // Лого (если devmode выключен) сменяет текстовый лог выше — раньше
+    // этот выбор был известен с самого начала загрузки (сырой образ диска
+    // уже лежал в RAM), теперь только после реального монтирования ФС, см.
+    // комментарий в начале _start().
+    if (!devmode_is_enabled()) {
+        show_boot_logo();
+    }
 
     // Требует уже тикающего таймера (pit_wait_ms() внутри сброса контроллера).
     //

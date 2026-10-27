@@ -3,7 +3,6 @@
 #include "system/memory.h"
 #include "system/graphics.h"
 #include "system/tables.h"
-#include "loaders/fat_loader.h"
 #include "system/exit_boot.h"
 #include "loaders/kernel_loader.h"
 
@@ -58,45 +57,15 @@ VOID QuickBoot(BootInfo *bi, EFI_HANDLE ImageHandle, BOOLEAN keepLogo, BOOLEAN a
     QUICK_UPDATE_STATUS(L"Scanning system tables...");
     ScanSystemTables(bi);
     
-    QUICK_UPDATE_STATUS(L"Loading FAT image...");
-    EFI_LOADED_IMAGE *LoadedImage;
-    uefi_call_wrapper(gBS->HandleProtocol, 3, ImageHandle, &LoadedImageProtocol, (VOID**)&LoadedImage);
-    
-    EFI_BLOCK_IO_PROTOCOL *BlockIo = NULL;
-    GetBlockIO(LoadedImage, &BlockIo);
-    
-    BOOLEAN fatError = FALSE;
-    
-    if (BlockIo && BlockIo->Media) {
-        LoadFATImage(BlockIo, bi, FALSE, animateSpinner, &spinIdx, statusRow, spinnerRow, cols);
-        if (bi->FATImageBase == 0) {
-            fatError = TRUE;
-            if (bi->FATImageSize == 0) {
-                uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 0);
-                SetColor(COLOR_RED, COLOR_BLACK);
-                Print(L"[ERROR] FAT: read error or allocation failed");
-            } else {
-                uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 0);
-                SetColor(COLOR_RED, COLOR_BLACK);
-                Print(L"[ERROR] FAT: unknown error");
-            }
-        }
-    } else {
-        fatError = TRUE;
-        uefi_call_wrapper(gST->ConOut->SetCursorPosition, 3, gST->ConOut, 0, 0);
-        SetColor(COLOR_RED, COLOR_BLACK);
-        if (!BlockIo)
-            Print(L"[ERROR] FAT: No Block I/O Protocol");
-        else if (!BlockIo->Media)
-            Print(L"[ERROR] FAT: No media present");
-        else
-            Print(L"[ERROR] FAT: Device not accessible");
-    }
-    
-    if (fatError) {
-        uefi_call_wrapper(gBS->Stall, 1, 2000000);
-    }
-    
+    // v1.0.0 план: ядро больше не читает LufiraFS из предзагруженного в
+    // RAM образа диска (см. kernel/kernel.c — lufirafs_init() сам читает
+    // с диска через свой AHCI/NVMe/ATA-драйвер, найдя партицию по MBR) —
+    // LoadFATImage()/GetBlockIO() (fat_loader.c) больше не нужны ни в
+    // одном boot mode, поля оставлены в BootInfo нулевыми (не удалены —
+    // менять layout структуры без необходимости рискованно).
+    bi->FATImageBase = 0;
+    bi->FATImageSize = 0;
+
     QUICK_UPDATE_STATUS(L"Starting kernel...");
     uefi_call_wrapper(gBS->Stall, 1, 1000000);
     

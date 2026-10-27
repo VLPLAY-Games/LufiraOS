@@ -25,9 +25,13 @@ typedef struct {
     uint64_t RsdpAddress;           // ACPI RSDP
     uint64_t SmbiosAddress;         // SMBIOS
     
-    // Файловая система
-    uint64_t FATImageBase;          // Адрес загруженного FAT образа в памяти
-    uint64_t FATImageSize;          // Размер FAT образа в байтах
+    // v1.0.0 план: больше НЕ используются (всегда 0) — LufiraFS теперь
+    // читается напрямую с диска (lufirafs_init(), drivers/disk/mbr.c), а
+    // не из предзагруженного бутлоадером в RAM образа. Поля оставлены
+    // нулевыми, а не удалены — менять layout структуры без необходимости
+    // рискованно (должна совпадать с boot/bootinfo.h байт-в-байт).
+    uint64_t FATImageBase;
+    uint64_t FATImageSize;
 } BootInfo;
 
 // Сигнатура точки входа ядра
